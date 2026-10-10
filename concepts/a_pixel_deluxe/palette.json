@@ -1,0 +1,52 @@
+[
+  {
+    "name": "Deep Water",
+    "hex": "#0d1b3a",
+    "role": "darkest water (vignette, bottom bands #0b1736), shadow side of all cool materials, HUD panel base"
+  },
+  {
+    "name": "Reef Blue",
+    "hex": "#13315c",
+    "role": "main background water: 12 clean hue-stepped bands from #1b4f80 (surface) to #0b1736 (floor), far towers, panel fill"
+  },
+  {
+    "name": "Dusk Mauve",
+    "hex": "#84506c",
+    "role": "masonry body (platforms, walls): deliberately desaturated and darker than the cast so heroes, bubbles and enemies read first"
+  },
+  {
+    "name": "Coral",
+    "hex": "#ff6f91",
+    "role": "Fizz (P1, ramp base #f4659a, belly peach #ffb38a), 1UP, logo FIZZ, menu highlight, coral polyps, sushi and barnacle warmth"
+  },
+  {
+    "name": "Sea-foam",
+    "hex": "#7ff0d4",
+    "role": "moss lips on platform tops (walkable-edge cue), Pop highlights, POP letters, plankton"
+  },
+  {
+    "name": "Bubble Aqua",
+    "hex": "#8be9ff",
+    "role": "bubble rims, 2UP, Pop body (ramp base #3fcfe6), caustics, god-rays"
+  },
+  {
+    "name": "Gold",
+    "hex": "#ffd166",
+    "role": "score digits, Nibbler brass, crown, thunder bubble, EXTEND gems, hi-score, the ceiling light shaft"
+  },
+  {
+    "name": "Ink",
+    "hex": "#1a0f2e",
+    "role": "outer outlines, letter outlines, deepest shadow (hue-shifted plum, never black)"
+  },
+  {
+    "name": "Lavender",
+    "hex": "#b78cff",
+    "role": "Pop gills, Jellop, Kraken King, hue-shifted shadows of warm colours"
+  },
+  {
+    "name": "Crimson",
+    "hex": "#e0324f",
+    "role": "ANGRY state (enemies turn crimson + steam), warning bubbles"
+  }
+]

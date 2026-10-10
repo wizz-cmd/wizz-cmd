@@ -4,3 +4,4 @@ backup/
 test/out/
 *.wav
 node_modules/
+concepts/**/*.png

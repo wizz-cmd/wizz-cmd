@@ -1,0 +1,12 @@
+[
+  { "name": "aqua",       "hex": "#3ed3d8", "role": "water family (sun-mint #98f4e6 at the surface -> turquoise #35c8e6 -> #25b0e6 -> cerulean #2283d8 -> #1f58b8 floor), the aqua rim light from below on every toy, bubble film (cyan end)" },
+  { "name": "deep",       "hex": "#1d3b6e", "role": "HUD chips and tagline pill (gradient #2c5399 -> #1a3772), menu label ink on the frosted pills, logo sticker outline (#26336e), caustic / vignette shadows" },
+  { "name": "coral",      "hex": "#f27f86", "role": "candy platforms: calm coral body (#ffa391 -> #f27f86 -> #c4546f, each slab drifts a little toward peach #ffb98a or bubblegum #ff7fb0), 1UP label #ff7a8a; deliberately lower chroma than Fizz / Crabbit so heroes and threats stay louder than the slabs" },
+  { "name": "lemon",      "hex": "#ffd45c", "role": "selected menu pill, HI SCORE label, score popups (inflated), Nibbler warning ring (#ffa81f), Springle crest / spring, sun glow tint (#fff8cd)" },
+  { "name": "lilac",      "hex": "#a98bff", "role": "Pop body (#aa9bff) and Jellop jelly, 2UP label, bubble film (lilac / magenta band), far-reef coral silhouettes (#c9b7ff)" },
+  { "name": "mint",       "hex": "#7fe3b0", "role": "Springle body family (#4fd682), logo Z, EXTEND bead, far-reef domes (#aef2e6), positive accents" },
+  { "name": "cream",      "hex": "#fff4e6", "role": "UI text, belly patches, logo sticker border, frosting caps (#fff0dc -> #ffd2b4), rice, god rays (#fffce1)" },
+  { "name": "ink",        "hex": "#24324f", "role": "glossy eyes, text on light chips, contact-shadow tint, thin contours" },
+  { "name": "sand-clay",  "hex": "#e8a47d", "role": "outer frame: walls, floor, ceiling (matte clay gradient #f7cf9f -> #e8a47d -> #c8766e) with pebble inlays, EXTEND wells (berry #703054 carved into it)" },
+  { "name": "bubblegum",  "hex": "#ff8fb8", "role": "Fizz body (gills #ff3f8e), P1 colour, logo F / P; angry state swaps the species colour for crimson #e8344f" }
+]

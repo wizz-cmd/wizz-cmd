@@ -1,0 +1,52 @@
+[
+  {
+    "name": "void",
+    "hex": "#05070f",
+    "role": "the night itself: screen black, bottom of the water gradient (#060d22 -> #050b1c -> #03070f -> #02040a), the opaque near-black body behind every creature, the glass-tube logo and the crystal slabs (#04060e), HUD ground"
+  },
+  {
+    "name": "abyss",
+    "hex": "#0b1a33",
+    "role": "deep-water reference tone: the top stop of the water gradient is abyss pushed ~78 % toward void (#060d22), so the frame reads near-black; the undarkened #0b1a33 only appears as its swatch on the cast sheet's palette strip"
+  },
+  {
+    "name": "cyan",
+    "hex": "#3cf2ff",
+    "role": "Pop / P2 / 2UP, the POP lettering and bubble-O, bubble thin-film (cyan end) and the 'empty' bubble tint, surface god-rays (additive 1-2 %), Bonefin's cold eye flame, P2's EXTEND letters, the pearl at the foot of the tower; pulled toward azure (#3fb0e6) for the platform crystal edges so structure never competes with the twins"
+  },
+  {
+    "name": "magenta",
+    "hex": "#ff3ea5",
+    "role": "Fizz / P1 / 1UP, the FIZZ lettering (toward violet at the bottom of each tube), sea-fan tufts on platform tops, P1's EXTEND letters and life pearls, bubble film (magenta band), Kraken tentacle tips; kept ~32 deg of hue away from the angry red"
+  },
+  {
+    "name": "lime",
+    "hex": "#b6ff3b",
+    "role": "Springle (the only green thing on screen), spring coil energy"
+  },
+  {
+    "name": "amber",
+    "hex": "#ffb23e",
+    "role": "Nibbler, HI SCORE, thunder bubble, Glimmer's lantern, Kraken's crown and eyes, trap warning stage 1 (bubble rim + film), score popups, the lit windows of the title tower"
+  },
+  {
+    "name": "violet",
+    "hex": "#8a5cff",
+    "role": "Jellop, Pop's gill plumes (violet + 20 % cyan), thin-film midtone in every bubble, lower half of the FIZZ tubes, Kraken royal purple = violet + 42 % magenta (#bb4fd9), bottom abyss tint; the giant background jellyfish are deliberately NOT violet (cobalt/teal, cobalt/violet, violet/magenta mixes) so they never merge with Jellop"
+  },
+  {
+    "name": "white-hot",
+    "hex": "#eaffff",
+    "role": "the hot core line of every neon stroke, the outer wall edge of the logo tubes, eyes and their highlights, specular streaks on bubbles/tubes/slabs, Bonefin's bones; the brightest few percent of any frame: hot strokes, highlights, never a large fill"
+  },
+  {
+    "name": "ember",
+    "hex": "#ff6a3d",
+    "role": "Crabbit and the fire bubble, the sushi topping (mixed with magenta); the ANGRY state pushes any hostile to crimson-red #ff2a2a (derived) with steam, slanted brows and a pulsing red heat halo"
+  },
+  {
+    "name": "cobalt",
+    "hex": "#3d7bff",
+    "role": "Glimmer the anglerfish, water bubble, lower half of the POP tubes, translucent platform body tint (#2a72b8), the giant left/right background jellyfish (mixed with cyan / violet), far fog"
+  }
+]
