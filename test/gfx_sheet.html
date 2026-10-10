@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GFX test page</title>
+<!--
+  GFX module test page (owned by the GFX agent). Loads src/00_shared.js + src/10_gfx.js as classic scripts
+  and exposes review helpers on window.T. Driven by test/gfx_render.mjs / test/gfx_preview.mjs.
+-->
+<style>
+  html, body { margin: 0; background: #0b0a14; color: #e8e6ff; font: 12px monospace; }
+  canvas { image-rendering: pixelated; display: block; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="256" height="224"></canvas>
+<script src="../src/00_shared.js"></script>
+<script src="../src/10_gfx.js"></script>
+<script>
+(() => {
+  const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  const T = window.T = {};
+  const t0 = performance.now();
+  GFX.init();
+  T.initMs = performance.now() - t0;
+  // Re-time init in isolation is not possible (idempotent) - test/gfx_perf.mjs measures a fresh page.
+
+  function blit(dst, src, x, y, zoom) {
+    const g = dst.getContext('2d'); g.imageSmoothingEnabled = false;
+    g.drawImage(src, 0, 0, src.width, src.height, x, y, src.width * zoom, src.height * zoom);
+  }
+
+  /** Rows of sprites: each name -> all its frames side by side at `zoom`, label above, 1x copy on the right. */
+  T.preview = (names, zoom = 8, bg = '#0d0b1a', opts = {}) => {
+    const flip = !!opts.flip, white = !!opts.white;
+    const rows = names.map((n) => {
+      const sz = GFX.size(n), fr = GFX.frames(n);
+      return { n, sz, fr };
+    });
+    const padX = 6, gap = 4;
+    let W = 0, H = 6;
+    for (const r of rows) {
+      r.y = H;
+      r.w = padX * 2 + r.fr * (r.sz.w * zoom + gap) + r.sz.w + 20;
+      W = Math.max(W, r.w);
+      H += 10 + r.sz.h * zoom + 8;
+    }
+    const cv = mk(Math.max(W, 120), H);
+    const g = cv.getContext('2d');
+    g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height);
+    for (const r of rows) {
+      if (GFX.text) GFX.text(g, r.n, padX, r.y, '#9ab', { shadow: false }); else { g.fillStyle = '#9ab'; g.font = '9px monospace'; g.textBaseline = 'top'; g.fillText(r.n, padX, r.y); }
+      const one = mk(r.sz.w, r.sz.h);
+      for (let f = 0; f < r.fr; f++) {
+        one.getContext('2d').clearRect(0, 0, r.sz.w, r.sz.h);
+        GFX.draw(one.getContext('2d'), r.n, f, 0, 0, { flip, white });
+        blit(cv, one, padX + f * (r.sz.w * zoom + gap), r.y + 10, zoom);
+      }
+      // 1x copies on the right, each frame
+      for (let f = 0; f < r.fr; f++) GFX.draw(g, r.n, f, padX + r.fr * (r.sz.w * zoom + gap) + 4 + f * (r.sz.w + 2), r.y + 10, { flip, white });
+    }
+    return cv;
+  };
+
+  /** Contact sheet: first frame (or frame `f`) of each sprite in a grid with `cols` columns. */
+  T.grid = (names, zoom = 8, cols = 4, bg = '#0d0b1a', f = 0) => {
+    const cell = Math.max(...names.map((n) => Math.max(GFX.size(n).w, GFX.size(n).h))) * zoom + 8;
+    const rows = Math.ceil(names.length / cols);
+    const cv = mk(cols * cell, rows * (cell + 10));
+    const g = cv.getContext('2d'); g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height);
+    names.forEach((n, i) => {
+      const x = (i % cols) * cell, y = Math.floor(i / cols) * (cell + 10);
+      const sz = GFX.size(n); const one = mk(sz.w, sz.h);
+      GFX.draw(one.getContext('2d'), n, f, 0, 0);
+      blit(cv, one, x + 4, y + 12, zoom);
+      if (GFX.text) GFX.text(g, n, x + 2, y + 1, '#9ab', { shadow: false });
+      GFX.draw(g, n, f, x + cell - sz.w - 2, y + 1);
+    });
+    return cv;
+  };
+
+  /** Sprites at 1x over a tile look, to judge contrast. */
+  T.sample = (levelIndex) => {
+    const map = T.sampleMap();
+    const cv = mk(256, 224);
+    const g = cv.getContext('2d');
+    g.fillStyle = GFX.theme(levelIndex).bg; g.fillRect(0, 0, 256, 224);
+    if (GFX.bgCanvas) g.drawImage(GFX.bgCanvas(levelIndex), 0, 16);
+    g.drawImage(GFX.levelCanvas(levelIndex, map), 0, 16);
+    return cv;
+  };
+
+  /** A sample arena with floating platforms, a floor gap, pillars - for tile looks. */
+  T.sampleMap = () => {
+    const rows = [];
+    for (let r = 0; r < 26; r++) rows.push('##' + '.'.repeat(28) + '##');
+    const setRow = (r, str) => { rows[r] = str; };
+    setRow(0, '#'.repeat(32));
+    setRow(25, '#'.repeat(14) + '....' + '#'.repeat(14));
+    setRow(0, '#'.repeat(14) + '....' + '#'.repeat(14));
+    const plat = (r, c0, c1) => { let s = rows[r].split(''); for (let c = c0; c <= c1; c++) s[c] = '#'; rows[r] = s.join(''); };
+    plat(21, 8, 13); plat(21, 18, 23);
+    plat(17, 2, 9); plat(17, 22, 29);
+    plat(17, 13, 18);
+    plat(13, 6, 13); plat(13, 18, 25);
+    plat(9, 2, 7); plat(9, 24, 29); plat(9, 11, 20);
+    plat(5, 8, 23);
+    // a pillar (2 rows thick block) to see stacked blocks
+    for (let r = 10; r < 13; r++) { plat(r, 14, 17); }
+    return rows;
+  };
+
+  /** A mock gameplay frame (256x224) for a level look: HUD, tiles, both players, enemies, bubbles, food, specials. */
+  T.scene = (levelIndex, variant = 0) => {
+    const cv = mk(256, 224); const g = cv.getContext('2d');
+    const th = GFX.theme(levelIndex);
+    g.fillStyle = th.bg; g.fillRect(0, 0, 256, 224);
+    if (GFX.bgCanvas) g.drawImage(GFX.bgCanvas(levelIndex), 0, 16);
+    g.drawImage(GFX.levelCanvas(levelIndex, T.sampleMap()), 0, 16);
+    GFX.text(g, '1UP', 16, 0, '#ff8fc8'); GFX.text(g, 'HI SCORE', 128, 0, '#ff6a5e', { align: 'center' }); GFX.text(g, '2UP', 240, 0, '#74e6e8', { align: 'right' });
+    GFX.text(g, '0001200', 56, 8, '#fff', { align: 'right' }); GFX.text(g, '0050000', 152, 8, '#fff', { align: 'right' }); GFX.text(g, '0000000', 240, 8, '#fff', { align: 'right' });
+    GFX.text(g, String(levelIndex + 1).padStart(2, '0'), 8, 16, th.accent2, { align: 'center' });
+    const rowY = (r) => 16 + r * 8;
+    const P = (n, f, c, r, o) => GFX.draw(g, n, f, c * 8, rowY(r) - GFX.size(n).h, o);
+    // players on platforms
+    P('p1_walk', variant, 3, 17); P('p2_idle', variant, 25, 17, { flip: true });
+    P('p1_jump', 0, 10, 13); P('p2_shoot', variant & 1, 20, 21);
+    // enemies
+    P('nibbler_move', variant, 9, 21); P('crabbit_move', variant, 12, 13); P('jellop_move', variant, 22, 12);
+    P('springle_move', variant, 8, 5); P('glimmer_move', variant, 16, 9, { flip: true }); P('nibbler_angry', variant, 4, 9);
+    P('crabbit_angry', variant, 26, 9);
+    // bubbles + trapped enemy
+    const B = (n, f, x, y) => GFX.draw(g, n, f, x, y);
+    B('bubble', variant, 60, 60); B('bubble', 1, 74, 52); B('bubble_warn', variant, 90, 70); B('bubble_thunder', variant, 120, 80); B('bubble_fire', variant, 150, 60); B('bubble_water', variant, 180, 90); B('bubble_letter', variant, 200, 70);
+    B('jellop_trapped', variant, 100, 110); B('trap_overlay', 0, 100, 110);
+    B('crabbit_trapped', variant, 130, 120); B('trap_overlay', 1, 130, 120);
+    B('glimmer_trapped', variant, 160, 130); B('trap_overlay', 2, 160, 130);
+    B('bubble_shot', 2, 50, 130); B('bubble_pop', variant, 70, 130);
+    // items / food / effects
+    ['food_0', 'food_1', 'food_2', 'food_3', 'food_4', 'food_5', 'food_6', 'food_7'].forEach((n, i) => P(n, 0, 4 + i * 3, 21 - (i % 2) * 0 , i % 2 ? {} : {}));
+    ['pu_shoes', 'pu_pink', 'pu_blue', 'pu_gold', 'pu_parasol', 'pu_clock', 'pu_bomb', 'pu_heart'].forEach((n, i) => P(n, 0, 4 + i * 3, 9 - 0));
+    B('flame', variant, 120, 160); B('bolt', variant, 140, 130); B('fire_drop', variant, 180, 150); B('water_flow', variant, 200, 140); B('water_fall', variant, 208, 148); B('sparkle', variant, 40, 150); B('ink', variant, 60, 150); B('pebble', variant, 76, 150); B('spark', variant, 90, 150);
+    B('poof', variant, 224, 40);
+    return cv;
+  };
+
+  /** The whole cast (players, 5 enemies calm + angry) standing on a platform strip of each look in `idxs`, scaled. */
+  T.cast = (idxs, scale = 3) => {
+    const names = ['p1_walk', 'p2_walk', 'nibbler_move', 'crabbit_move', 'jellop_move', 'springle_move', 'glimmer_move', 'nibbler_angry', 'crabbit_angry', 'jellop_angry', 'springle_angry', 'glimmer_angry'];
+    const rowH = 36, W = 16 + names.length * 18 + 8;
+    const cv = mk(W * scale, rowH * idxs.length * scale); const out = cv.getContext('2d'); out.imageSmoothingEnabled = false;
+    idxs.forEach((li, k) => {
+      const tmp = mk(W, rowH), g = tmp.getContext('2d');
+      const map = []; for (let r = 0; r < 26; r++) map.push('##' + '.'.repeat(28) + '##');
+      map[0] = '#'.repeat(32); map[25] = '#'.repeat(32); map[3] = '##' + '#'.repeat(28) + '##';
+      const bg = GFX.bgCanvas ? GFX.bgCanvas(li) : null;
+      g.fillStyle = GFX.theme(li).bg; g.fillRect(0, 0, W, rowH);
+      if (bg) g.drawImage(bg, 0, 180, W, rowH, 0, 0, W, rowH);
+      // a strip of the look: two rows of tiles + wall edge
+      const look = GFX.levelCanvas(li, map);
+      g.drawImage(look, 0, 0, 16, 64, 0, -28, 16, 64);
+      g.drawImage(look, 64, 0, 16, 16, 0, 0, 0, 0);
+      for (let x = 0; x < W; x += 8) g.drawImage(look, 64, 8 * 3, 8, 8, x, 28, 8, 8);
+      names.forEach((n, i) => GFX.draw(g, n, k + i & 3, 16 + i * 18, 12));
+      out.drawImage(tmp, 0, k * rowH * scale, W * scale, rowH * scale);
+    });
+    return cv;
+  };
+
+  /** Several mock scenes in a 2-column contact sheet. */
+  T.scenes = (idxs, variant = 0, scale = 2) => {
+    const cols = 2, W = 256 * scale + 2, H = 224 * scale + 2;
+    const cv = mk(cols * W, Math.ceil(idxs.length / cols) * H);
+    const g = cv.getContext('2d'); g.fillStyle = '#333'; g.fillRect(0, 0, cv.width, cv.height);
+    idxs.forEach((i, k) => blit(cv, T.scene(i, variant), (k % cols) * W, Math.floor(k / cols) * H, scale));
+    return cv;
+  };
+
+  /** Close-ups of several level looks: region (x,y,w,h) of each look in `idxs`, scaled. Includes a sprite probe row. */
+  T.crops = (idxs, x, y, w, h, scale = 6, probe = true) => {
+    const cv = mk((w * scale + 4) * idxs.length, h * scale + (probe ? 40 : 0) + 4);
+    const g = cv.getContext('2d'); g.fillStyle = '#222'; g.fillRect(0, 0, cv.width, cv.height);
+    idxs.forEach((i, k) => {
+      const src = T.sample(i);
+      if (probe) {
+        const sg = src.getContext('2d');
+        const th = GFX.theme(i);
+        // sprites over this look at 1x for contrast checks
+        ['bubble', 'p1_idle', 'nibbler_move', 'jellop_move', 'bubble_thunder', 'trap_overlay', 'food_3'].forEach((n, j) => GFX.draw(sg, n, 0, 40 + j * 20, 96));
+      }
+      const tmp = mk(w, h); tmp.getContext('2d').drawImage(src, x, y, w, h, 0, 0, w, h);
+      blit(cv, tmp, k * (w * scale + 4) + 2, 2, scale);
+    });
+    return cv;
+  };
+
+  /** All 30 level looks as a 6x5 contact sheet (each scaled by `scale`). */
+  T.allLooks = (scale = 1) => {
+    const W = 256 * scale, H = 224 * scale;
+    const cv = mk(W * 5 + 6, H * 6 + 7);
+    const g = cv.getContext('2d'); g.fillStyle = '#222'; g.fillRect(0, 0, cv.width, cv.height);
+    for (let i = 0; i < 30; i++) {
+      const x = (i % 5) * (W + 1) + 1, y = Math.floor(i / 5) * (H + 1) + 1;
+      blit(cv, T.sample(i), x, y, scale);
+    }
+    return cv;
+  };
+
+  /** One theme (5 variants) larger. */
+  T.theme = (t, scale = 2) => {
+    const W = 256 * scale, H = 224 * scale;
+    const cv = mk(W * 3 + 4, H * 2 + 3);
+    const g = cv.getContext('2d'); g.fillStyle = '#222'; g.fillRect(0, 0, cv.width, cv.height);
+    for (let k = 0; k < 5; k++) {
+      const x = (k % 3) * (W + 1) + 1, y = Math.floor(k / 3) * (H + 1) + 1;
+      blit(cv, T.sample(t * 5 + k), x, y, scale);
+    }
+    return cv;
+  };
+
+  /** Font specimen: all glyphs, three sizes, several colours. */
+  T.font = (scale = 3) => {
+    const cv = mk(256, 144);
+    const g = cv.getContext('2d'); g.fillStyle = '#10101c'; g.fillRect(0, 0, 256, 144);
+    GFX.text(g, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 4, 4, '#fff');
+    GFX.text(g, '0123456789 !?.,:;-+=&\'"/()%*#<>_', 4, 14, '#ffe36b');
+    GFX.text(g, '© ♥ ★ ← →  abc lower', 4, 24, '#6fd8ff');
+    GFX.text(g, 'THE QUICK BROWN FOX JUMPS', 4, 36, '#ff8fc8');
+    GFX.text(g, 'OVER THE LAZY DOG 0123456789', 4, 46, '#9dff8a');
+    GFX.text(g, 'HI SCORE 1UP 2UP ROUND 12', 4, 58, '#ff6a5e');
+    GFX.text(g, 'EXTEND  GAME OVER  HURRY UP!', 4, 68, '#fff', { shadow: false });
+    GFX.text(g, 'ROUND 3', 4, 80, '#ffd23f', { scale: 2 });
+    GFX.text(g, 'READY! ♥★', 130, 80, '#fff', { scale: 2 });
+    GFX.text(g, 'PUSH START', 128, 104, '#fff', { align: 'center', scale: 2 });
+    GFX.text(g, '1234567890', 252, 124, '#ff9', { align: 'right' });
+    GFX.text(g, 'THE MOON PEARL IS SAFE!', 128, 134, '#fff', { align: 'center' });
+    return cv;
+  };
+
+  T.logo = (frames = [0, 20, 40, 60], bg = '#080614') => {
+    const cv = mk(256, 70 * frames.length);
+    const g = cv.getContext('2d'); g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height);
+    frames.forEach((t, i) => GFX.drawLogo(g, 128, i * 70 + 8, t));
+    return cv;
+  };
+
+  T.sheet = () => GFX.sheet();
+
+  /** Lint report from the module (non-contract). */
+  T.lint = () => (GFX._lint ? GFX._lint() : []);
+})();
+</script>
+</body>
+</html>

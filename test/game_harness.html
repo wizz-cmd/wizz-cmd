@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fizz &amp; Pop game harness</title>
+<!--
+  Game module test page: shared + the three STABLE STUBS (gfx/audio/levels) + the real src/40_game.js.
+  A fixed-step loop and keyboard input for both players are provided here (no Main). Append ?real=1 (optionally &base=../out/fix/game_priv/src/ to take the other modules from a snapshot) to
+  load the real GFX/AUDIO/LEVELS modules (or ?real=gfx for real GFX/AUDIO + stub LEVELS) instead of the stubs (used for screenshots/integration).
+  Test API: window.__t = { Game, GFX, AUDIO, LEVELS, C, U, S(), state(), start(opts), arena(opts), mkMap(spec),
+    useMap(i, map, def), step(n, inputs?), set(pi, obj), clear(), freeze(b), render(), shot-helpers }.
+-->
+<style>
+  html, body { margin: 0; background: #0b0a14; color: #e8e6ff; font: 12px monospace; }
+  #screen { display: block; width: 768px; height: 672px; image-rendering: pixelated; background: #000; margin: 8px auto; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="256" height="224"></canvas>
+<script src="../src/00_shared.js"></script>
+<script>
+  // choose stubs or the real modules; document.write keeps the classic-script global scope semantics
+  (function () {
+    const q = (location.search.match(/[?&]real=([a-z0-9]+)/) || [])[1];     // 1 = all real, gfx = real GFX+AUDIO with stub LEVELS
+    const base = ((location.search.match(/[?&]base=([^&]+)/) || [])[1] || '../src').replace(/\/?$/, '/');   // directory the real 10/20/30 modules come from
+    const mods = q === '1'
+      ? [base + '10_gfx.js', base + '20_audio.js', base + '30_levels.js']
+      : q === 'gfx'
+        ? [base + '10_gfx.js', base + '20_audio.js', 'stubs/levels_stub.js']
+        : ['stubs/gfx_stub.js', 'stubs/audio_stub.js', 'stubs/levels_stub.js'];
+    for (const m of mods) document.write('<script src="' + m + '"><\/script>');
+    const game = (location.search.match(/[?&]game=([^&]+)/) || [])[1] || '../src/40_game.js';   // &game=../backup/wave2/40_game.js runs the tests against another Game build
+    document.write('<script src="' + game + '"><\/script>');
+    document.write('<script src="game_harness_boot.js"><\/script>');
+  })();
+</script>
+</body>
+</html>

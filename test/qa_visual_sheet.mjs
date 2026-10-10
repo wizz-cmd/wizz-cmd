@@ -1,0 +1,10 @@
+import { launch, canvasFnShot, canvasShot, fp } from '../tools/harness.mjs';
+const t = await launch();
+const g = fp(t.page);
+await g.freeze(true);
+await canvasFnShot(t.page, 'out/qa/visual/sheet4.png', () => fz.GFX.sheet(), { scale: 4 });
+await canvasFnShot(t.page, 'out/qa/visual/sheet1.png', () => fz.GFX.sheet(), { scale: 1 });
+const sz = await g.evaluate(() => { const c = fz.GFX.sheet(); return [c.width, c.height]; });
+console.log('sheet size', sz);
+console.log('errors', t.errors);
+await t.close();

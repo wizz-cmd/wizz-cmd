@@ -1,0 +1,16 @@
+import { open, ev, sleep } from './qa_platform_r2_lib.mjs';
+const init = `(() => { const A = window.AudioContext; window.__acs = []; window.AudioContext = function (...a) { const c = new A(...a); window.__acs.push(c); return c; }; window.AudioContext.prototype = A.prototype; })();`;
+const t = await open({ initScript: init, autoplay: false });
+const st = () => t.page.evaluate(() => window.__acs.map((c) => c.state)[0]);
+await t.page.keyboard.press('Enter'); await sleep(400);
+await t.page.evaluate(() => window.__acs[0].suspend()); await sleep(200);
+console.log('after external suspend:', await st());
+await t.page.keyboard.press('KeyM'); await sleep(150); await t.page.keyboard.press('KeyM'); await sleep(300);
+console.log('after M,M (mute off/on):', await st());
+await ev(t.page, () => { fz.goto('title'); }); await sleep(200);
+await t.page.mouse.click(300, 250); await sleep(300);
+console.log('after clicking title menu items:', await st(), 'scene', await ev(t.page, () => fz.scene()));
+await ev(t.page, () => fz.start(1, 1, 1)); await sleep(300);
+await t.page.keyboard.press('Escape'); await sleep(400); await t.page.keyboard.press('Escape'); await sleep(400);
+console.log('after pause+resume (AUDIO.resume called):', await st());
+await t.close();

@@ -1,0 +1,16 @@
+import path from 'path';
+import { launch, canvasShot, fp, PROJECT } from '../tools/harness.mjs';
+const OUT = path.join(PROJECT, 'out/qa/visual/scenes');
+const t = await launch({ viewport: { width: 1280, height: 800 } });
+const g = fp(t.page);
+await g.start(1, 8, 3);
+await t.page.waitForTimeout(400);
+await t.page.keyboard.press('Escape'); await t.page.waitForTimeout(150);
+await t.page.keyboard.press('ArrowDown'); await t.page.waitForTimeout(100);
+await t.page.keyboard.press('Enter'); await t.page.waitForTimeout(600);
+console.log('scene', await g.scene(), JSON.stringify(await g.evaluate(() => fz._main.session())));
+await g.freeze(true);
+await g.goto('title'); await g.step(30);
+await canvasShot(t.page, path.join(OUT, 'title_continue.png'), { scale: 3 });
+console.log(t.errors);
+await t.close();

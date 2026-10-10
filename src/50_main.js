@@ -1,0 +1,2027 @@
+/* FIZZ & POP — 50_main.js  (Platform / UX layer, SPEC 2.5 + 3.5)
+ *
+ * Boot, canvas scaling, input (keyboard / gamepad / touch / virtual), the fixed-step loop,
+ * every non-gameplay scene, hi-scores, pause, mute, focus overlay and the window.__fizzpop hooks.
+ *
+ * SCENES   title -> (story ->) play -> [ending] -> entry -> scores -> title
+ *          title idles 10 s -> attract: story -> howto (6 pages: rules, controls, cast, treats, power-ups, bubbles) -> scores -> title.
+ *          ending = victory tableau (Fizz & Pop 2x around a glowing Moon Pearl) -> credits (rolling inside a clipped band above the
+ *          Fizz / Pearl / Pop tableau, key hint on its own plate) -> the cast waves.
+ *          'pause' is an overlay of the play scene (scene() keeps answering 'play'; see _main.paused()).
+ *
+ * INPUT    One sampler runs once per fixed update and produces
+ *            - two game pads {left,right,jump,fire,jumpPressed,firePressed} (rising edges computed HERE,
+ *              from the OR of keyboard + gamepad + touch (P1 only) + virtual input), and
+ *            - a UI view for menus: up/down/left/right (with auto-repeat), ok, alt, bksp, pause, mute, ...
+ *          A key pressed AND released between two ticks still counts for one tick (the `tapped` set;
+ *          touch buttons use the same trick), so quick taps and Playwright keyboard.press() are not lost.
+ *          step(n) uses ONLY virtual input (input.set); the real RAF loop ORs real + virtual.
+ *
+ * CHOICES where the SPEC is silent (documented here, all easy to change):
+ *   - Menu keys: arrows / W S navigate (left/up = previous, right/down = next), Enter / Space / Z / Q /
+ *     Shift / gamepad B,X,Start / touch BUBBLE confirm (`ok`); X / gamepad A / touch JUMP are the
+ *     alternative confirm (`alt`) and DELETE in the initials entry; P / Esc / Start = pause or back.
+ *     H = how-to-play, T = hi-score table (also menu rows on the title screen, so touch players reach them).
+ *   - Taps / clicks on the canvas: menu rows are tappable; on other scenes a tap counts as `ok`. On touch the
+ *     title and pause menus use a pitch of ~44 css px per row (drawn as button plates) and QUIT asks YES / NO.
+ *   - Touch-only devices (touch UI, no key press and no gamepad seen yet): no "2 PLAYERS" row, no "PUSH Q" blink
+ *     (joinHint ''), "TAP" wording everywhere.
+ *   - Join: only Q or pad 1 A/B join a P2 into a 1P game (Left Shift is just an extra P2 fire key once P2 plays).
+ *   - Pad slots: only usable pads (>= 4 buttons and 2 axes or "standard" mapping) take a player slot, at their first
+ *     button press, and keep it until they disconnect or the title screen is entered again (unplugging pad 0
+ *     never moves pad 1 onto P1; a new session starts with nobody assigned).
+ *   - QUIT in the pause menu abandons the game and returns to the title (no hi-score entry).
+ *   - Initials: A-Z and 0-9, 3 slots, 30 s per player (time out = the letters shown; the timer stands still while the
+ *     page is blurred / hidden), players enter one after the other. On a keyboard the letters / digits are TYPED (they are
+ *     letters here, never hotkeys: M does not mute, Z / Q / X confirm nothing); arrows cycle, Enter confirms, Backspace steps back.
+ *     Gamepad / touch keep: left / right cycle, bubble = OK, jump = back. A game that missed the table shows "YOUR SCORE" on the
+ *     scores screen; when localStorage is unavailable (sandboxed iframe) that screen says the table is kept for this visit only.
+ *     A player qualifies with score > 0 and a score above the 8th place (or a free slot). Ties rank below.
+ *   - Hi-scores live in U.store key 'scores' ({name,score,round} x8, sanitised on load).
+ *     The title shows CONTINUE ROUND n when a game in this page session reached round >= 6; it restarts at the
+ *     first round of that theme (1, 6, 11, ... ), score 0, same number of players (also after QUIT).
+ *   - "Not live" reasons (blur, hidden tab, iframe scrolled / display:none = IntersectionObserver, rAF stall > 700 ms)
+ *     are tracked as a set. The first one auto-pauses a running game and suspends the audio; the last one resumes the
+ *     audio. The game stays on its RESUME / QUIT menu (clicking the "click to play" overlay resumes it; the overlay then says
+ *     CLICK TO RESUME and the in-canvas menu is not drawn under it). A 'blur' that no 'focus' ever follows (host quirks) is
+ *     released by proof of life: a real key / pointer event, or the 500 ms poll once document.hasFocus() has been true for 1.5 s.
+ *     A manual pause plays sfx 'pause' and calls AUDIO.pause({suspend:false}) so menu sounds stay audible.
+ *   - Audio unlock: every gesture calls AUDIO.init() while the context is not running (iOS "interrupted", calls, Siri).
+ *   - Layout (fit): the page box minus the root padding (Artifact skeleton / safe areas) minus 16 px gutters. The scale is
+ *     the largest whole number of DEVICE pixels per game pixel when that uses >= 80 % of the achievable scale, else
+ *     "sharp bilinear": game drawn 1:1 offscreen, nearest-neighbour blown up into an integer-multiple backing store,
+ *     CSS-scaled smoothly. Touch: portrait stack (picture on top, pads right below, buttons grow with the free height)
+ *     or landscape side pads, whichever gives the larger picture (landscape needs vw >= 560); frames too small for
+ *     either (best scale < 1) overlay translucent pads on the picture margins. The desktop legend is hidden when it
+ *     would cost a scale step. Portrait: the page is as tall as the padded viewport (--page-h), the controls rest at its bottom
+ *     (thumb zone), the picture is centred in the space above them. The fixed side pads sit inside the measured root padding
+ *     (--pad-l/r/t/b), whichever mechanism the host uses for safe areas.
+ *   - Ambient bubbles (title, story, how-to, scores, entry) never cross text, sprites or panels: those scenes draw their content
+ *     on a transparent layer while every text run / sprite / plate / panel is recorded, then the bubbles are drawn under the
+ *     layer and fade out near every recorded rectangle (`layered`).
+ *   - The first touch on a device with a fine primary pointer flips the page to the touch layout; the tap is mapped through the
+ *     canvas rectangle taken BEFORE the flip, so it hits the row the finger was on.
+ *   - A scene that throws on 90 consecutive frames is abandoned for the title (soft-lock guard).
+ *   - Touch controls hide again when a real key is pressed on a device without a coarse pointer.
+ *   - Boot paints a LOADING frame first; window.__fizzpop exists at once and finishes the boot on first use.
+ *
+ * DEBUG   window.__fizzpop = the SPEC 3.5 contract (Game, GFX, AUDIO, LEVELS, C, U, scene, goto, input, freeze, step, start)
+ *          plus non-contract extras under `_main` (layout, fit, paused, setPaused, holds, scores, resetScores, session, toast,
+ *          touchMode, touchOnly, sceneTime, entry, padSlots, rows, confirmQuit, ambient, ambientReset, endingBand, howtoPage,
+ *          persistent). Every hook finishes the boot on first use. goto('pause') pauses a running game; input.set() additionally accepts
+ *          {up, down, pause}; goto('entry'|'ending') take {entries:[{pi,score,round}], res:{won,level,scores,players}}.
+ *
+ *  * The file ends with `Main.boot();` (SPEC build notes). Every DOM lookup is null-safe so the module also
+ * runs on minimal test pages that only contain <canvas id="screen">.
+ */
+const Main = (() => {
+  // ===================================================================================================
+  // Constants
+  // ===================================================================================================
+  const STEP_MS = 1000 / C.FPS;
+  const MAX_CATCHUP = 5;
+  const GUTTER = 16;                 // page side gutter in px (SPEC 2.5)
+  const V_PAD = 8;                   // page top/bottom padding in px
+  const LEGEND_GAP = 12;
+  const INT_FILL = 0.8;              // a whole-device-pixel scale is used when it reaches >= 80 % of the achievable scale
+  const MAX_BACKING = 4;             // sharp-bilinear backing store: at most 4x the logical size
+  const STALL_MS = 700;              // no rAF for this long (iframe hidden / throttled) = the page is not live
+  const TOUCH_ROW_CSS = 44;          // minimum tappable menu row height in css px
+  const PILL_H = 44, ROW_GAP = 10, CTRL_PAD = 8, BTN_GAP = 8, PAD_SPREAD = 16, BTN_MAX_W = 92, BTN_MAX_H = 150;
+  const LAND_MIN_VW = 560;           // landscape side pads need at least this much width
+  const IDLE_FRAMES = 10 * C.FPS;    // title idle time before the attract cycle
+  const STORY_FRAMES = 6 * C.FPS;    // story intro before play (the last, gold rules line is typed by frame ~214: >= 2 s to read it)
+  const ATTRACT_STORY_FRAMES = 5 * C.FPS;
+  const HOWTO_PAGE_FRAMES = 4 * C.FPS;
+  const ATTRACT_SCORES_FRAMES = 6 * C.FPS;
+  const AFTER_GAME_SCORES_FRAMES = 10 * C.FPS;
+  const INPUT_GUARD = 20;            // frames after a scene starts in which confirm presses are ignored
+  const PAD_DEAD = 0.45;             // analogue stick dead zone
+  const REPEAT_DELAY = 18, REPEAT_PERIOD = 5;
+  const ENTRY_SECONDS = 30, NAME_LEN = 3;
+  const NAME_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  const TOP_N = 8;
+  const CONTINUE_MIN_ROUND = 6;
+  const TOAST_FRAMES = 100;
+  const FAIL_LIMIT = 90;
+  const PAD_SOUND_HINT = 45;          // frames of "audio not running" before TAP FOR SOUND shows
+
+  const COL = {
+    fizz: '#ff6fae', pop: '#6fd8ff', gold: '#ffe36b', coral: '#ff6a5e', white: '#ffffff',
+    text: '#cfd3ff', dim: '#9aa1d8', dimmer: '#737ab8', green: '#7dff8a',
+  };
+  const PLAYER_COL = [COL.fizz, COL.pop];
+
+  const GAME_ACTIONS = ['left', 'right', 'jump', 'fire'];
+  const KEYS = [
+    { left: ['ArrowLeft'], right: ['ArrowRight'], jump: ['ArrowUp', 'KeyX'], fire: ['Space', 'KeyZ'] },
+    { left: ['KeyA'], right: ['KeyD'], jump: ['KeyW'], fire: ['KeyQ', 'ShiftLeft'] },
+  ];
+  const UI_KEYS = {
+    up: ['ArrowUp', 'KeyW'], down: ['ArrowDown', 'KeyS'], left: ['ArrowLeft', 'KeyA'], right: ['ArrowRight', 'KeyD'],
+    ok: ['Enter', 'NumpadEnter', 'Space', 'KeyZ', 'KeyQ', 'ShiftLeft'],
+    alt: ['KeyX'], bksp: ['Backspace'], pause: ['KeyP', 'Escape'], mute: ['KeyM'], help: ['KeyH'], table: ['KeyT'],
+  };
+  const UI_ACTIONS = Object.keys(UI_KEYS);
+  const REPEATING = new Set(['up', 'down', 'left', 'right']);
+  const HIT_ACTIONS = ['up', 'down', 'left', 'right', 'ok', 'alt', 'bksp', 'pause', 'help', 'table'];
+  const HANDLED_KEYS = new Set([].concat(...Object.values(KEYS).map((k) => [].concat(...Object.values(k))),
+    ...Object.values(UI_KEYS)));
+
+  const DEFAULT_SCORES = Object.freeze([
+    { name: 'FIZ', score: 32000, round: 12 }, { name: 'POP', score: 27500, round: 10 },
+    { name: 'KRK', score: 21000, round: 8 }, { name: 'NIB', score: 15500, round: 7 },
+    { name: 'CRB', score: 11000, round: 5 }, { name: 'JLP', score: 7500, round: 4 },
+    { name: 'SPR', score: 4200, round: 3 }, { name: 'GLM', score: 2000, round: 2 },
+  ]);
+
+  // ===================================================================================================
+  // State
+  // ===================================================================================================
+  // canvas = the visible #screen; lcanvas/ctx = the 256x224 logical canvas every scene draws into; vctx = the visible context
+  let canvas = null, ctx = null, vctx = null, lcanvas = null, rootEl = null, legendEl = null, touchEl = null, focusEl = null, soundBtn = null;
+  let booted = false, bootDone = false, frozen = false, paused = false, pauseSel = 0, confirmQuit = false, autoPaused = false;
+  let scene = 'title', sceneT = 0, sceneArgs = null;
+  let acc = 0, last = 0, lastRaf = 0, failStreak = 0;
+  let touchMode = false, touchSeen = false, coarse = false, keyboardSeen = false, padSeen = false;
+  let audioSynced = false, focusDismissed = false, deadAudioT = 0;
+  let toastMsg = '', toastT = 0, toastColor = COL.gold;
+  let pointerEvt = null;
+  let backing = 1;                                      // visible canvas backing-store multiplier (1 = 256x224)
+  let layout = { scale: 0, w: 0, h: 0, vw: 0, vh: 0, touch: false, land: false, mode: 'desk', sharp: false, m: 1 };
+  const holds = new Set();                              // reasons the page is not live: blur, hidden, offscreen, stall
+  const session = { reached: 0, lastPlayers: 1 };      // survives game-over, lives as long as the page
+  const reported = new Set();
+
+  const down = new Set();                               // physical keys currently held
+  const tapped = new Set();                             // keys (and touch buttons) pressed since the last real tick
+  const virt = [blankVirt(), blankVirt()];              // virtual (debug) input per player
+  const prevPad = [{}, {}];                             // previous combined pad state, for edge detection
+  const uiHeld = {};                                    // frames each UI action has been held
+  UI_ACTIONS.forEach((a) => { uiHeld[a] = 0; });
+
+  const touchPtr = new Map();                           // pointerId -> touch button key
+  const touchHeld = { left: false, right: false, jump: false, fire: false };
+  const touchTap = new Set();                           // direction/jump/fire taps since the last real tick
+  const typed = [];                                     // letters / digits typed on a keyboard while the name entry is up (R6)
+
+  function blankVirt() { return { left: false, right: false, jump: false, fire: false, up: false, down: false, pause: false }; }
+
+  // ===================================================================================================
+  // Small helpers
+  // ===================================================================================================
+  const fmtScore = (n, w = 6) => String(Math.max(0, Math.floor(n) || 0)).padStart(w, '0');
+  const ORD = ['1ST', '2ND', '3RD', '4TH', '5TH', '6TH', '7TH', '8TH'];
+  const ordinal = (i) => ORD[i] || (i + 1) + 'TH';
+  const ease = (t) => t * t * (3 - 2 * t);
+  const clamp01 = (v) => U.clamp(v, 0, 1);
+  const blink = (t, period = 30) => Math.floor(t / period) % 2 === 0;
+  // Exclusion recording (K1): while `rec` is an array, every text run, sprite, plate and panel a scene draws is noted as a rectangle
+  // [x0, y0, x1, y1]; the ambient bubbles then keep out of all of them (see `layered`).
+  let rec = null;
+  const note = (x0, y0, x1, y1) => { if (rec) rec.push([x0, y0, x1, y1]); };
+  const text = (s, x, y, color, opts) => {
+    if (rec) {
+      const sc = (opts && opts.scale) || 1, w = GFX.textWidth(s, sc), al = opts && opts.align;
+      const x0 = al === 'center' ? x - w / 2 : al === 'right' ? x - w : x;
+      note(x0, y, x0 + w, y + 8 * sc);
+    }
+    GFX.text(ctx, s, x, y, color, opts);
+  };
+  const ctext = (s, y, color, opts) => text(s, C.W / 2, y, color, Object.assign({ align: 'center' }, opts));
+  const spr = (name, frame, x, y, opts) => {
+    if (!GFX.has(name)) return;
+    if (rec) { const sz = GFX.size(name); note(x, y, x + sz.w, y + sz.h); }
+    GFX.draw(ctx, name, frame, x, y, opts);
+  };
+  const sprC = (name, frame, cx, y, opts) => { if (GFX.has(name)) spr(name, frame, cx - GFX.size(name).w / 2, y, opts); };
+  /** A translucent panel behind text (recorded, so the ambient bubbles keep out of it). */
+  const panel = (x, y, w, h, fill) => { note(x, y, x + w, y + h); ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); };
+  // Cast sprite id: most creatures animate as '<id>_move'; the Bonefin ghost is simply 'bonefin' (SPEC 3.1).
+  // (e2e fix: the how-to cast page and the credits asked for a non-existent 'bonefin_move' and drew nothing.)
+  const castSprite = (id) => (id === 'bonefin' ? id : id + '_move');
+  const touchLabel = () => (touchMode ? 'TAP' : 'ENTER');
+  /** A touch device with neither a key press nor a gamepad seen yet: P2 has no controls, so 2 PLAYERS / PUSH Q are hidden. */
+  const touchOnly = () => touchMode && !keyboardSeen && !padSeen;
+  const rgba = (r, g, b, a) => 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(3) + ')';
+
+  /** Sprite drawn k times larger (nearest neighbour) through a small scratch canvas. */
+  let bigScratch = null;
+  function sprBig(name, frame, x, y, k, opts) {
+    if (!GFX.has(name)) return;
+    const sz = GFX.size(name);
+    if (!bigScratch) { bigScratch = document.createElement('canvas'); }
+    if (bigScratch.width < sz.w || bigScratch.height < sz.h) { bigScratch.width = Math.max(bigScratch.width, sz.w); bigScratch.height = Math.max(bigScratch.height, sz.h); }
+    const g = bigScratch.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.clearRect(0, 0, bigScratch.width, bigScratch.height);
+    GFX.draw(g, name, frame, 0, 0, opts);
+    note(x, y, x + sz.w * k, y + sz.h * k);
+    ctx.drawImage(bigScratch, 0, 0, sz.w, sz.h, Math.round(x), Math.round(y), sz.w * k, sz.h * k);
+  }
+
+  /** Log an error once per distinct message; the loop keeps running. */
+  function reportError(where, e) {
+    const msg = where + ': ' + (e && e.message ? e.message : String(e));
+    if (reported.has(msg) || reported.size > 20) return;
+    reported.add(msg);
+    console.error('[Main] ' + msg + (e && e.stack ? '\n' + e.stack : ''));
+  }
+
+  const gradCache = {};
+  function backdrop(top, bottom) {
+    const key = top + bottom;
+    let g = gradCache[key];
+    if (!g) { g = ctx.createLinearGradient(0, 0, 0, C.H); g.addColorStop(0, top); g.addColorStop(1, bottom); gradCache[key] = g; }
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, C.W, C.H);
+  }
+
+  /** Round-1 tower walls + floor drawn from the theme tiles (the "frame" of title / story / howto). */
+  function towerFrame() {
+    let lc = null;
+    try { lc = GFX.levelCanvas(0, LEVELS[0].map); } catch (e) { reportError('towerFrame', e); }
+    if (!lc) return;
+    ctx.drawImage(lc, 0, 0, 16, 208, 0, C.MAP_Y, 16, 208);
+    ctx.drawImage(lc, 240, 0, 16, 208, 240, C.MAP_Y, 16, 208);
+    ctx.drawImage(lc, 16, 200, 224, 8, 16, C.MAP_Y + 200, 224, 8);
+  }
+
+  // ===================================================================================================
+  // Ambient bubbles (title, story, how-to, scores, entry, ending)
+  // ===================================================================================================
+  const ambient = (() => {
+    const list = [];
+    let r = null;
+    const KINDS = ['', '', '', '', 'nibbler', '', '', 'jellop', '', '', 'crabbit', '', '', 'springle'];
+    function reset() {                                    // the seeded start state (also a test hook: runs become comparable frame by frame)
+      r = U.rng(2024);
+      list.length = 0;
+      for (let i = 0; i < KINDS.length; i++) {
+        list.push({ x: r.int(4, 236), y: r.int(0, C.H), vy: r.float(0.22, 0.55), ph: r.float(0, 6.28), kind: KINDS[i] });
+      }
+    }
+    reset();
+    const SIZE = 16, FADE = 10;
+    const shown = [];                                     // x, y, alpha of every bubble the last draw() really drew (debug / tests)
+    return {
+      update() {
+        for (const b of list) {
+          b.y -= b.vy;
+          if (b.y < -20) { b.y = C.H + 6; b.x = r.int(4, 236); }
+        }
+      },
+      /** withEnemies=false: plain faint bubbles only (text-heavy scenes stay legible).
+       *  avoid = [[x0,y0,x1,y1], ...]: a bubble fades out as its 16 px box nears one of these rectangles (menu column, every text run,
+       *  panel and sprite of the scene) and is invisible whenever its box touches one: bubbles never cross text or panels (K1). */
+      draw(t, alpha = 0.7, withEnemies = true, avoid = null) {
+        shown.length = 0;
+        for (const b of list) {
+          const x = b.x + Math.sin(t / 38 + b.ph) * 5, y = b.y;
+          let a = alpha;
+          if (avoid) {
+            for (let i = 0; i < avoid.length && a > 0; i++) {
+              const q = avoid[i];
+              const dx = Math.max(q[0] - (x + SIZE), 0, x - q[2]), dy = Math.max(q[1] - (y + SIZE), 0, y - q[3]);
+              a = Math.min(a, alpha * clamp01((Math.sqrt(dx * dx + dy * dy) - 2) / FADE));
+            }
+            if (a < 0.03) continue;
+          }
+          shown.push(x, y, a);
+          if (withEnemies && b.kind && a > alpha * 0.9 && GFX.has(b.kind + '_trapped')) {
+            GFX.draw(ctx, b.kind + '_trapped', Math.floor(t / 12), x, y);
+            if (GFX.has('trap_overlay')) GFX.draw(ctx, 'trap_overlay', 0, x, y);
+          } else if (GFX.has('bubble')) GFX.draw(ctx, 'bubble', Math.floor(t / 14), x, y, { alpha: a });
+        }
+      },
+      shown: () => shown.slice(),
+      reset,
+    };
+  })();
+
+  /** Scenes with ambient bubbles draw their content on a transparent layer while every text run, sprite and panel is recorded;
+   *  the bubbles are then drawn over the backdrop but UNDER that layer, avoiding every recorded rectangle (plus `extra`). */
+  let layerCv = null, layerCtx = null, lastAvoid = [];
+  function layered(t, alpha, withEnemies, backFn, contentFn, extra) {
+    if (!layerCv) {
+      layerCv = document.createElement('canvas'); layerCv.width = C.W; layerCv.height = C.H;
+      layerCtx = layerCv.getContext('2d'); layerCtx.imageSmoothingEnabled = false;
+    }
+    const main = ctx, prevRec = rec;
+    backFn();
+    layerCtx.clearRect(0, 0, C.W, C.H);
+    const mine = [];
+    ctx = layerCtx; rec = mine;
+    try { contentFn(); } finally { ctx = main; rec = prevRec; }        // a throwing scene never leaves the recorder or the layer switched on
+    const avoid = extra ? mine.concat(extra) : mine;
+    lastAvoid = avoid;
+    ambient.draw(t, alpha, withEnemies, avoid);
+    main.drawImage(layerCv, 0, 0);
+  }
+
+  // ===================================================================================================
+  // Hi-scores
+  // ===================================================================================================
+  let scoresCache = null;
+
+  function cleanName(s) {
+    const n = String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, NAME_LEN);
+    return n.padEnd(NAME_LEN, 'A');
+  }
+
+  function sanitizeScores(raw) {
+    if (!Array.isArray(raw)) return null;
+    const out = [];
+    for (const r of raw) {
+      if (!r || typeof r !== 'object' || !Number.isFinite(+r.score)) continue;
+      out.push({ name: cleanName(r.name), score: Math.max(0, Math.floor(+r.score)), round: U.clamp(Math.floor(+r.round) || 1, 1, 30) });
+    }
+    if (!out.length) return null;
+    out.sort((a, b) => b.score - a.score);
+    return out.slice(0, TOP_N);
+  }
+
+  function loadScores() {
+    if (scoresCache) return scoresCache;
+    let t = null;
+    try { t = sanitizeScores(U.store.get('scores', null)); } catch (e) { reportError('loadScores', e); }
+    scoresCache = t || DEFAULT_SCORES.map((s) => ({ ...s }));
+    return scoresCache;
+  }
+
+  function refreshScores() { scoresCache = null; return loadScores(); }
+  function saveScores(list) { scoresCache = list; try { U.store.set('scores', list); } catch (e) { reportError('saveScores', e); } }
+  /** True when localStorage really keeps data (a sandboxed Artifact iframe without allow-same-origin throws): U.store then lives in memory only. */
+  function storagePersistent() {
+    try {
+      const k = '__fizzpop_probe';
+      window.localStorage.setItem(k, '1');
+      const ok = window.localStorage.getItem(k) === '1';
+      window.localStorage.removeItem(k);
+      return ok;
+    } catch (e) { return false; }
+  }
+  const topScore = () => loadScores()[0].score;
+  function qualifies(score) {
+    const t = loadScores();
+    return score > 0 && (t.length < TOP_N || score > t[t.length - 1].score);
+  }
+  /** Rank (0-based) a score would take; ties rank below existing entries. */
+  function rankOf(score) {
+    const t = loadScores();
+    const i = t.findIndex((e) => score > e.score);
+    return i < 0 ? t.length : i;
+  }
+  function insertScore(name, score, round) {
+    const t = loadScores().map((e) => ({ ...e }));
+    const idx = rankOf(score);
+    t.splice(idx, 0, { name: cleanName(name), score, round });
+    t.length = Math.min(t.length, TOP_N);
+    saveScores(t);
+    return idx < TOP_N ? idx : -1;
+  }
+
+  // ===================================================================================================
+  // Input
+  // ===================================================================================================
+  const padSlot = new Map();                            // gamepad.index -> player slot 0 | 1, stable until the pad disconnects
+  let prevJoin = false;
+
+  /** A pad worth listening to: phantom HID "gamepads" (receivers, dongles) report no buttons / axes (U20). */
+  const usablePad = (g) => !!(g && g.connected !== false && g.buttons && g.buttons.length >= 4 &&
+    ((g.axes && g.axes.length >= 2) || g.mapping === 'standard'));
+
+  function padState(g) {
+    const ax = (g.axes && g.axes[0]) || 0, ay = (g.axes && g.axes[1]) || 0;
+    const b = (n) => !!(g.buttons && g.buttons[n] && (g.buttons[n].pressed || g.buttons[n].value > 0.5));
+    const st = {
+      left: ax < -PAD_DEAD || b(14), right: ax > PAD_DEAD || b(15), up: ay < -PAD_DEAD || b(12), down: ay > PAD_DEAD || b(13),
+      jump: b(0), fire: b(1) || b(2), start: b(9),
+    };
+    st.active = st.left || st.right || st.up || st.down || st.jump || st.fire || st.start || b(3);
+    return st;
+  }
+
+  /** Poll the pads; returns [P1 state | null, P2 state | null]; never throws. A usable pad claims the lowest free
+   *  player slot at its first button press / stick push and keeps it until it disconnects (U20, U21). */
+  function readGamepads() {
+    const out = [null, null];
+    let list = [];
+    try { list = Array.from((navigator.getGamepads && navigator.getGamepads()) || []); } catch (e) { list = []; }
+    const present = new Set();
+    for (const g of list) {
+      if (!usablePad(g)) continue;
+      present.add(g.index);
+      const st = padState(g);
+      let slot = padSlot.get(g.index);
+      if (slot === undefined && st.active) {
+        const used = new Set(padSlot.values());
+        slot = !used.has(0) ? 0 : (!used.has(1) ? 1 : undefined);
+        if (slot !== undefined) { padSlot.set(g.index, slot); padSeen = true; }
+      }
+      if (slot !== undefined) out[slot] = st;
+    }
+    for (const idx of Array.from(padSlot.keys())) if (!present.has(idx)) padSlot.delete(idx);
+    return out;
+  }
+
+  function sampleInput(useReal) {
+    const gp = useReal ? readGamepads() : [null, null];
+    const held = (codes) => useReal && codes.some((c) => down.has(c) || tapped.has(c));
+    const touch = (k) => useReal && (touchHeld[k] || touchTap.has(k));
+    const gpAny = (k) => !!((gp[0] && gp[0][k]) || (gp[1] && gp[1][k]));
+    const virtAny = (k) => !!(virt[0][k] || virt[1][k]);
+
+    // --- the two game pads -------------------------------------------------------------------------
+    const pads = [];
+    for (let i = 0; i < 2; i++) {
+      const cur = {};
+      for (const a of GAME_ACTIONS) cur[a] = !!virt[i][a] || held(KEYS[i][a]) || !!(gp[i] && gp[i][a]) || (i === 0 && touch(a));
+      pads.push({
+        left: cur.left, right: cur.right, jump: cur.jump, fire: cur.fire,
+        jumpPressed: cur.jump && !prevPad[i].jump, firePressed: cur.fire && !prevPad[i].fire,
+      });
+      prevPad[i] = cur;
+    }
+    // Asking P2 to join a running 1P game: the Q key or pad 1 A / B (rising edge) -- NOT Left Shift, which sits next to
+    // P1's bubble key Z (U15). Virtual input for player 1's bubble counts as the Q key.
+    const joinCur = !!virt[1].fire || held(['KeyQ']) || !!(gp[1] && (gp[1].fire || gp[1].jump));
+    const joinHit = joinCur && !prevJoin;
+    prevJoin = joinCur;
+
+    // --- UI view (menus) ---------------------------------------------------------------------------
+    const lvl = {
+      up: held(UI_KEYS.up) || gpAny('up') || virtAny('up'),
+      down: held(UI_KEYS.down) || gpAny('down') || virtAny('down'),
+      left: held(UI_KEYS.left) || gpAny('left') || touch('left') || virtAny('left'),
+      right: held(UI_KEYS.right) || gpAny('right') || touch('right') || virtAny('right'),
+      ok: held(UI_KEYS.ok) || gpAny('fire') || gpAny('start') || touch('fire') || virtAny('fire'),
+      alt: held(UI_KEYS.alt) || gpAny('jump') || touch('jump') || virtAny('jump'),
+      bksp: held(UI_KEYS.bksp),
+      pause: held(UI_KEYS.pause) || gpAny('start') || virtAny('pause'),
+      mute: held(UI_KEYS.mute),
+      help: held(UI_KEYS.help),
+      table: held(UI_KEYS.table),
+    };
+    const p = {};
+    for (const a of UI_ACTIONS) {
+      uiHeld[a] = lvl[a] ? uiHeld[a] + 1 : 0;
+      const n = uiHeld[a];
+      p[a] = n === 1 || (REPEATING.has(a) && n > REPEAT_DELAY && (n - REPEAT_DELAY) % REPEAT_PERIOD === 0);
+    }
+    return {
+      pads, p, h: lvl, joinHit,
+      hit: HIT_ACTIONS.some((a) => p[a]),
+      heldAny: UI_ACTIONS.some((a) => lvl[a]) || (useReal && tapped.size > 0),
+    };
+  }
+
+  function onKeyDown(e) {
+    unlockAudio();
+    if (e.isTrusted) {
+      healBlur();
+      keyboardSeen = true;
+      if (touchSeen && !coarse) { touchSeen = false; refreshTouchMode(); }
+    }
+    if (scene === 'entry' && !e.ctrlKey && !e.metaKey && !e.altKey && /^[a-z0-9]$/i.test(e.key || '')) {
+      e.preventDefault();                                 // initials are typed: the letter is a letter, never a hotkey (M mutes, P pauses, ...)
+      if (!e.repeat && typed.length < 4) typed.push(e.key.toUpperCase());
+      if (focusEl && !focusEl.hidden) dismissFocus();
+      return;
+    }
+    if (e.ctrlKey || e.metaKey || e.altKey || !HANDLED_KEYS.has(e.code)) return;
+    e.preventDefault();                                   // no page scroll, no button activation
+    if (e.repeat) return;
+    if (!down.has(e.code)) tapped.add(e.code);
+    down.add(e.code);
+    if (focusEl && !focusEl.hidden) dismissFocus();      // any game key also wakes the overlay
+  }
+  function onKeyUp(e) { down.delete(e.code); }
+
+  function releaseAllInput() {
+    down.clear();
+    tapped.clear();
+    for (const id of Array.from(touchPtr.keys())) touchRelease(id, null);
+  }
+
+  // ---- touch buttons (pointer events, true multi-touch) ---------------------------------------------
+  const PAD_BUTTONS = new Set(['left', 'right', 'jump', 'fire']);
+  const pillOver = new Map();                           // pointerId -> is the finger still on its PAUSE / SOUND button?
+
+  function syncTouchUI() {
+    for (const k of Object.keys(touchHeld)) touchHeld[k] = false;
+    const pressed = new Set(touchPtr.values());
+    for (const k of pressed) if (k in touchHeld) touchHeld[k] = true;
+    if (touchEl) {
+      for (const b of touchEl.querySelectorAll('[data-k]')) b.classList.toggle('on', pressed.has(b.dataset.k));
+    }
+  }
+
+  function touchPress(id, k) {
+    if (!k) return;
+    touchPtr.set(id, k);
+    if (PAD_BUTTONS.has(k)) touchTap.add(k); else pillOver.set(id, true);
+    syncTouchUI();
+  }
+  /** Release a touch pointer. PAUSE / SOUND are rarely wanted and sit near the busiest button, so they act on release,
+   *  and only when the finger is still on that button (Ut2). `e` = the pointerup event (null for cancel / forced). */
+  function touchRelease(id, e) {
+    const k = touchPtr.get(id);
+    if (k === undefined) return;
+    touchPtr.delete(id);
+    if (!PAD_BUTTONS.has(k)) {
+      let on = pillOver.get(id) !== false;
+      if (e && e.type === 'pointerup' && (e.clientX || e.clientY)) {
+        try { on = buttonKey(document.elementFromPoint(e.clientX, e.clientY)) === k; } catch (err) { /* keep on */ }
+      }
+      if (e && e.type === 'pointerup' && on) tapped.add(k === 'pause' ? 'KeyP' : 'KeyM');
+    }
+    pillOver.delete(id);
+    syncTouchUI();
+  }
+  const buttonKey = (el) => { const b = el && el.closest ? el.closest('[data-k]') : null; return b ? b.dataset.k : null; };
+
+  function bindTouchControls() {
+    if (!touchEl) return;
+    touchEl.addEventListener('pointerdown', (e) => {
+      const k = buttonKey(e.target);
+      if (!k) return;
+      e.preventDefault();
+      noteTouch(e);
+      unlockAudio();
+      try { e.target.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointer ids, old browsers */ }   // a mouse has no implicit capture (U13)
+      touchPress(e.pointerId, k);
+    });
+    touchEl.addEventListener('pointermove', (e) => {
+      if (!touchPtr.has(e.pointerId)) return;
+      const cur = touchPtr.get(e.pointerId);
+      let k = null;
+      try { k = buttonKey(document.elementFromPoint(e.clientX, e.clientY)); } catch (err) { k = null; }
+      if (!PAD_BUTTONS.has(cur)) { pillOver.set(e.pointerId, k === cur); return; }
+      if (!PAD_BUTTONS.has(k)) k = null;                   // sliding between pad buttons works; PAUSE/SOUND never trigger by sliding
+      if (k) { if (k !== cur) { touchPtr.set(e.pointerId, k); touchTap.add(k); syncTouchUI(); } }
+      else touchRelease(e.pointerId, null);
+    });
+    // Release anywhere, also when a mouse is let go off the pad (U13).
+    for (const type of ['pointerup', 'pointercancel']) {
+      window.addEventListener(type, (e) => { if (touchPtr.has(e.pointerId)) touchRelease(e.pointerId, e); }, true);
+    }
+    touchEl.addEventListener('lostpointercapture', (e) => touchRelease(e.pointerId, null));
+    touchEl.addEventListener('contextmenu', (e) => e.preventDefault());
+  }
+
+  function noteTouch(e) {
+    if (e && e.pointerType === 'touch' && !touchSeen) { touchSeen = true; refreshTouchMode(); }
+  }
+  /** The first touch on a device that reports a fine pointer (touch-screen laptop, hybrid) flips the page into the touch layout. The
+   *  finger went down on the OLD layout, so the canvas rectangle is taken before that happens and the tap keeps its meaning (R1). */
+  let tapRect = null, tapFlipped = false;
+  function beforeGesture(e) {
+    try { tapRect = canvas ? canvas.getBoundingClientRect() : null; } catch (err) { tapRect = null; }
+    const was = touchMode;
+    noteTouch(e);
+    tapFlipped = touchMode !== was;
+    unlockAudio();
+    if (e && e.isTrusted) healBlur();                       // a real gesture is proof of life (R2)
+  }
+
+  function refreshTouchMode() {
+    const want = coarse || touchSeen;
+    if (want !== touchMode) { touchMode = want; }
+    fit();
+  }
+
+  // ---- canvas taps / clicks -----------------------------------------------------------------------------
+  function onCanvasPointer(e) {
+    const r = tapRect || canvas.getBoundingClientRect();
+    tapRect = null;
+    noteTouch(e);
+    unlockAudio();
+    if (!r.width || !r.height) return;
+    pointerEvt = { x: (e.clientX - r.left) * C.W / r.width, y: (e.clientY - r.top) * C.H / r.height, flipped: tapFlipped };
+    tapFlipped = false;
+  }
+
+  // ===================================================================================================
+  // Audio glue
+  // ===================================================================================================
+  /** Called from every gesture: while the context is not running (first visit, iOS "interrupted", a call, Siri) a gesture
+   *  must retry the resume INSIDE the handler. AUDIO.init() is idempotent and leaves a deliberate pause() alone (U3, U10). */
+  function unlockAudio() {
+    try { if (!AUDIO.ready()) AUDIO.init(); } catch (e) { reportError('AUDIO.init', e); }
+  }
+
+  /** Music that belongs to the current scene (play manages its own). Requests made before the first
+   *  gesture are dropped by the audio module, so we re-issue them once the context is ready. */
+  function syncSceneMusic() {
+    const s = scenes[scene];
+    if (s && s.music && !(scene === 'play')) { try { AUDIO.music(s.music); } catch (e) { reportError('AUDIO.music', e); } }
+  }
+
+  function toggleMute() {
+    let m = false;
+    try { m = AUDIO.toggleMuted(); } catch (e) { reportError('toggleMuted', e); }
+    toast(m ? 'SOUND OFF' : 'SOUND ON', m ? COL.coral : COL.green);
+    syncSoundButton();
+    return m;
+  }
+  function syncSoundButton() {
+    if (!soundBtn) return;
+    let m = false;
+    try { m = AUDIO.isMuted(); } catch (e) { /* ignore */ }
+    const v = m ? '1' : '0';
+    if (soundBtn.dataset.muted !== v) { soundBtn.dataset.muted = v; soundBtn.setAttribute('aria-pressed', m ? 'true' : 'false'); }
+  }
+  function toast(msg, color) { toastMsg = msg; toastT = TOAST_FRAMES; toastColor = color || COL.gold; }
+
+  /** Small crossed-out speaker, drawn by code at the top-right corner while muted. */
+  const MUTE_ICON = ['...w....', '..ww.r.r', 'www...r.', 'www..r.r', '..ww....', '...w....'];
+  function drawMuteIcon(x, y) {
+    for (let pass = 0; pass < 2; pass++) {
+      MUTE_ICON.forEach((row, ry) => {
+        for (let rx = 0; rx < row.length; rx++) {
+          const ch = row[rx];
+          if (ch === '.') continue;
+          ctx.fillStyle = pass === 0 ? 'rgba(0,0,0,0.8)' : (ch === 'r' ? '#ff5a5a' : '#ffffff');
+          ctx.fillRect(x + rx + (pass === 0 ? 1 : 0), y + ry + (pass === 0 ? 1 : 0), 1, 1);
+        }
+      });
+    }
+  }
+
+  function drawOverlays() {
+    let m = false;
+    try { m = AUDIO.isMuted(); } catch (e) { /* ignore */ }
+    if (m) drawMuteIcon(246, 4);
+    const y = scene === 'play' ? 16 : 212;
+    if (toastT > 0) {
+      const w = GFX.textWidth(toastMsg);
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(Math.round(C.W / 2 - w / 2) - 5, y - 1, w + 10, 10);
+      ctext(toastMsg, y, toastColor);
+    } else if (deadAudioT > PAD_SOUND_HINT && blink(deadAudioT, 24)) {
+      const s = touchMode ? 'TAP FOR SOUND' : 'PRESS A KEY FOR SOUND', w = GFX.textWidth(s);
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(Math.round(C.W / 2 - w / 2) - 5, y - 1, w + 10, 10);
+      ctext(s, y, COL.gold);
+    }
+  }
+
+  // ===================================================================================================
+  // Pause (overlay of the play scene) and the "page is live" bookkeeping
+  // ===================================================================================================
+  /** Manual pause: sfx 'pause' + a soft AUDIO.pause (music off, context keeps running so the menu sounds stay audible, U9).
+   *  Auto pause (the page is not live): a hard AUDIO.pause that suspends the context. */
+  function setPaused(on, auto) {
+    if (scene !== 'play' || paused === on) return;
+    paused = on;
+    pauseSel = 0;
+    confirmQuit = false;
+    const wasAuto = autoPaused;
+    autoPaused = on && !!auto;
+    try {
+      if (on) {
+        if (auto) AUDIO.pause();
+        else { AUDIO.sfx('pause'); AUDIO.pause({ suspend: false }); }
+      } else {
+        AUDIO.resume();
+        if (wasAuto) setTimeout(() => { try { AUDIO.sfx('menu_select'); } catch (e) { /* ignore */ } }, 70);   // the context may still be waking up
+        else AUDIO.sfx('menu_select');
+      }
+    } catch (e) { reportError('pause audio', e); }
+  }
+
+  /** The page stopped being "live" (window blur, hidden tab, iframe hidden / scrolled away, no animation frames). The first
+   *  reason pauses the game and suspends the audio; the last one to go away resumes the audio (not the game). */
+  function hold(reason) {
+    if (reason === 'blur' && !holds.has('blur')) blurAt = performance.now();
+    holds.add(reason);
+    releaseAllInput();
+    setPaused(true, true);
+    try { AUDIO.pause(); } catch (e) { /* ignore */ }
+  }
+  function release(reason) {
+    if (!holds.delete(reason) || holds.size) return;
+    try {
+      if (scene === 'play' && paused) AUDIO.pause({ suspend: false });   // still on the pause menu: keep its sounds audible
+      else AUDIO.resume();
+    } catch (e) { reportError('audio restore', e); }
+  }
+  const isHeld = () => holds.size > 0;
+  function documentFocused() { try { return document.hasFocus(); } catch (e) { return true; } }
+  /** A window 'blur' that no 'focus' ever follows (focus bouncing through a host frame, an extension popup) must not hold the game
+   *  and the audio for ever: proof of life (the document has focus, or a real key / pointer event arrived) releases it (R2). */
+  const BLUR_HEAL_MS = 1500;                              // a blur must be this old before the poll (not a real key / click) lets it go
+  let blurAt = 0;
+  function healBlur(minAge = 0) {
+    if (focusEl && !focusEl.hidden) return;               // the click-to-play overlay is up: its click / key handler resumes the round (U17)
+    if (holds.has('blur') && documentFocused() && performance.now() - blurAt >= minAge) {
+      focusDismissed = false;
+      release('blur');
+      updateFocusOverlay();
+    }
+  }
+
+  function onBlur() {
+    hold('blur');
+    if (focusEl && !document.hasFocus()) { focusDismissed = false; updateFocusOverlay(); }
+  }
+  function onFocus() {
+    focusDismissed = false;
+    updateFocusOverlay();
+    release('blur');
+  }
+
+  // ---- focus overlay ("Click to play" / "Tap to play") --------------------------------------------------------
+  function updateFocusOverlay() {
+    if (!focusEl) return;
+    let has = true;
+    try { has = document.hasFocus(); } catch (e) { has = true; }
+    const show = !(has || focusDismissed);
+    if (show) {                                           // wording follows the device and the situation
+      const mid = scene === 'play' && paused;            // a round that was paused by the blur: say so (P2)
+      const cta = focusEl.querySelector('.cta'), sub = focusEl.querySelector('small');
+      const c = mid ? (autoPaused ? (touchMode ? 'TAP TO RESUME' : 'CLICK TO RESUME') : (touchMode ? 'TAP TO FOCUS' : 'CLICK TO FOCUS'))
+        : (touchMode ? 'TAP TO PLAY' : 'CLICK TO PLAY');
+      const u = mid ? 'Game paused' : (touchMode ? 'Sound starts on your first tap' : 'Click here to focus the game and switch the sound on');
+      if (cta && cta.textContent !== c) cta.textContent = c;
+      if (sub && sub.textContent !== u) sub.textContent = u;
+    }
+    if (!focusEl.hidden === show) return;
+    focusEl.hidden = !show;
+  }
+  function dismissFocus() {
+    focusDismissed = true;
+    try { window.focus(); } catch (e) { /* ignore */ }
+    unlockAudio();
+    release('blur');                                       // a click / key press is proof of life even if no focus event comes
+    updateFocusOverlay();
+    if (autoPaused && !isHeld() && scene === 'play' && paused) setPaused(false);   // only the blur paused it: carry on (U17)
+  }
+
+  // ===================================================================================================
+  // Scenes
+  // ===================================================================================================
+  const scenes = {};
+
+  function gotoScene(name, args) {
+    const next = scenes[name];
+    if (!next) throw new Error('Main.goto: unknown scene ' + name);
+    const prev = scenes[scene];
+    if (prev && prev.leave) prev.leave(name);
+    scene = name;
+    sceneT = 0;
+    sceneArgs = args || null;
+    next.enter(sceneArgs);
+  }
+
+  function startGame(players, level) {
+    gotoScene('story', { next: { players, level, seed: (Date.now() & 0xffff) || 1 } });
+  }
+  const continueRound = () => Math.floor((Math.max(1, session.reached) - 1) / 5) * 5 + 1;
+
+  /** Called when Game.isOver(): decide where the result goes. */
+  function finishGame() {
+    const res = Game.result();
+    session.reached = Math.max(session.reached, res.level || 1);
+    session.lastPlayers = res.players === 2 ? 2 : 1;
+    const entries = [];
+    for (let i = 0; i < (res.players === 2 ? 2 : 1); i++) {
+      const s = (res.scores && res.scores[i]) || 0;
+      if (s > 0) entries.push({ pi: i, score: s, round: res.level || 1 });
+    }
+    if (res.won) gotoScene('ending', { res, entries });
+    else if (entries.length) gotoScene('entry', { entries });
+    else gotoScene('scores', { afterGame: true });
+  }
+
+  /** Hit-test helper for tappable menu rows: row i spans [top + i*pitch, top + (i+1)*pitch). Returns the row index or -1. */
+  function rowAt(x, y, top, pitch, n, x0 = 32, x1 = 224) {
+    if (x < x0 || x > x1) return -1;
+    const i = Math.floor((y - top) / pitch);
+    return i >= 0 && i < n ? i : -1;
+  }
+
+  /** Touch button plate: dark, 1 px frame, cut corners (pixel-art "rounded" rectangle). */
+  function plate(x, y, w, h, on) {
+    ctx.fillStyle = on ? 'rgba(60,48,14,0.88)' : 'rgba(8,14,40,0.78)';
+    ctx.fillRect(x, y, w, h);
+    ctx.fillStyle = on ? COL.gold : '#4a56a8';
+    ctx.fillRect(x + 1, y, w - 2, 1); ctx.fillRect(x + 1, y + h - 1, w - 2, 1);
+    ctx.fillRect(x, y + 1, 1, h - 2); ctx.fillRect(x + w - 1, y + 1, 1, h - 2);
+  }
+  /** Game-pixel pitch of a tappable row: >= TOUCH_ROW_CSS css px, but never more than `room` / n allows. */
+  function touchPitch(n, room, cap = 40) {
+    const k = layout.scale || 1;
+    return Math.max(14, Math.min(Math.ceil(TOUCH_ROW_CSS / k), cap, Math.floor(room / n)));
+  }
+
+  // ---- TITLE ----------------------------------------------------------------------------------------------
+  scenes.title = (() => {
+    const MENU_X0 = 40, MENU_X1 = 216;
+    let sel = 0, idle = 0, items = [];
+    let geo = { top: 80, pitch: 12, y0: 82, big: false };
+
+    function build() {
+      const keep = items[sel] ? items[sel].id : null;
+      items = [{ id: 'p1', label: '1 PLAYER' }];
+      if (!touchOnly()) items.push({ id: 'p2', label: '2 PLAYERS' });
+      if (session.reached >= CONTINUE_MIN_ROUND) items.push({ id: 'cont', label: 'CONTINUE ROUND ' + continueRound() });
+      items.push({ id: 'help', label: 'HOW TO PLAY' }, { id: 'table', label: 'HI-SCORES' });
+      if (!touchOnly()) items.push({ id: 'sound', label: 'SOUND ' + (AUDIO.isMuted() ? 'OFF' : 'ON') });
+      const k = items.findIndex((it) => it.id === keep);
+      sel = k >= 0 ? k : U.clamp(sel, 0, items.length - 1);
+      const n = items.length;
+      if (touchMode) {                                       // big tappable rows drawn as plates, no hint panels
+        const y0 = 80, pitch = touchPitch(n, 200 - y0);
+        geo = { top: y0, pitch, y0, big: true };
+      } else {
+        const pitch = n <= 4 ? 14 : 12;
+        geo = { top: 80, pitch, y0: 82, big: false };
+      }
+    }
+    function move(d) {
+      sel = (sel + d + items.length) % items.length;
+      AUDIO.sfx('menu_move');
+    }
+    function activate(i) {
+      const it = items[i];
+      if (!it) return;
+      sel = i;
+      AUDIO.sfx('menu_select');
+      if (it.id === 'p1') startGame(1, 1);
+      else if (it.id === 'p2') startGame(2, 1);
+      else if (it.id === 'cont') startGame(session.lastPlayers, continueRound());
+      else if (it.id === 'help') gotoScene('howto', { page: 0 });
+      else if (it.id === 'table') gotoScene('scores', {});
+      else if (it.id === 'sound') toggleMute();
+    }
+
+    /** One of the two mascots: idle with blinks, a hop and a bubble shot every 4 s. `rise` lifts it (perched on the logo). */
+    function critter(who, x, y, flip, t, phase) {
+      const cyc = (t + phase) % 240, dir = flip ? -1 : 1;
+      let name = who + '_idle', frame = (t + phase) % 150 > 140 ? 1 : 0, yy = y;   // frame 1 = blink
+      if (cyc < 34) {
+        const u = cyc / 34;
+        name = who + (u < 0.5 ? '_jump' : '_fall'); frame = 0; yy = y - Math.sin(u * Math.PI) * 14;
+      } else if (cyc >= 120 && cyc < 138) { name = who + '_shoot'; frame = cyc < 128 ? 0 : 1; }
+      spr(name, frame, x, yy, { flip });
+      // the bubble: shot at cyc 126, decelerates, then floats up and fades
+      const u = cyc >= 126 ? cyc - 126 : cyc + 114;
+      if (u < 190) {
+        const run = 36 * (1 - Math.pow(1 - Math.min(u, 36) / 36, 2));
+        const bx = x + dir * (10 + run), by = y - 2 - Math.max(0, u - 36) * 0.45;
+        const a = u > 165 ? (190 - u) / 25 : 1;
+        spr(u < 12 ? 'bubble_shot' : 'bubble', u < 12 ? Math.floor(u / 4) : Math.floor(t / 14), bx, by, { alpha: 0.85 * a });
+      }
+    }
+    // Fizz stands on the F of the logo, Pop on the O of POP; both ride the letters' wobble (same formula as GFX.drawLogo)
+    const LOGO_Y = 22, PERCH_Y = LOGO_Y + 5 + 1 - 13;
+    const wob = (i, t) => Math.round(Math.sin(t / 13 + i * 0.75) * 2);
+
+    return {
+      music: 'title',
+      enter() { idle = 0; sel = 0; items = []; padSlot.clear(); build(); refreshScores(); AUDIO.music('title'); },   // new session: pads claim P1 / P2 afresh
+      update(ui) {
+        ambient.update();
+        build();
+        idle = ui.heldAny ? 0 : idle + 1;
+        if (idle >= IDLE_FRAMES) { gotoScene('story', { attract: true }); return; }
+        if (ui.p.up || ui.p.left) move(-1);
+        else if (ui.p.down || ui.p.right) move(1);
+        else if (ui.p.help) gotoScene('howto', { page: 0 });
+        else if (ui.p.table) gotoScene('scores', {});
+        else if (ui.p.ok || ui.p.alt) activate(sel);
+      },
+      pointer(x, y) {
+        const i = rowAt(x, y, geo.top, geo.pitch, items.length, MENU_X0, MENU_X1);
+        if (i >= 0) activate(i);
+      },
+      rows: () => items.map((it, i) => ({ id: it.id, label: it.label, top: geo.top + i * geo.pitch, h: geo.pitch, x0: MENU_X0, x1: MENU_X1, sel: i === sel })),
+      render() {
+        const t = sceneT, th = GFX.theme(0), n = items.length;
+        const menuBottom = geo.top + n * geo.pitch + 4;
+        layered(t, 0.55, true, () => backdrop('#050a1e', '#0d2a4c'), () => {
+          towerFrame();
+          GFX.drawLogo(ctx, 128, LOGO_Y, t);
+          critter('p1', 30, PERCH_Y + wob(0, t), false, t, 0);
+          critter('p2', 195, PERCH_Y + wob(6, t), true, t, 90);
+          panel(88, 0, 80, 19, 'rgba(4,8,26,0.8)');                  // the high score sits on a plate: the logo's and the mascots' bubbles pass behind it
+          ctext('HI SCORE', 1, COL.coral);
+          ctext(fmtScore(topScore()), 10, COL.white);
+          ctext('THE SUNKEN TOWER', 64, th.accent2, { outline: '#050a1e' });
+          items.forEach((it, i) => {
+            const y = geo.y0 + i * geo.pitch, on = i === sel;
+            if (geo.big) {
+              plate(MENU_X0, geo.top + i * geo.pitch, MENU_X1 - MENU_X0, geo.pitch - 4, on);
+              ctext(it.label, geo.top + i * geo.pitch + Math.floor((geo.pitch - 4 - 8) / 2), on ? COL.gold : COL.white);
+              return;
+            }
+            const w = GFX.textWidth(it.label);
+            ctext(it.label, y, on ? COL.gold : COL.text, { outline: '#050a1e' });
+            if (on) {
+              const bob = Math.round(Math.sin(t / 8) * 2);
+              text('>', 128 - w / 2 - 14 + bob, y, COL.gold);
+              text('<', 128 + w / 2 + 6 - bob, y, COL.gold);
+            }
+          });
+          if (touchMode) {
+            ctext('© 2026 FIZZ & POP', 206, COL.dim, { outline: '#050a1e' });
+          } else {
+            panel(24, 157, 208, 56, 'rgba(4,8,26,0.74)');             // ONE calm panel for controls + copyright, 4 px padding
+            ctx.fillStyle = 'rgba(120,130,210,0.28)';
+            ctx.fillRect(40, 189, 176, 1);
+            ctext('UP/DOWN + ENTER', 161, COL.dim);
+            ctext('1P: ARROWS + Z BUBBLE', 170, COL.dimmer);          // says what Z / Q do (P3)
+            ctext('2P: WASD + Q BUBBLE', 179, COL.dimmer);
+            ctext('© 2026 FIZZ & POP', 192, COL.dim);
+            ctext('FREE SOFTWARE', 201, COL.dimmer);   // ends at y 208: the sound / toast strip (y 211..) never covers it
+          }
+        }, [[MENU_X0 - 6, 62, MENU_X1 + 6, menuBottom], [16, 20, 240, 62]]);   // the menu column and the logo are kept free of bubbles too
+      },
+    };
+  })();
+
+  // ---- STORY (intro before play + attract) ----------------------------------------------------------------
+  scenes.story = (() => {
+    // Every line <= 26 characters (208 px): it never touches the tower walls, even in the fractional-scale layouts.
+    const LINES = [
+      { s: 'THE KRAKEN KING HAS STOLEN', at: 6, y: 96 },
+      { s: 'THE REEF\'S MOON PEARL!', at: 38, y: 107 },
+      { s: 'FIZZ & POP DIVE DOWN THE', at: 112, y: 124 },
+      { s: 'SUNKEN TOWER TO GET IT', at: 144, y: 135 },
+      { s: 'BACK. TRAP THEM. POP THEM!', at: 190, y: 152, c: COL.gold },
+    ];
+    const KRAKEN_IN = 40, GRAB = 100, LEAVE = 118, GONE = 200;
+    let args = {};
+
+    function drawPearlAndKraken(t) {
+      const dark = clamp01((t - GRAB) / 45) * 0.62;
+      let kx = 300;
+      if (t >= KRAKEN_IN && t < LEAVE) kx = U.lerp(300, 150, ease(clamp01((t - KRAKEN_IN) / (GRAB - KRAKEN_IN))));
+      else if (t >= LEAVE) kx = U.lerp(150, 300, ease(clamp01((t - LEAVE) / (GONE - LEAVE))));
+      const ky = 22 + Math.sin(t / 14) * 4;
+      // pearl rests at (120,44) until grabbed, then travels with the Kraken King's tentacle
+      const grabbed = t >= GRAB;
+      const px = grabbed ? kx - 30 : 120, py = grabbed ? ky + 22 : 44;
+      if (!(grabbed && kx > 270)) {
+        const glow = ctx.createRadialGradient(px + 16, py + 16, 4, px + 16, py + 16, 44);
+        const a = (0.55 + Math.sin(t / 9) * 0.1) * (1 - dark);
+        glow.addColorStop(0, 'rgba(255,248,200,' + a.toFixed(3) + ')');
+        glow.addColorStop(1, 'rgba(255,248,200,0)');
+        ctx.fillStyle = glow;
+        ctx.fillRect(px - 30, py - 30, 92, 92);
+      }
+      if (kx < 280) spr(t > 150 ? 'kraken_angry' : 'kraken', Math.floor(t / 12), kx, ky);
+      if (!(grabbed && kx > 270)) {
+        spr('moonpearl', Math.floor(t / 14), px, py);
+        for (let i = 0; i < 3; i++) {
+          const a = t / 20 + i * 2.1;
+          spr('sparkle', Math.floor(t / 5) + i, px + 12 + Math.cos(a) * 26, py + 12 + Math.sin(a) * 22);
+        }
+      }
+      if (t >= GRAB && t < GRAB + 8) { ctx.fillStyle = 'rgba(255,255,255,' + (0.7 * (1 - (t - GRAB) / 8)).toFixed(2) + ')'; ctx.fillRect(0, 0, C.W, C.H); }
+      return dark;
+    }
+
+    return {
+      music: 'title',
+      enter(a) { args = a || {}; AUDIO.music('title'); },
+      update(ui) {
+        ambient.update();
+        if (args.attract) {
+          if (ui.hit) gotoScene('title');
+          else if (sceneT >= ATTRACT_STORY_FRAMES) gotoScene('howto', { attract: true, page: 0 });
+          return;
+        }
+        const skip = sceneT >= INPUT_GUARD && (ui.p.ok || ui.p.alt || ui.p.pause);
+        if (skip || sceneT >= STORY_FRAMES) gotoScene('play', args.next || { players: 1, level: 1, seed: 1 });
+      },
+      render() {
+        const t = sceneT;
+        layered(t, 0.45, true, () => backdrop('#03081a', '#0a2748'), () => {
+          towerFrame();
+          const dark = drawPearlAndKraken(t);
+          ctx.fillStyle = rgba(2, 3, 12, dark * 0.55);
+          ctx.fillRect(0, 0, C.W, C.H);
+          // typewriter text
+          LINES.forEach((l) => {
+            const n = Math.floor(U.clamp((t - l.at) * 1.1, 0, l.s.length));
+            if (n > 0) ctext(l.s.slice(0, n), l.y, l.c || COL.text, { outline: '#03081a' });
+          });
+          // the controls, once the rules are told (round 1 has no hint of its own, P3)
+          if (!args.attract && t >= 214) {
+            ctext(touchMode ? 'BUBBLE: TRAP FOES' : 'Z / SPACE: BUBBLE', 166, COL.dim, { outline: '#03081a' });
+            ctext(touchMode ? 'JUMP: HOP UP' : 'UP / X: JUMP', 175, COL.dim, { outline: '#03081a' });
+          }
+          // Fizz & Pop watch, then jump with excitement once the plan is made
+          const excited = t > 170;
+          const hop = (ph) => (excited ? Math.abs(Math.sin((t + ph) / 7)) * 10 : 0);
+          spr(excited ? 'p1_jump' : 'p1_idle', Math.floor(t / 30), 40, 200 - hop(0));
+          spr(excited ? 'p2_jump' : 'p2_idle', Math.floor(t / 30), 200, 200 - hop(11), { flip: true });
+          if (!args.attract && blink(t, 24)) ctext(touchLabel() + ' TO SKIP', 186, COL.dimmer);
+        }, [[24, 92, 232, 196]]);                                   // the whole text block stays free of bubbles
+      },
+    };
+  })();
+
+  // ---- HOW TO PLAY (6 pages) -------------------------------------------------------------------------------
+  scenes.howto = (() => {
+    const CAST = [
+      ['nibbler', 'NIBBLER', 'WINDUP FISH THAT HOPS'], ['crabbit', 'CRABBIT', 'THROWS PEBBLES AT YOU'],
+      ['jellop', 'JELLOP', 'DRIFTS DIAGONALLY'], ['springle', 'SPRINGLE', 'NEVER STOPS BOUNCING'],
+      ['glimmer', 'GLIMMER', 'DROPS SPARKS FROM ABOVE'], ['bonefin', 'BONEFIN', 'CHASES WHEN YOU DAWDLE'],
+    ];
+    const FOODS = [
+      ['food_0', 'SEA GRAPES', 500], ['food_1', 'KELP ROLL', 700], ['food_2', 'CLAM', 1000], ['food_3', 'SHRIMP TEMPURA', 1500],
+      ['food_4', 'SUSHI', 2000], ['food_5', 'PUDDING', 3000], ['food_6', 'SUNDAE', 5000], ['food_7', 'GOLDEN CROWN', 8000],
+    ];
+    const POWERS = [
+      ['pu_shoes', 'FLIPPERS', 'RUN FASTER'], ['pu_pink', 'PINK PEARL', 'BUBBLES FLY FARTHER'],
+      ['pu_blue', 'BLUE PEARL', 'RAPID FIRE'], ['pu_gold', 'GOLD PEARL', 'SPEEDY BUBBLES'],
+      ['pu_parasol', 'PARASOL', 'SKIP THREE ROUNDS'], ['pu_clock', 'CLOCK', 'FREEZES ALL FOES'],
+      ['pu_bomb', 'STAR BOMB', 'CLEARS ALL FOES'], ['pu_heart', 'HEART', 'EXTRA LIFE'],
+    ];
+    const SPECIALS = [
+      ['bubble_thunder', 'THUNDER BUBBLE', 'BOLTS ZAP FOES BOTH WAYS'], ['bubble_fire', 'FIRE BUBBLE', 'FLAMES BURN THE FLOOR'],
+      ['bubble_water', 'WATER BUBBLE', 'FLOOD SWEEPS FOES AWAY'], ['bubble_letter', 'EXTEND LETTERS', 'SPELL IT FOR A LIFE'],
+    ];
+    const PAGES = 6;
+    let page = 0, pageT = 0, args = {};
+
+    const header = (s, sub) => {
+      ctext(s, 6, COL.gold, { scale: 2 });
+      if (sub) ctext(sub, 24, COL.dim);
+    };
+
+    function drawRules(t) {
+      header('HOW TO PLAY');
+      const lines = ['TRAP FOES IN BUBBLES,', 'THEN TOUCH THE BUBBLE TO POP', 'THEM INTO TASTY TREATS!',
+        'CLEAR EVERY FOE TO DIVE', 'DEEPER. 30 ROUNDS TO GO.', 'HOLD JUMP TO BOUNCE ON THEM.'];
+      lines.forEach((s, i) => ctext(s, 34 + i * 11, i < 3 ? COL.text : COL.dim));
+      // 1 bubble -> 2 trap -> 3 pop and eat
+      const steps = [['1 BUBBLE', 20], ['2 TRAP', 100], ['3 EAT!', 172]];
+      const u = (t % 150) / 150;
+      spr(u < 0.18 ? 'p1_shoot' : 'p1_idle', u < 0.09 || u >= 0.18 ? 0 : 1, 30, 112);
+      if (u > 0.06 && u < 0.3) spr('bubble_shot', Math.floor((u - 0.06) * 14), 46 + (u - 0.06) * 60, 112, { alpha: 0.9 });
+      spr('nibbler_trapped', Math.floor(t / 12), 112, 112); spr('trap_overlay', Math.floor(u * 3), 112, 112);
+      const eat = Math.floor(t / 8);
+      spr('food_4', 0, 180, 112 + Math.round(Math.sin(t / 9) * 2));
+      spr('sparkle', eat, 172, 108); spr('sparkle', eat + 2, 196, 124);
+      text('>', 82, 117, COL.gold); text('>', 150, 117, COL.gold);
+      steps.forEach(([s, x]) => text(s, x, 134, COL.text));
+      ctext('POP BUBBLES IN A CHAIN FOR', 160, COL.dim);
+      ctext('1000  2000  4000  8000 ...', 171, COL.gold);
+      ctext('LOSE A LIFE WHEN A FOE', 188, COL.dimmer);
+      ctext('TOUCHES YOU. 3 LIVES!', 198, COL.dimmer);
+    }
+
+    function drawControls(t, th) {
+      const onlyTouch = touchOnly();
+      header('CONTROLS', onlyTouch ? 'ON-SCREEN BUTTONS' : 'KEYBOARD AND GAMEPAD');
+      let y = 38;
+      if (onlyTouch) {
+        spr('p1_walk', Math.floor(t / 8), 24, y);
+        [['← →', 'RUN'], ['JUMP', 'HOP UP'], ['BUBBLE', 'TRAP / OK'], ['PAUSE', 'ABOVE THE PADS']]
+          .forEach((r, i) => { text(r[0], 52, y + 1 + i * 11, COL.gold); text(r[1], 112, y + 1 + i * 11, COL.text); });
+        y += 54;
+        ctext('TAP A MENU ROW TO PICK IT', y, COL.dim); y += 14;
+      } else {
+        const colX = [20, 144], who = ['p1', 'p2'], names = ['FIZZ  P1', 'POP  P2'];
+        const rows = [['← →  MOVE', 'A D  MOVE'], ['UP/X  JUMP', 'W  JUMP'], ['SPC/Z  BUBBLE', 'Q  BUBBLE']];
+        for (let i = 0; i < 2; i++) {
+          spr(who[i] + '_walk', Math.floor(t / 8), colX[i], y);
+          text(names[i], colX[i] + 22, y + 4, PLAYER_COL[i]);
+          for (let r = 0; r < 3; r++) text(rows[r][i], colX[i], y + 22 + r * 11, COL.text);
+        }
+        y += 62;
+        ctext('KEYS FOLLOW THE WASD BLOCK,', y, COL.dimmer); ctext('WHATEVER THE KEYCAPS SAY', y + 10, COL.dimmer);
+        y += 26;
+      }
+      ctext('GAMEPAD', y, th.accent2);
+      ctext('STICK / D-PAD: MOVE', y + 11, COL.text);
+      ctext('A: JUMP   B / X: BUBBLE', y + 21, COL.text);
+      ctext('START: PAUSE', y + 31, COL.text);
+      if (!onlyTouch) { ctext('ENTER START  P PAUSE', y + 49, COL.dim); ctext('M SOUND  H HELP', y + 59, COL.dim); ctext('PUSH Q TO JOIN AS P2', y + 71, COL.dimmer); }
+    }
+
+    function drawPage(t) {
+      const th = GFX.theme(page % 6);
+      if (page === 0) drawRules(t);
+      else if (page === 1) drawControls(t, th);
+      else if (page === 2) {
+        header('THE CAST', 'WHO LIVES IN THE TOWER');
+        CAST.forEach((c, i) => {
+          const y = 36 + i * 20;
+          spr(castSprite(c[0]), Math.floor(t / 10) + i, 28, y);
+          text(c[1], 52, y + 1, th.accent2);
+          text(c[2], 52, y + 10, COL.dim);
+        });
+        sprC('kraken', Math.floor(t / 14), 52, 158);
+        text('KRAKEN KING', 84, 168, COL.coral);
+        text('ROUND 30 BOSS. HIT', 84, 178, COL.dim);
+        text('HIM WITH BOLTS!', 84, 187, COL.dim);
+      } else if (page === 3) {
+        header('TREATS', 'BIGGER CHAINS = BIGGER FOOD');
+        FOODS.forEach((f, i) => {
+          const y = 36 + i * 20;
+          spr(f[0], 0, 32, y);
+          text(f[1], 56, y + 4, COL.text);
+          text(String(f[2]), 224, y + 4, COL.gold, { align: 'right' });
+        });
+      } else if (page === 4) {
+        header('POWER-UPS', 'ONE PER ROUND, 1000 PTS EACH');
+        POWERS.forEach((f, i) => {
+          const y = 36 + i * 20;
+          spr(f[0], 0, 32, y);
+          text(f[1], 56, y + 1, th.accent2);
+          text(f[2], 56, y + 10, COL.dim);
+        });
+      } else {
+        header('BUBBLES', 'WATCH FOR SPECIAL BUBBLES');
+        SPECIALS.forEach((f, i) => {
+          const y = 38 + i * 24;
+          spr(f[0], Math.floor(t / 14), 28, y);
+          text(f[1], 52, y + 1, th.accent2);
+          text(f[2], 52, y + 10, COL.dim);
+        });
+        ctext('CHAIN POP SCORES', 144, COL.text);
+        [1000, 2000, 4000, 8000].forEach((n, i) => {
+          const x = 36 + i * 52;
+          spr('bubble', Math.floor(t / 14) + i, x + 4, 156);
+          text(String(n), x + 12, 176, COL.gold, { align: 'center' });
+        });
+        ctext('... UP TO 64000 EACH!', 190, COL.dim);
+      }
+    }
+
+    function next(d) {
+      page = page + d;
+      pageT = 0;
+      if (page >= PAGES) gotoScene(args.attract ? 'scores' : 'title', args.attract ? { attract: true } : undefined);
+      else if (page < 0) page = 0;
+    }
+
+    return {
+      music: 'title',
+      enter(a) { args = a || {}; page = U.clamp(args.page | 0, 0, PAGES - 1); pageT = 0; AUDIO.music('title'); },
+      page: () => page,
+      pointer(x, y) {
+        if (args.attract) { gotoScene('title'); return; }
+        AUDIO.sfx('menu_move');
+        if (y > 200 && x < (touchMode ? 64 : 80)) {            // bottom-left = the "BACK" label: touch steps one page back (the title from page 0), a mouse leaves like ESC
+          if (!touchMode || page === 0) gotoScene('title'); else next(-1);
+        } else next(1);
+      },
+      update(ui) {
+        ambient.update();
+        pageT++;
+        if (args.attract) {
+          if (ui.hit) { gotoScene('title'); return; }
+          if (pageT >= HOWTO_PAGE_FRAMES) next(1);
+          return;
+        }
+        if (ui.p.pause || ui.p.bksp) { gotoScene('title'); return; }
+        if (sceneT < INPUT_GUARD) return;
+        if (ui.p.left || ui.p.up) { if (page > 0) { AUDIO.sfx('menu_move'); next(-1); } }
+        else if (ui.p.right || ui.p.down || ui.p.ok || ui.p.alt) { AUDIO.sfx('menu_move'); next(1); }
+      },
+      render() {
+        layered(sceneT, 0.3, false, () => backdrop('#050a1e', '#0b2342'), () => {
+          drawPage(sceneT);
+          for (let i = 0; i < PAGES; i++) {            // page dots
+            ctx.fillStyle = i === page ? COL.gold : COL.dimmer;
+            ctx.fillRect(128 - PAGES * 6 + i * 12 + 2, 213, 6, 4);
+          }
+          note(128 - PAGES * 6, 212, 128 + PAGES * 6, 218);
+          if (!args.attract) {                         // every label says what a tap / key on it does (R7)
+            if (touchMode) { text('< BACK', 4, 211, COL.dimmer); text('TAP: NEXT', 252, 211, COL.dimmer, { align: 'right' }); }
+            else { text('ESC: BACK', 4, 211, COL.dimmer); text('← → PAGE', 252, 211, COL.dimmer, { align: 'right' }); }
+          }
+        });
+      },
+    };
+  })();
+
+  // ---- HI-SCORES -------------------------------------------------------------------------------------------
+  scenes.scores = (() => {
+    let args = {}, table = [], persistent = true;
+    const RANK_COL = [COL.gold, '#d6dcf2', '#e0a070'];
+    return {
+      music: 'title',
+      enter(a) { args = a || {}; table = refreshScores(); persistent = storagePersistent(); AUDIO.music('title'); },
+      update(ui) {
+        ambient.update();
+        if (args.attract) {
+          if (ui.hit || sceneT >= ATTRACT_SCORES_FRAMES) gotoScene('title');
+          return;
+        }
+        const leave = sceneT >= INPUT_GUARD && (ui.p.ok || ui.p.alt || ui.p.pause);
+        if (leave || (args.afterGame && sceneT >= AFTER_GAME_SCORES_FRAMES)) gotoScene('title');
+      },
+      render() {
+        const t = sceneT, th = GFX.theme(0);
+        const missed = !args.attract && Array.isArray(args.missed) ? args.missed : [];
+        layered(t, 0.3, false, () => backdrop('#050a1e', '#0c2444'), () => {
+          towerFrame();                                       // same walls + floor as the title: Fizz and Pop stand on it
+          ctext('HI-SCORES', 16, COL.gold, { scale: 2 });
+          ctext('BEST DIVERS OF THE TOWER', 36, COL.dim);
+          ctx.fillStyle = 'rgba(255,227,107,0.35)'; ctx.fillRect(40, 47, 176, 1);
+          note(28, 47, 228, 175);                             // the table block
+          text('RANK', 40, 52, COL.dimmer); text('NAME', 88, 52, COL.dimmer);
+          text('SCORE', 184, 52, COL.dimmer, { align: 'right' }); text('RD', 192, 52, COL.dimmer);
+          const hl = Array.isArray(args.highlight) ? args.highlight : [];
+          table.forEach((e, i) => {
+            const y = 66 + i * 14;
+            const mine = hl.indexOf(i) >= 0;
+            const c = mine ? (blink(t, 8) ? COL.white : COL.gold) : (RANK_COL[i] || COL.text);
+            if (mine) { ctx.fillStyle = 'rgba(255,227,107,0.14)'; ctx.fillRect(28, y - 3, 200, 13); }
+            else if (i % 2 === 0) { ctx.fillStyle = 'rgba(255,255,255,0.045)'; ctx.fillRect(28, y - 3, 200, 13); }
+            text(ordinal(i), 40, y, c);
+            text(e.name, 88, y, c);
+            text(fmtScore(e.score, 7), 184, y, c, { align: 'right' });
+            text('R' + String(e.round).padStart(2, '0'), 192, y, mine ? c : th.accent2);
+          });
+          // a game that missed the table still shows what it scored (arcade "YOUR SCORE")
+          missed.forEach((m, i) => {
+            const who = session.lastPlayers === 2 ? 'P' + (m.pi + 1) + ' SCORE ' : 'YOUR SCORE ';
+            ctext(who + fmtScore(m.score), 177 + i * 9, PLAYER_COL[m.pi] || COL.white, { outline: '#050a1e' });
+          });
+          if (!persistent && !args.attract) ctext('SCORES KEPT THIS VISIT ONLY', 4, COL.dimmer);   // the host grants no storage: initials last until the page closes
+          // the heroes watch from the floor; footer prompt between them
+          spr('p1_idle', Math.floor(t / 50) % 3 === 2 ? 1 : 0, 26, 200);
+          spr('p2_idle', Math.floor((t + 20) / 50) % 3 === 2 ? 1 : 0, 214, 200, { flip: true });
+          const fy = missed.length > 1 ? 195 : 188;
+          if (blink(t, 30)) ctext(args.attract ? 'PUSH ANY BUTTON' : (touchLabel() + ': BACK TO TITLE'), fy, COL.dim);
+          if (!args.attract && !touchMode) ctext('ESC: BACK', fy + 12, COL.dimmer);
+        });
+      },
+    };
+  })();
+
+  // ---- NAME ENTRY ------------------------------------------------------------------------------------------
+  scenes.entry = (() => {
+    const OK_FRAMES = 45;
+    const TYPE_GUARD = 40;                                 // frames after a slot opens in which typed letters are ignored (a player still mashing the game keys)
+    let queue = [], cur = null, letters = [0, 0, 0], pos = 0, timeLeft = 0, doneT = 0, guard = 0, tguard = 0, highlights = [], missed = [];
+
+    function begin() {
+      cur = null;
+      while (queue.length) {
+        const cand = queue.shift();
+        if (qualifies(cand.score)) { cur = cand; break; }
+        if (cand.score > 0) missed.push({ pi: cand.pi, score: cand.score });       // below the table: shown on the scores screen
+      }
+      if (!cur) { gotoScene('scores', { afterGame: true, highlight: highlights, missed }); return false; }
+      typed.length = 0;
+      letters = [0, 0, 0]; pos = 0; doneT = 0; guard = INPUT_GUARD; tguard = TYPE_GUARD;
+      timeLeft = ENTRY_SECONDS * C.FPS;
+      return true;
+    }
+
+    function finish() {
+      const name = letters.map((i) => NAME_CHARS[i]).join('');
+      const idx = insertScore(name, cur.score, cur.round);
+      highlights = highlights.map((h) => (idx >= 0 && h >= idx ? h + 1 : h)).filter((h) => h < TOP_N);
+      if (idx >= 0) highlights.push(idx);
+      AUDIO.sfx('menu_select');
+      begin();
+    }
+
+    function drawArrow(cx, y, up) {
+      ctx.fillStyle = COL.gold;
+      for (let i = 0; i < 4; i++) ctx.fillRect(cx - i, up ? y + i : y - i, 1 + i * 2, 1);
+    }
+
+    return {
+      music: 'entry',
+      enter(a) {
+        const args = a || {};
+        highlights = []; missed = [];
+        typed.length = 0;
+        let entries = args.entries;
+        if (!Array.isArray(entries)) {                       // debug / direct goto: build from the finished game
+          const res = Game.result();
+          entries = [];
+          for (let i = 0; i < res.players; i++) entries.push({ pi: i, score: res.scores[i] || 0, round: res.level || 1 });
+        }
+        queue = entries.map((e) => ({ pi: e.pi | 0, score: Math.floor(e.score) || 0, round: e.round || 1 }));
+        refreshScores();
+        AUDIO.music('entry');
+        begin();
+      },
+      debug: () => ({ cur, pos, name: letters.map((i) => NAME_CHARS[i]).join(''), timeLeft, doneT, queued: queue.length, highlights: highlights.slice() }),
+      update(ui) {
+        ambient.update();
+        if (!cur) return;
+        if (isHeld()) { typed.length = 0; return; }          // the 30 s clock stands still while the page is not live (U5)
+        if (guard > 0) guard--;
+        if (tguard > 0) tguard--;
+        if (doneT > 0) {                                     // "OK!" moment after the third letter; jump goes back
+          typed.length = 0;
+          if (guard === 0 && (ui.p.alt || ui.p.bksp)) { doneT = 0; pos = NAME_LEN - 1; AUDIO.sfx('menu_move'); } else if (--doneT === 0) finish();
+          return;
+        }
+        if (--timeLeft <= 0) { finish(); return; }          // time out: take the letters as shown
+        if (tguard > 0) typed.length = 0;                    // still the game keys of the round that just ended
+        if (typed.length) {                                  // keyboard: typing S, A, M sets S, A, M, one letter per tick (R6)
+          const i = NAME_CHARS.indexOf(typed.shift());
+          if (i >= 0) {
+            letters[pos] = i;
+            AUDIO.sfx('menu_select');
+            if (++pos >= NAME_LEN) { pos = NAME_LEN; doneT = OK_FRAMES; }
+            return;
+          }
+        }
+        const d = (ui.p.right || ui.p.up ? 1 : 0) - (ui.p.left || ui.p.down ? 1 : 0);
+        if (d) { letters[pos] = (letters[pos] + d + NAME_CHARS.length) % NAME_CHARS.length; AUDIO.sfx('menu_move'); }
+        if (guard > 0) return;
+        if (ui.p.ok) {
+          AUDIO.sfx('menu_select');
+          if (++pos >= NAME_LEN) { pos = NAME_LEN; doneT = OK_FRAMES; }
+        } else if (ui.p.alt || ui.p.bksp) {
+          if (pos > 0) { pos--; AUDIO.sfx('menu_move'); }
+        }
+      },
+      render() {
+        const t = sceneT, th = GFX.theme(0);
+        layered(t, 0.3, false, () => backdrop('#07081e', '#14143e'), () => {
+          if (!cur) return;
+          const c = PLAYER_COL[cur.pi] || COL.white;
+          ctext('CONGRATULATIONS!', 12, th.accent2);
+          ctext('NEW HIGH SCORE', 26, COL.gold, { scale: 2 });
+          spr(cur.pi === 1 ? 'p2_idle' : 'p1_idle', Math.floor(t / 40), 56, 52);
+          spr(cur.pi === 1 ? 'p2_walk' : 'p1_walk', Math.floor(t / 8), 184, 52, { flip: true });
+          ctext('PLAYER ' + (cur.pi + 1), 52, c);
+          ctext(fmtScore(cur.score), 62, COL.white);
+          ctext('RANK ' + ordinal(rankOf(cur.score)), 74, COL.gold);
+          ctext('ENTER YOUR INITIALS', 96, COL.text);
+          for (let i = 0; i < NAME_LEN; i++) {
+            const cx = 128 + (i - 1) * 40, y = 118;
+            const active = i === pos && doneT === 0;
+            const col = active ? COL.gold : (i < pos ? COL.white : COL.dim);
+            text(NAME_CHARS[letters[i]], cx - 12, y, col, { scale: 3 });
+            ctx.fillStyle = active && blink(t, 10) ? COL.gold : COL.dimmer;
+            ctx.fillRect(cx - 14, y + 28, 28, 3);
+            note(cx - 14, y - 12, cx + 14, y + 44);
+            if (active) { drawArrow(cx, y - 8 + Math.round(Math.sin(t / 6)), true); drawArrow(cx, y + 40 - Math.round(Math.sin(t / 6)), false); }
+          }
+          if (doneT > 0) ctext('OK!', 168, COL.green, { scale: 2 });
+          else {
+            // every hint names the key that really does it: on a keyboard the letters are typed, Z / Q / X are letters here (R5, R6)
+            const kb = !touchMode && !(padSeen && !keyboardSeen);
+            ctext(touchMode ? '← → CHANGE   BUBBLE: OK' : kb ? 'TYPE OR ← → CHANGE LETTER' : '← → CHANGE LETTER', 166, COL.text);   // the triangle glyphs are not in the font (U14)
+            ctext(touchMode ? 'JUMP: BACK' : kb ? 'ENTER: OK  BACKSPACE: BACK' : 'B: OK  A: BACK', 177, COL.dim);
+          }
+          ctext('TIME ' + String(Math.ceil(timeLeft / C.FPS)).padStart(2, '0'), 196, timeLeft < 8 * C.FPS && blink(t, 8) ? COL.coral : COL.dim);
+        });
+      },
+    };
+  })();
+
+  // ---- ENDING (victory tableau -> credits -> the cast waves) ----------------------------------------------------
+  scenes.ending = (() => {
+    const TABLEAU = 9 * C.FPS;                            // opening tableau before the credits start rolling
+    const SPEED = 0.55, FAST = 4;
+    const PEARL_CX = 128, PEARL_CY = 98;
+    // Credits (K3): the text rolls inside a clipped band at the top; Fizz, the Moon Pearl (now 1x) and Pop stand below it as a
+    // tableau the band never reaches (hero hop apex y = 170, pearl top y >= 174). The key hint sits on its own plate above the band.
+    const BAND_TOP = 18, BAND_BOT = 160, SMALL_CY = 194, X_FADE = 14;
+    const CAST_ROW = ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer', 'bonefin'];
+    let phase = 0, pt = 0;                                // 0 tableau, 1 credits, 2 finale
+    let blocks = [], endScroll = 0, scroll = 0, boost = 0, idleEnd = 0, args = {}, entries = [];
+    const celeb = (() => {                                // extra rising bubbles for the celebration
+      const r = U.rng(77), list = [];
+      for (let i = 0; i < 18; i++) list.push({ x: r.int(20, 228), sp: r.float(0.35, 0.9), off: r.int(0, 300), ph: r.float(0, 6.28), big: r.chance(0.3) });
+      return list;
+    })();
+    /** 0 = the pearl is big and centred (tableau, finale), 1 = small, between the heroes (credits). */
+    const pearlMix = () => (phase === 1 ? ease(clamp01(pt / 40)) : phase === 2 ? 1 - ease(clamp01(pt / 20)) : 0);
+
+    function build(res) {
+      blocks = [];
+      let y = 0;
+      const add = (b, h) => { b.y = y; b.h = h; blocks.push(b); y += h; };
+      const gap = (h) => { y += h; };
+      const T = (s, c, sc = 1) => add({ k: 'text', s, c, sc }, 10 * sc + 2);
+      T('- CREDITS -', COL.coral); gap(4);
+      T('DESIGN, CODE, ART & MUSIC:', COL.text); T('CLAUDE (ANTHROPIC)', COL.gold); gap(22);
+      T('- THE KRAKEN KING -', COL.coral); gap(4);
+      add({ k: 'sprite', n: 'kraken', h: 48 }, 52); T('SENT BACK TO THE DEEP', COL.text); gap(22);
+      T('- FINAL SCORE -', COL.coral); gap(4);
+      T('1UP  ' + fmtScore(res.scores[0]), COL.fizz);
+      if (res.players === 2) T('2UP  ' + fmtScore(res.scores[1]), COL.pop);
+      gap(26);
+      T('THANK YOU FOR PLAYING!', COL.white);
+      endScroll = BAND_BOT + blocks[blocks.length - 1].y - Math.round((BAND_TOP + BAND_BOT) / 2) + 6;   // the last line stops in the middle of the band
+    }
+
+    function drawBlock(b, y, t) {
+      switch (b.k) {
+        case 'text': ctext(b.s, y, b.c, { scale: b.sc, outline: '#06122e' }); break;
+        case 'sprite': sprC(b.n, Math.floor(t / 12), 128, y); break;
+        default: break;
+      }
+    }
+
+    /** Light rays: thin wedges rotating slowly around the pearl, additive. */
+    function rays(t, a, cy) {
+      const R = 190, N = 14;
+      const g = ctx.createRadialGradient(PEARL_CX, cy, 8, PEARL_CX, cy, R);
+      g.addColorStop(0, rgba(255, 246, 205, 0.34 * a));
+      g.addColorStop(1, rgba(255, 246, 205, 0));
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.fillStyle = g;
+      for (let layer = 0; layer < 2; layer++) {
+        const rot = (layer ? -1 : 1) * t * 0.0045 + layer * 0.2;
+        for (let k = 0; k < N; k++) {
+          const ang = rot + (k * Math.PI * 2) / N, w = 0.045 + 0.025 * Math.sin(k * 1.7 + t / 90 + layer);
+          ctx.beginPath();
+          ctx.moveTo(PEARL_CX, cy);
+          ctx.lineTo(PEARL_CX + Math.cos(ang - w) * R, cy + Math.sin(ang - w) * R);
+          ctx.lineTo(PEARL_CX + Math.cos(ang + w) * R, cy + Math.sin(ang + w) * R);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+      ctx.restore();
+    }
+
+    function riseBubbles(t) {
+      for (const b of celeb) {
+        const y = C.H + 10 - ((t * b.sp + b.off) % (C.H + 30)), x = b.x + Math.sin(t / 40 + b.ph) * 6;
+        if (y < -12) continue;
+        spr('bubble', Math.floor(t / 14) + b.off, x, y, { alpha: b.big ? 0.8 : 0.5 });
+      }
+    }
+
+    /** Fizz and Pop at 2x, hopping one after the other. */
+    function heroes(t, lift) {
+      const hop = (ph) => Math.abs(Math.sin((t + ph) / 11)) * 14;
+      const h1 = hop(0), h2 = hop(17);
+      sprBig(h1 > 2 ? 'p1_jump' : 'p1_idle', Math.floor(t / 30), 38, 184 - h1 - lift, 2);
+      sprBig(h2 > 2 ? 'p2_jump' : 'p2_idle', Math.floor(t / 30), 186, 184 - h2 - lift, 2, { flip: true });
+    }
+
+    function drawScene(t, dim) {
+      const mix = pearlMix(), pcy = U.lerp(PEARL_CY, SMALL_CY, mix);
+      backdrop('#050c26', '#0f4f8a');
+      const warm = ctx.createLinearGradient(0, C.H * 0.45, 0, C.H);       // reef light washing in from the bottom
+      warm.addColorStop(0, 'rgba(255,170,120,0)');
+      warm.addColorStop(1, rgba(255, 170, 120, 0.24 * (1 - dim * 0.6)));
+      ctx.fillStyle = warm; ctx.fillRect(0, 0, C.W, C.H);
+      rays(t, 1 - dim * 0.6, pcy);
+      riseBubbles(t);
+      ambient.draw(t, 0.35, false);
+      towerFrame();
+      // the big pearl, 2x, bobbing, with sparkles around it (fades out while it moves down between the heroes)
+      const bob = Math.round(Math.sin(t / 22) * 3);
+      if (mix < 1) {
+        ctx.save(); ctx.globalAlpha = 1 - mix;
+        sprBig('moonpearl', Math.floor(t / 14), PEARL_CX - 32, PEARL_CY - 32 + bob, 2);
+        for (let i = 0; i < 5; i++) {
+          const a = t / 26 + i * 1.26;
+          spr('sparkle', Math.floor(t / 5) + i, PEARL_CX - 4 + Math.cos(a) * 46, PEARL_CY - 4 + bob + Math.sin(a) * 40);
+        }
+        ctx.restore();
+      }
+      if (dim > 0) { ctx.fillStyle = rgba(3, 8, 24, dim); ctx.fillRect(16, C.MAP_Y, C.W - 32, 200); }
+      heroes(t, 0);                                        // after the veil: Fizz and Pop stay bright
+      if (mix > 0) {                                       // the small pearl joins them, between Fizz and Pop
+        ctx.save(); ctx.globalAlpha = mix;
+        sprBig('moonpearl', Math.floor(t / 14), PEARL_CX - 16, SMALL_CY - 16 + Math.round(bob / 2), 1);
+        for (let i = 0; i < 4; i++) {
+          const a = t / 26 + i * 1.57;
+          spr('sparkle', Math.floor(t / 5) + i, PEARL_CX - 4 + Math.cos(a) * 26, SMALL_CY - 4 + Math.sin(a) * 18);
+        }
+        ctx.restore();
+      }
+    }
+
+    /** The scrolling credits, clipped to their band (so they can never reach the tableau below it) with soft top / bottom edges. */
+    function drawCredits(t) {
+      const h = BAND_BOT - BAND_TOP;
+      ctx.fillStyle = rgba(3, 8, 24, 0.4);
+      ctx.fillRect(16, BAND_TOP, C.W - 32, h);
+      ctx.save();
+      ctx.beginPath(); ctx.rect(16, BAND_TOP, C.W - 32, h); ctx.clip();
+      blocks.forEach((b) => {
+        const y = Math.round(BAND_BOT - scroll + b.y);
+        if (y > BAND_TOP - 60 && y < BAND_BOT + 4) drawBlock(b, y, t);
+      });
+      for (const [y0, y1, a0, a1] of [[BAND_TOP, BAND_TOP + X_FADE, 0.96, 0], [BAND_BOT - X_FADE, BAND_BOT, 0, 0.96]]) {
+        const g = ctx.createLinearGradient(0, y0, 0, y1);
+        g.addColorStop(0, rgba(3, 8, 24, a0)); g.addColorStop(1, rgba(3, 8, 24, a1));
+        ctx.fillStyle = g; ctx.fillRect(16, y0, C.W - 32, y1 - y0);
+      }
+      ctx.restore();
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';           // hairlines mark the band's edges
+      ctx.fillRect(16, BAND_TOP - 1, C.W - 32, 1); ctx.fillRect(16, BAND_BOT, C.W - 32, 1);
+    }
+
+    /** Key hint on its own dark plate (outside the scroll band). */
+    function hintPlate(s, y) {
+      const w = GFX.textWidth(s) + 14, x = Math.round(C.W / 2 - w / 2);
+      ctx.fillStyle = 'rgba(3,8,24,0.88)';
+      ctx.fillRect(x, y - 3, w, 14);
+      ctx.fillStyle = 'rgba(255,255,255,0.18)';
+      ctx.fillRect(x, y - 3, w, 1); ctx.fillRect(x, y + 10, w, 1);
+      ctext(s, y, COL.dim);
+    }
+
+    function drawFinale(t) {
+      GFX.drawLogo(ctx, 128, 12, t);
+      ctext('THE END', 56, COL.gold, { scale: 2, outline: '#06122e' });
+      ctext('THANK YOU FOR PLAYING!', 80, COL.white, { outline: '#06122e' });
+      ctext('- EVERYONE WAVES GOODBYE -', 100, COL.coral, { outline: '#06122e' });
+      CAST_ROW.forEach((id, i) => {
+        const x = 128 - (CAST_ROW.length * 24 - 8) / 2 + i * 24, bob = Math.round(Math.sin(t / 9 - i * 0.9) * 4);
+        spr(castSprite(id), Math.floor(t / 10) + i, x, 114 + bob, { flip: i > 2 });
+      });
+      sprC('kraken', Math.floor(t / 14), 128, 142);
+    }
+
+    return {
+      music: 'ending',
+      enter(a) {
+        args = a || {};
+        const res = args.res || Game.result();
+        entries = args.entries;
+        build(res);
+        phase = 0; pt = 0; scroll = 0; boost = 0; idleEnd = 0;
+        AUDIO.music('ending');
+      },
+      band: () => ({ top: BAND_TOP, bottom: BAND_BOT, scroll, endScroll, phase }),
+      update(ui) {
+        ambient.update();
+        pt++;
+        const next = () => gotoScene('entry', { entries });
+        if (sceneT >= INPUT_GUARD && ui.p.pause) { next(); return; }
+        if (phase === 0) {
+          if (pt >= TABLEAU || (pt > INPUT_GUARD && (ui.p.ok || ui.p.alt))) { phase = 1; pt = 0; }
+        } else if (phase === 1) {
+          if (ui.p.ok || ui.p.alt) boost = 90;
+          if (boost > 0) boost--;
+          scroll = Math.min(endScroll, scroll + SPEED * ((ui.h.ok || ui.h.alt || boost > 0) ? FAST : 1));
+          if (scroll >= endScroll) { phase = 2; pt = 0; }
+        } else {
+          idleEnd++;
+          if ((idleEnd > 30 && (ui.p.ok || ui.p.alt)) || idleEnd > 600) next();
+        }
+      },
+      render() {
+        const t = sceneT;
+        drawScene(t, phase === 0 ? 0 : phase === 1 ? 0.55 : 0.5);
+        if (phase === 0) {
+          const lines = [['MOON PEARL', 12, 2, COL.gold, 6], ['IS SAFE!', 30, 2, COL.gold, 34], ['THE REEF SHINES AGAIN', 52, 1, COL.text, 70]];
+          lines.forEach(([s, y, sc, c, at]) => {
+            const n = Math.floor(U.clamp((pt - at) * 0.9, 0, s.length));
+            if (n > 0) ctext(s.slice(0, n), y, c, { scale: sc, outline: '#06122e' });
+          });
+          if (pt > 150 && pt < 330 && blink(pt, 30)) hintPlate(touchLabel() + ': SKIP', 204);
+        } else if (phase === 1) {
+          drawCredits(t);
+          hintPlate(touchMode ? 'TAP: FASTER' : 'ENTER: FASTER  ESC: SKIP', 3);
+        } else drawFinale(t);
+      },
+    };
+  })();
+
+  // ---- PLAY (Game + pause overlay) ---------------------------------------------------------------------------
+  scenes.play = (() => {
+    const PAUSE_ITEMS = ['RESUME', 'QUIT'], CONFIRM_ITEMS = ['NO', 'YES'];
+    const items = () => (confirmQuit ? CONFIRM_ITEMS : PAUSE_ITEMS);
+
+    /** Panel + row geometry; on touch the rows are >= 44 css px tall plates, QUIT sits a full row away from RESUME. */
+    function geom() {
+      const n = PAUSE_ITEMS.length;
+      if (touchMode) {
+        const pitch = touchPitch(n, 120, 38), h = 46 + n * pitch + 10, y = Math.max(20, Math.round((C.H - h) / 2));
+        return { big: true, x0: 40, x1: 216, py: y, ph: h, y0: y + 46, pitch, px: 32, pw: 192, ty: y + 12 };
+      }
+      return { big: false, x0: 64, x1: 192, py: 56, ph: 128, y0: 112 + (confirmQuit ? 8 : 0), pitch: 16, px: 48, pw: 160, ty: 70 };
+    }
+
+    function choose(i) {
+      if (confirmQuit) {
+        if (i === 1) { AUDIO.sfx('menu_select'); gotoScene('title'); }          // YES: really quit
+        else { confirmQuit = false; pauseSel = 1; AUDIO.sfx('menu_move'); }       // NO: back to the menu, on QUIT
+      } else if (i === 0) setPaused(false);
+      else { confirmQuit = true; pauseSel = 0; AUDIO.sfx('menu_select'); }        // QUIT asks first (U11)
+    }
+
+    return {
+      enter(a) {
+        const args = a || {};
+        const players = args.players === 2 ? 2 : 1;
+        paused = false; pauseSel = 0; confirmQuit = false; autoPaused = false;
+        session.lastPlayers = players;
+        Game.start({ players, level: args.level || 1, seed: args.seed === undefined ? 1 : args.seed, hiScore: topScore(),
+          joinHint: touchOnly() ? '' : 'PUSH Q' });
+        if (isHeld()) setPaused(true, true);                    // never start a round unattended while blurred / hidden (U5)
+      },
+      leave() {
+        if (paused) { paused = false; autoPaused = false; confirmQuit = false; try { AUDIO.resume(); } catch (e) { /* ignore */ } }
+        try { AUDIO.setTempo(1); } catch (e) { /* ignore */ }
+        let over = false;
+        try { over = Game.isOver(); } catch (e) { /* ignore */ }
+        if (!over) { try { AUDIO.stopMusic(); } catch (e) { /* ignore */ } }   // QUIT: cut the stage loop / the start jingle and its onEnd (U4)
+        try {
+          const r = Game.result();
+          session.reached = Math.max(session.reached, r.level || 1);
+          session.lastPlayers = r.players === 2 ? 2 : 1;                       // CONTINUE keeps a joined P2 (U22)
+        } catch (e) { /* ignore */ }
+      },
+      pointer(x, y) {
+        if (!paused) return;
+        const g = geom();
+        const i = rowAt(x, y, g.big ? g.y0 : g.y0 - 4, g.pitch, 2, g.x0, g.x1);
+        if (i >= 0) choose(i);
+      },
+      rows() {
+        if (!paused) return null;
+        const g = geom(), top = g.big ? g.y0 : g.y0 - 4;
+        return items().map((s, i) => ({ id: s, label: s, top: top + i * g.pitch, h: g.pitch, x0: g.x0, x1: g.x1, sel: i === pauseSel }));
+      },
+      update(ui) {
+        if (ui.p.pause) {
+          if (paused && confirmQuit) { confirmQuit = false; pauseSel = 1; AUDIO.sfx('menu_move'); return; }   // Esc backs out of the question
+          setPaused(!paused);
+          if (paused) return;
+        }
+        if (paused) {
+          if (ui.p.up || ui.p.left || ui.p.down || ui.p.right) { pauseSel = (pauseSel + 1) % 2; AUDIO.sfx('menu_move'); }
+          else if (ui.p.ok || ui.p.alt) choose(pauseSel);
+          return;
+        }
+        const one = Game.result().players === 1;
+        if (one) {                                                     // Q or pad 1 A / B joins; P2's input is never forwarded
+          if (ui.joinHit) Game.join(1);
+          Game.update([ui.pads[0], { left: false, right: false, jump: false, fire: false, jumpPressed: false, firePressed: false }]);
+        } else Game.update(ui.pads);
+        if (Game.isOver()) finishGame();
+      },
+      render() {
+        Game.render(ctx);
+        if (!paused) return;
+        const g = geom(), list = items();
+        ctx.fillStyle = 'rgba(4,3,16,0.6)';
+        ctx.fillRect(0, 0, C.W, C.H);
+        if (focusEl && !focusEl.hidden) return;                 // the click-to-resume overlay speaks for the paused game: no second panel under it (P2)
+        ctx.fillStyle = 'rgba(8,6,30,0.94)';                  // solid panel: nothing from the paused round shows through the text
+        ctx.fillRect(g.px, g.py, g.pw, g.ph);
+        ctx.strokeStyle = COL.gold;
+        ctx.lineWidth = 1;
+        ctx.strokeRect(g.px + 0.5, g.py + 0.5, g.pw - 1, g.ph - 1);
+        if (confirmQuit) {
+          ctext('QUIT?', g.ty, COL.coral, { scale: 2 });
+          ctext('THIS ENDS YOUR GAME', g.ty + 22, COL.dim);
+        } else ctext('PAUSED', g.ty, COL.gold, { scale: 2 });
+        list.forEach((s, i) => {
+          const on = i === pauseSel;
+          if (g.big) {
+            plate(g.x0, g.y0 + i * g.pitch, g.x1 - g.x0, g.pitch - 4, on);
+            ctext(s, g.y0 + i * g.pitch + Math.floor((g.pitch - 4 - 8) / 2), on ? COL.gold : COL.white);
+            return;
+          }
+          const y = g.y0 + i * g.pitch, w = GFX.textWidth(s);
+          ctext(s, y, on ? COL.gold : COL.text);
+          if (on) { text('>', 128 - w / 2 - 14, y, COL.gold); text('<', 128 + w / 2 + 6, y, COL.gold); }
+        });
+        if (!g.big) {
+          ctext(confirmQuit ? 'ESC: BACK' : 'P OR ESC: RESUME', 160, COL.dim);
+          if (!confirmQuit) ctext('M: SOUND', 171, COL.dimmer);
+        }
+      },
+    };
+  })();
+
+  // ===================================================================================================
+  // Loop
+  // ===================================================================================================
+  /** "Audio not running although it should" (before the first gesture, iOS interruption, a call): after ~0.75 s a TAP FOR SOUND hint
+   *  appears, unless the click-to-play overlay is already asking for the gesture or the page is held / paused (R8). */
+  function trackDeadAudio() {
+    if (isHeld() || paused || (focusEl && !focusEl.hidden) || !(window.AudioContext || window.webkitAudioContext)) { deadAudioT = 0; return; }   // (no Web Audio at all: no key press can help)
+    let ready = true, muted = false;
+    try { ready = AUDIO.ready(); muted = AUDIO.isMuted(); } catch (e) { /* ignore */ }
+    deadAudioT = ready || muted ? 0 : deadAudioT + 1;
+  }
+
+  function tick(useReal) {
+    sceneT++;
+    const inp = sampleInput(useReal);
+    const sc = scenes[scene];
+    if (useReal && pointerEvt) {
+      const pt = pointerEvt;
+      pointerEvt = null;
+      inp.heldAny = true; inp.hit = true;
+      if (sc.pointer) { if (!(pt.flipped && scene === 'play')) sc.pointer(pt.x, pt.y); }   // (a first touch that flipped the layout never taps a pause row it did not aim at)
+      else inp.p.ok = true;
+      if (scenes[scene] !== sc) { tapped.clear(); touchTap.clear(); return; }   // the tap already changed the scene
+    }
+    if (inp.p.mute) toggleMute();
+    if (!audioSynced) {
+      let ready = false;
+      try { ready = AUDIO.ready(); } catch (e) { ready = false; }
+      if (ready) { audioSynced = true; syncSceneMusic(); }
+    }
+    if (useReal) trackDeadAudio();
+    if (toastT > 0) toastT--;
+    sc.update(inp);
+    if (useReal) { tapped.clear(); touchTap.clear(); }
+  }
+
+  /** Copy the logical 256x224 frame to the visible canvas (1:1, or nearest-neighbour into the sharp-bilinear backing store). */
+  function present() {
+    if (!vctx || !lcanvas) return;
+    if (backing === 1) vctx.drawImage(lcanvas, 0, 0);
+    else vctx.drawImage(lcanvas, 0, 0, C.W, C.H, 0, 0, C.W * backing, C.H * backing);
+  }
+
+  function render() {
+    try {
+      scenes[scene].render();
+      drawOverlays();
+    } finally { present(); }
+  }
+
+  /** Run fn; on a throw log once and report failure to the caller. */
+  function guarded(label, fn) {
+    try { fn(); return true; } catch (e) { reportError(label + ' [' + scene + ']', e); return false; }
+  }
+
+  function frame(now) {
+    requestAnimationFrame(frame);
+    lastRaf = performance.now();
+    if (holds.has('stall')) release('stall');
+    const dt = Math.min(now - last, 250);
+    last = now;
+    let ok = true;
+    if (frozen) acc = 0;
+    else {
+      acc += dt;
+      let steps = 0;
+      while (acc >= STEP_MS && steps < MAX_CATCHUP) {
+        ok = guarded('update', () => tick(true)) && ok;
+        acc -= STEP_MS; steps++;
+      }
+      if (steps === MAX_CATCHUP) acc = 0;                 // drop the backlog after a long stall
+    }
+    ok = guarded('render', render) && ok;
+    syncSoundButton();
+    failStreak = ok ? 0 : failStreak + 1;
+    if (failStreak >= FAIL_LIMIT && scene !== 'title') {   // soft-lock guard
+      failStreak = 0;
+      guarded('recover', () => gotoScene('title'));
+    }
+  }
+
+  // ===================================================================================================
+  // Canvas scaling / layout
+  // ===================================================================================================
+  const cssNum = (v) => parseFloat(v) || 0;
+  // Controls (portrait): 10 px padding + PAUSE/SOUND row + gap + the four big buttons + bottom padding (template.html)
+  const CTRL_OVERHEAD = 10 + PILL_H + ROW_GAP + CTRL_PAD;
+
+  /** Scale for an achievable scale kMax: a whole number of DEVICE pixels per game pixel when that keeps >= 80 % of kMax
+   *  (crisp), otherwise kMax itself with sharp-bilinear resampling. */
+  function pickScale(kMax, dpr) {
+    const k = Math.max(kMax, 0.05);
+    const sInt = Math.floor(k * dpr + 1e-6) / dpr;
+    if (sInt * dpr >= 1 && sInt >= INT_FILL * k) return { s: sInt, sharp: false };
+    return { s: k, sharp: true };
+  }
+
+  function fit() {
+    if (!canvas || !bootDone) return;
+    const root = rootEl || document.documentElement;
+    const cs = getComputedStyle(root);                      // the Artifact skeleton pads :root by the safe-area insets
+    const padL = cssNum(cs.paddingLeft), padR = cssNum(cs.paddingRight), padT = cssNum(cs.paddingTop), padB = cssNum(cs.paddingBottom);
+    const padX = padL + padR, padY = padT + padB;
+    const vw = window.innerWidth || root.clientWidth || C.W;
+    const vh = window.innerHeight || root.clientHeight || C.H;
+    // The fixed side pads (landscape / overlay) sit inside the same padding the canvas is sized from, whichever mechanism the host
+    // uses for safe areas (R3); the portrait page is exactly as tall as the padded viewport so its controls rest at the bottom (K2).
+    root.style.setProperty('--pad-l', padL + 'px'); root.style.setProperty('--pad-r', padR + 'px');
+    root.style.setProperty('--pad-t', padT + 'px'); root.style.setProperty('--pad-b', padB + 'px');
+    root.style.setProperty('--page-h', Math.max(0, vh - padY) + 'px');
+    const dpr = window.devicePixelRatio || 1;
+    const baseW = Math.max(64, vw - padX - 2 * GUTTER), baseH = Math.max(56, vh - padY - 2 * V_PAD);
+    let mode = 'desk', pick, showLegend = false, btnW = 0, btnH = 0;
+    root.classList.toggle('touch', touchMode);                // first: the measurements below need the touch UI to be displayed
+
+    if (!touchMode) {
+      let hLeg = 0;
+      if (legendEl) { legendEl.hidden = false; hLeg = legendEl.offsetHeight + LEGEND_GAP; }
+      const withLeg = pickScale(Math.min(baseW / C.W, (baseH - hLeg) / C.H), dpr);
+      const without = pickScale(Math.min(baseW / C.W, baseH / C.H), dpr);
+      showLegend = !!legendEl && withLeg.s >= without.s - 1e-6;      // the legend only stays when it costs no scale step (it repeats the H page)
+      pick = showLegend ? withLeg : without;
+      if (legendEl) legendEl.hidden = !showLegend;
+    } else {
+      if (legendEl) legendEl.hidden = true;
+      // (a) portrait stack: picture on top, PAUSE/SOUND row and the four big buttons directly below
+      btnW = U.clamp(Math.floor((baseW - 2 * BTN_GAP - PAD_SPREAD) / 4), 44, BTN_MAX_W);
+      const minBtnH = Math.min(btnW, 64);
+      const port = pickScale(Math.min(baseW / C.W, (baseH - CTRL_OVERHEAD - minBtnH) / C.H), dpr);
+      // (b) landscape: pads at both sides of the picture
+      const btnL = U.clamp(Math.floor(vh * 0.16), 44, 64);
+      const reserve = 2 * btnL + BTN_GAP + 12 + 12;
+      const land = vw >= LAND_MIN_VW ? pickScale(Math.min((vw - padX - 2 * reserve) / C.W, baseH / C.H), dpr) : null;
+      mode = land && land.s >= port.s - 1e-6 ? 'land' : 'port';
+      pick = mode === 'land' ? land : port;
+      // (c) too small for either: translucent pads over the picture's margins
+      if (pick.s < 1) {
+        const over = pickScale(Math.min((vw - padX - 16) / C.W, baseH / C.H), dpr);
+        if (over.s > pick.s * 1.05) { mode = 'over'; pick = over; }
+      }
+      const sideMode = mode !== 'port';
+      root.classList.toggle('land', sideMode);
+      root.classList.toggle('over', mode === 'over');
+      if (sideMode) { btnW = btnH = btnL; }
+      else btnH = U.clamp(Math.floor(baseH - C.H * pick.s - CTRL_OVERHEAD), minBtnH, BTN_MAX_H);
+      root.style.setProperty('--btn-w', btnW + 'px');
+      root.style.setProperty('--btn-h', btnH + 'px');
+      if (mode === 'land' && touchEl) {                       // measure the real side reserves (safe-area insets) and refit once
+        const L = touchEl.querySelector('.left'), R = touchEl.querySelector('.right');
+        const lr = L ? L.getBoundingClientRect() : null, rr = R ? R.getBoundingClientRect() : null;
+        if (lr && rr && lr.width > 0 && rr.width > 0) {
+          const res = Math.max(lr.right - padL, (vw - padR) - rr.left) + 12;
+          if (res < vw / 2 && Math.abs(res - reserve) > 0.5) {
+            const again = pickScale(Math.min((vw - padX - 2 * res) / C.W, baseH / C.H), dpr);
+            if (again.s <= pick.s) pick = again;
+          }
+        }
+      }
+    }
+    if (!touchMode) { root.classList.remove('land'); root.classList.remove('over'); }
+
+    const cssW = +(C.W * pick.s).toFixed(3), cssH = +(C.H * pick.s).toFixed(3);
+    const m = pick.sharp ? U.clamp(Math.ceil((cssW * dpr) / C.W - 1e-6), 1, MAX_BACKING) : 1;
+    if (m !== backing) {
+      backing = m;
+      canvas.width = C.W * m; canvas.height = C.H * m;       // resizing clears the canvas and resets its state
+      if (vctx) vctx.imageSmoothingEnabled = false;
+    }
+    canvas.style.width = cssW + 'px';
+    canvas.style.height = cssH + 'px';
+    canvas.style.imageRendering = pick.sharp ? 'auto' : 'pixelated';
+    layout = {
+      scale: cssW / C.W, w: cssW, h: cssH, vw, vh, dpr, touch: touchMode, land: mode === 'land' || mode === 'over', mode,
+      sharp: pick.sharp, m, legend: showLegend, btnW, btnH, availW: baseW, availH: baseH,
+    };
+    present();
+  }
+
+  // ===================================================================================================
+  // Boot
+  // ===================================================================================================
+  function bindDom() {
+    const byId = (id) => document.getElementById(id);
+    rootEl = document.documentElement;
+    legendEl = byId('legend');
+    touchEl = byId('touch');
+    focusEl = byId('focus');
+    soundBtn = touchEl ? touchEl.querySelector('[data-k="sound"]') : null;
+    try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) { coarse = false; }
+    touchMode = coarse;
+
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('keyup', onKeyUp);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    window.addEventListener('resize', fit);
+    window.addEventListener('orientationchange', () => { fit(); setTimeout(fit, 250); });
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', fit);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) hold('hidden'); else release('hidden'); });
+    window.addEventListener('pointerdown', beforeGesture, true);
+    window.addEventListener('pointerup', unlockAudio, true);
+    window.addEventListener('touchend', unlockAudio, true);
+    document.addEventListener('gesturestart', (e) => e.preventDefault());      // iOS Safari pinch zoom (Ut1)
+    window.addEventListener('gamepadconnected', (e) => {
+      if (usablePad(e.gamepad)) { padSeen = true; toast('PAD READY', COL.green); }
+    });
+    canvas.addEventListener('pointerdown', onCanvasPointer);
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+    bindTouchControls();
+    if (focusEl) {
+      focusEl.addEventListener('pointerdown', (e) => { e.preventDefault(); });
+      focusEl.addEventListener('click', dismissFocus);
+      focusEl.addEventListener('keydown', (e) => { if (e.code === 'Enter' || e.code === 'Space') { e.preventDefault(); dismissFocus(); } });
+      setInterval(() => { healBlur(BLUR_HEAL_MS); updateFocusOverlay(); }, 500);   // also catches focus changes that fire no event (iframes), and a blur nobody followed with a focus
+      updateFocusOverlay();
+    }
+    // The host hid / scrolled away the iframe (no blur, no visibilitychange): pause like a blur (U1).
+    if (typeof IntersectionObserver === 'function') {
+      try {
+        new IntersectionObserver((entries) => {
+          const e = entries[entries.length - 1];
+          if (e.isIntersecting) release('offscreen'); else hold('offscreen');
+        }, { threshold: [0, 0.05] }).observe(canvas);
+      } catch (e) { /* ignore */ }
+    }
+    // ... or throttled it to a halt: no animation frame for 700 ms (+ a 250 ms second look, so a long main-thread hitch is not mistaken for it).
+    setInterval(() => {
+      if (holds.has('stall') || performance.now() - lastRaf <= STALL_MS) return;
+      setTimeout(() => { if (performance.now() - lastRaf > STALL_MS + 200) hold('stall'); }, 250);
+    }, 500);
+  }
+
+  function installHooks() {
+    const ready = (fn) => (...a) => { finishBoot(); return fn(...a); };         // the hooks exist at once and finish the boot on first use
+    const hooks = {
+      Game, GFX, AUDIO, LEVELS, C, U,
+      scene: () => scene,
+      goto(name, args) {
+        if (name === 'pause') setPaused(true);
+        else gotoScene(name, args);
+        render();
+      },
+      input: {
+        set(pi, o) { Object.assign(virt[pi === 1 ? 1 : 0], o || {}); },
+        clear() { virt[0] = Object.assign(virt[0], blankVirt()); virt[1] = Object.assign(virt[1], blankVirt()); },
+      },
+      freeze(b) { frozen = !!b; acc = 0; },
+      step(n) {
+        const count = n === undefined ? 1 : n | 0;
+        for (let i = 0; i < count; i++) tick(false);
+        render();
+      },
+      start(players, level, seed) {
+        gotoScene('play', { players: players === 2 ? 2 : 1, level: level || 1, seed: seed === undefined ? 1 : seed });
+        render();
+      },
+      // ---- extras, not part of the contract --------------------------------------------------------------
+      _main: {
+        layout: () => ({ ...layout }),
+        fit,
+        paused: () => paused,
+        setPaused: (b) => setPaused(!!b),
+        holds: () => Array.from(holds),
+        scores: () => loadScores().map((s) => ({ ...s })),
+        resetScores: () => { scoresCache = null; U.store.set('scores', null); },
+        session: () => ({ ...session }),
+        toast,
+        touchMode: () => touchMode,
+        touchOnly: () => touchOnly(),
+        sceneTime: () => sceneT,
+        entry: () => scenes.entry.debug(),
+        padSlots: () => Array.from(padSlot.entries()),
+        rows: () => (scenes[scene].rows ? scenes[scene].rows() : null),
+        confirmQuit: () => confirmQuit,
+        ambient: () => ({ shown: ambient.shown(), avoid: lastAvoid.map((r) => r.slice()) }),   // K1: the last layered frame's exclusion rectangles
+        endingBand: () => scenes.ending.band(),
+        howtoPage: () => scenes.howto.page(),
+        ambientReset: () => ambient.reset(),
+        persistent: () => storagePersistent(),
+      },
+    };
+    for (const k of ['scene', 'goto', 'freeze', 'step', 'start']) hooks[k] = ready(hooks[k]);
+    for (const k of Object.keys(hooks._main)) if (typeof hooks._main[k] === 'function') hooks._main[k] = ready(hooks._main[k]);
+    window.__fizzpop = hooks;
+  }
+
+  /** First paint: a LOADING frame (GFX.init can block the main thread for 100-600 ms on a weak phone). */
+  function drawLoading() {
+    vctx.fillStyle = '#050a1e';
+    vctx.fillRect(0, 0, C.W, C.H);
+    vctx.fillStyle = '#9aa1d8';
+    vctx.font = 'bold 12px monospace';
+    vctx.textAlign = 'center'; vctx.textBaseline = 'middle';
+    vctx.fillText('LOADING', C.W / 2, C.H / 2);
+  }
+
+  function finishBoot() {
+    if (bootDone) return;
+    bootDone = true;
+    try { GFX.init(); } catch (e) { reportError('GFX.init', e); }
+    bindDom();
+    fit();
+    gotoScene('title');
+    render();
+    last = lastRaf = performance.now();
+    requestAnimationFrame(frame);
+    requestAnimationFrame(() => requestAnimationFrame(fit));   // re-measure once fonts / layout settled
+  }
+
+  function boot() {
+    if (booted) return;
+    booted = true;
+    canvas = document.getElementById('screen');
+    vctx = canvas.getContext('2d', { alpha: false });
+    vctx.imageSmoothingEnabled = false;
+    lcanvas = document.createElement('canvas');
+    lcanvas.width = C.W; lcanvas.height = C.H;
+    ctx = lcanvas.getContext('2d');
+    ctx.imageSmoothingEnabled = false;
+    drawLoading();
+    installHooks();
+    requestAnimationFrame(() => setTimeout(finishBoot, 0));    // let the LOADING frame reach the screen first ...
+    setTimeout(finishBoot, 400);                                // ... but a hidden tab never runs rAF
+  }
+
+  return { boot };
+})();
+Main.boot();

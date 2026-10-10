@@ -1,0 +1,6 @@
+# generated / scratch
+out/
+backup/
+test/out/
+*.wav
+node_modules/

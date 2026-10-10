@@ -1,0 +1,12 @@
+import path from 'path';
+import fs from 'fs';
+import { launch, fp, canvasShot, PROJECT } from '../tools/harness.mjs';
+const O = path.join(PROJECT, 'out/qa3/art/scenes');
+const t = await launch({ viewport: { width: 1280, height: 800 } });
+const g = fp(t.page);
+await g.freeze(true);
+await g.start(2, 12, 7); await g.step(150);
+await g.evaluate(() => fz._main.setPaused(true)); await g.step(2);
+await canvasShot(t.page, path.join(O, 'pause.png'), { scale: 3 });
+await t.page.screenshot({ path: path.join(O, 'page_desktop.png') });
+console.log(t.errors); await t.close();

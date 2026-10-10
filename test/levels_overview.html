@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fizz &amp; Pop level overview</title>
+<!--
+  Level-design review page (owned by the levels module). Draws every round of src/30_levels.js the way
+  the game will see it: the real tile art from GFX.levelCanvas (or a schematic fill) plus overlays:
+    green boxes  spawn pads P1 / P2 (cols 2-6 / 25-29, rows 21-24)
+    coloured boxes  enemy spawn boxes with a type initial (N C J S G K) and a facing triangle
+    white circles  air attractor points (where floating bubbles gather), radius = one bubble
+    cyan chevrons  floor / ceiling gap columns (wrap-around)
+  Driven by test/levels_render.mjs through the global `T`; opened directly it shows the 6x5 overview.
+-->
+<style>
+  :root { --bg: #0b0a14; --fg: #e8e6ff; }
+  html, body { margin: 0; background: var(--bg); color: var(--fg); }
+  body { padding: 8px; font: 12px monospace; }
+  canvas { display: block; image-rendering: pixelated; }
+</style>
+</head>
+<body>
+<script src="../src/00_shared.js"></script>
+<script src="../src/10_gfx.js"></script>
+<script src="../src/30_levels.js"></script>
+<script>
+const T = (() => {
+  const TILE = 8, MAP_Y = 16, W = 256, H = 224;
+  const TYPE = {
+    nibbler:  { col: '#ff9a3c', ch: 'N' }, crabbit: { col: '#ff4d6d', ch: 'C' }, jellop: { col: '#c070ff', ch: 'J' },
+    springle: { col: '#3ce08a', ch: 'S' }, glimmer: { col: '#ffe14a', ch: 'G' }, kraken:  { col: '#ff3c8e', ch: 'K' },
+  };
+  const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  GFX.init();
+
+  /** One round as a 256x224 canvas. opts: {real=true, overlay=true, grid=false} */
+  function round(i, opts = {}) {
+    const { real = true, overlay = true, grid = false } = opts;
+    const lv = LEVELS[i], th = GFX.theme(i);
+    const cv = mk(W, H), g = cv.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.fillStyle = th.bg; g.fillRect(0, 0, W, H);
+    g.fillStyle = '#000'; g.fillRect(0, 0, W, MAP_Y);
+    if (real) g.drawImage(GFX.levelCanvas(i, lv.map), 0, MAP_Y);
+    else {
+      g.fillStyle = th.accent;
+      lv.map.forEach((row, r) => [...row].forEach((ch, c) => { if (ch === '#') g.fillRect(c * TILE, MAP_Y + r * TILE, TILE, TILE); }));
+    }
+    if (grid) {
+      g.fillStyle = 'rgba(255,255,255,0.10)';
+      for (let r = 0; r < 26; r += 4) g.fillRect(16, MAP_Y + r * TILE, 224, 1);
+    }
+    if (overlay) {
+      // gap chevrons (wrap-around)
+      g.fillStyle = 'rgba(80,255,240,0.85)';
+      for (let c = 2; c < 30; c++) {
+        if (lv.map[25][c] === '.') { const x = c * TILE; g.beginPath(); g.moveTo(x + 1, MAP_Y + 25 * TILE + 5); g.lineTo(x + 7, MAP_Y + 25 * TILE + 5); g.lineTo(x + 4, MAP_Y + 25 * TILE + 1); g.closePath(); g.fill(); }
+        if (lv.map[0][c] === '.') { const x = c * TILE; g.beginPath(); g.moveTo(x + 1, MAP_Y + 1); g.lineTo(x + 7, MAP_Y + 1); g.lineTo(x + 4, MAP_Y + 6); g.closePath(); g.fill(); }
+      }
+      // spawn pads
+      g.fillStyle = 'rgba(80,255,120,0.18)'; g.strokeStyle = 'rgba(80,255,120,0.9)'; g.lineWidth = 1;
+      for (const [c0, c1, lab] of [[2, 6, 'P1'], [25, 29, 'P2']]) {
+        g.fillRect(c0 * TILE, MAP_Y + 21 * TILE, (c1 - c0 + 1) * TILE, 4 * TILE);
+        g.strokeRect(c0 * TILE + 0.5, MAP_Y + 21 * TILE + 0.5, (c1 - c0 + 1) * TILE - 1, 4 * TILE - 1);
+        GFX.text(g, lab, c0 * TILE + 8, MAP_Y + 23 * TILE + 8, '#7dff9a', { shadow: true });
+      }
+      // enemies
+      lv.enemies.forEach((e) => {
+        const t = TYPE[e.t] || { col: '#fff', ch: '?' };
+        const n = e.t === 'kraken' ? 6 : 2, x = e.c * TILE, y = MAP_Y + e.r * TILE, s = n * TILE;
+        g.fillStyle = t.col; g.globalAlpha = 0.45; g.fillRect(x, y, s, s); g.globalAlpha = 1;
+        g.strokeStyle = t.col; g.strokeRect(x + 0.5, y + 0.5, s - 1, s - 1);
+        GFX.text(g, t.ch, x + s / 2 - 4, y + s / 2 - 4, '#fff', { shadow: true });
+        g.fillStyle = '#fff'; g.beginPath();
+        const mx = e.d > 0 ? x + s - 1 : x + 1, dir = e.d > 0 ? -3 : 3;
+        g.moveTo(mx, y + 2); g.lineTo(mx, y + 8); g.lineTo(mx - dir, y + 5); g.closePath(); g.fill();
+      });
+      // air attractors (circle = one bubble)
+      lv.air.forEach(([ax, ay], k) => {
+        g.strokeStyle = '#fff'; g.lineWidth = 1.5;
+        g.beginPath(); g.arc(ax * TILE, MAP_Y + ay * TILE, 8, 0, Math.PI * 2); g.stroke();
+        g.fillStyle = 'rgba(255,255,255,0.25)'; g.fill();
+        GFX.text(g, 'A', ax * TILE - 4, MAP_Y + ay * TILE - 4, '#fff', { shadow: true });
+      });
+    }
+    // header
+    GFX.text(g, 'R' + String(i + 1).padStart(2, '0') + ' ' + (lv.name || '').toUpperCase(), 4, 4, th.accent, { shadow: true });
+    const info = (lv.specials.length ? lv.specials.map((s) => s[0].toUpperCase()).join('') + ' ' : '') + lv.hurry + 'S';
+    GFX.text(g, info, W - 4, 4, '#ffffff', { align: 'right', shadow: true });
+    return cv;
+  }
+
+  /** Overview grid of rounds [from, to) as one canvas. */
+  function sheet(from = 0, to = 30, cols = 6, scale = 1, opts = {}) {
+    const n = to - from, rows = Math.ceil(n / cols), pad = 4;
+    const cw = W * scale, ch = H * scale;
+    const cv = mk(cols * (cw + pad) + pad, rows * (ch + pad) + pad), g = cv.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    g.fillStyle = '#05040c'; g.fillRect(0, 0, cv.width, cv.height);
+    for (let k = 0; k < n; k++) {
+      const x = pad + (k % cols) * (cw + pad), y = pad + Math.floor(k / cols) * (ch + pad);
+      g.drawImage(round(from + k, opts), 0, 0, W, H, x, y, cw, ch);
+    }
+    return cv;
+  }
+
+  /** Stand-alone single round scaled up. */
+  function single(i, scale = 3, opts = {}) {
+    const src = round(i, opts), cv = mk(W * scale, H * scale), g = cv.getContext('2d');
+    g.imageSmoothingEnabled = false; g.drawImage(src, 0, 0, W * scale, H * scale);
+    return cv;
+  }
+  return { round, sheet, single, LEVELS };
+})();
+document.body.appendChild(T.sheet(0, 30, 6, 1));
+</script>
+</body>
+</html>

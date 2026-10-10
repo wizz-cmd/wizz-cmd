@@ -1,0 +1,22 @@
+import path from 'path';
+import fs from 'fs';
+import { launch, canvasFnShot, PROJECT } from '../tools/harness.mjs';
+const O = path.join(PROJECT, 'out/qa3/art/sheets'); fs.mkdirSync(O, { recursive: true });
+const t = await launch({});
+await t.page.waitForFunction(() => !!window.__fizzpop);
+const sheet = (file, cells, Z, per, bg) => canvasFnShot(t.page, path.join(O, file), (cells, Z, per, bg) => {
+  const G = fz.GFX; G.init();
+  const cw = 20 * Z + 6, rows = Math.ceil(cells.length / per);
+  const cv = document.createElement('canvas'); cv.width = per * cw + 4; cv.height = rows * (20 * Z + 18) + 4;
+  const g = cv.getContext('2d'); g.fillStyle = bg; g.fillRect(0, 0, cv.width, cv.height); g.imageSmoothingEnabled = false;
+  cells.forEach(([n, f], i) => { const sz = G.size(n); const tmp = document.createElement('canvas'); tmp.width = sz.w; tmp.height = sz.h; G.draw(tmp.getContext('2d'), n, f, 0, 0);
+    const x = 2 + (i % per) * cw, y = 2 + Math.floor(i / per) * (20 * Z + 18); g.drawImage(tmp, x + (20 * Z - sz.w * Z) / 2, y + (20 * Z - sz.h * Z) / 2, sz.w * Z, sz.h * Z);
+    g.fillStyle = '#9a96c8'; g.font = '11px monospace'; g.fillText(n + ':' + f, x, y + 20 * Z + 12); });
+  return cv;
+}, { scale: 1, args: [cells, Z, per, bg] });
+const cells = [];
+for (const n of ['p1_die', 'p1_stun', 'p2_die', 'p2_stun']) for (let f = 0; f < 4; f++) if (f < 4) cells.push([n, f % (n.endsWith('stun') ? 2 : 4)]);
+await sheet('player_die_stun.png', cells.filter((c, i, a) => !(c[0].endsWith('stun') && i % 4 > 1)), 6, 6, '#1a1230');
+await sheet('die_enemies.png', ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer'].flatMap((e) => [0, 1].map((f) => [e + '_die', f])), 5, 10, '#1a1230');
+await sheet('icons.png', [['p1_icon', 0], ['p2_icon', 0], ['bonefin', 0], ['crabbit_throw', 0], ['glimmer_fire', 0], ['springle_squash', 0]], 8, 6, '#1a1230');
+await t.close();

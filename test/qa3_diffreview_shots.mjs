@@ -1,0 +1,18 @@
+import { boot, log, canvasShot, OUT } from './qa3_diffreview_lib.mjs';
+const b = await boot({ players: 2, level: 30, seed: 5, god: true, skipIntro: false });
+const P = b.page;
+const shot = (n) => canvasShot(P, OUT + '/shot_' + n + '.png', { scale: 3 });
+await P.evaluate(() => { fz.step(100); });
+await shot('boss_intro');
+await P.evaluate(() => { fz.Game.debug.skipIntro(); fz.step(30); const S = fz.Game.debug._S(); const e = S.enemies[0]; e.hp = 25; e.inkT = 12; e.x = 100; e.y = 70; e.jx = 0; e.jy = 0; fz.step(1); });
+await shot('boss_telegraph');
+await P.evaluate(() => { const D = fz.Game.debug, S = D._S(); S.enemies[0].hp = 9; for (let i = 0; i < 5; i++) D.spawn('thunder', 40 + i * 30, 150); D.setHurryTimer(150 * 60 - 3); fz.step(8); });
+await shot('boss_hurry');
+await P.evaluate(() => { fz.start(1, 12, 3); const D = fz.Game.debug; D.skipIntro(); D.god(true); D.spawn('nibbler', 60, 100); D.spawn('crabbit', 120, 100); D.give(0, 'clock'); fz.step(20); });
+await shot('frozen');
+await P.evaluate(() => { const D = fz.Game.debug; D.spawn('thunder', 100, 150); const S = D._S(); S.players[0].x = 100; S.players[0].y = 150; fz.step(2); });
+await shot('thunder_flash');
+await P.evaluate(() => { const D = fz.Game.debug; const S = D._S(); S.players[0].letters = [true, true, true, true, true, false]; D.spawn('letter', S.players[0].x, S.players[0].y); const lb = S.bubbles.find((q) => q.kind === 'letter'); lb.letter = 'D'; lb.x = S.players[0].x; lb.y = S.players[0].y; fz.step(30); });
+await shot('extend');
+log(b.t.errors);
+await b.t.close();

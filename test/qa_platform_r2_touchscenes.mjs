@@ -1,0 +1,10 @@
+import { launchBrowser, open, ev, OUT, sleep } from './qa_platform_r2_lib.mjs';
+const browser = await launchBrowser({ autoplay: true });
+const t = await open({ browser, viewport: { width: 390, height: 844 }, touch: true, dpr: 3, colorScheme: 'light' });
+await ev(t.page, () => { fz.freeze(true); fz.goto('entry', { entries: [{ pi: 0, score: 41000, round: 7 }] }); fz.step(40); });
+await t.page.screenshot({ path: `${OUT}/entry_touch.png`, clip: { x: 0, y: 190, width: 390, height: 360 } });
+await ev(t.page, () => { fz.goto('howto', { page: 0 }); fz.step(40); });
+await t.page.screenshot({ path: `${OUT}/howto_touch.png`, clip: { x: 0, y: 190, width: 390, height: 360 } });
+await ev(t.page, () => { fz.goto('scores', {}); fz.step(40); });
+await t.page.screenshot({ path: `${OUT}/scores_touch.png`, clip: { x: 0, y: 190, width: 390, height: 360 } });
+await browser.close();

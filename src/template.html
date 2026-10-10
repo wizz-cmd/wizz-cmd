@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
+<title>Fizz &amp; Pop</title>
+<style>
+  /* Page chrome colours are tokens on :root. The game canvas itself is always dark; only the
+     page around it follows the light/dark theme (SPEC 2.5). Dark values are declared twice on
+     purpose: once for the OS preference (unless the host forces light) and once for a forced dark.
+     color-scheme follows the tokens: light on :root, dark inside both dark blocks (Ut3). */
+  :root {
+    --page-bg: #e9eef6;
+    --page-fg: #1b1033;
+    --page-muted: #566080;
+    --frame: #1b1033;
+    --frame-glow: rgba(27, 16, 51, 0.28);
+    --key-bg: #ffffff;
+    --key-fg: #1b1033;
+    --key-edge: #b4bcd6;
+    --btn-bg: #ffffff;
+    --btn-fg: #1b1033;
+    --btn-edge: #98a2c6;
+    --btn-on: #ff6fae;
+    --btn-on-fg: #1b1033;
+    --veil: rgba(8, 6, 22, 0.46);
+    --veil-fg: #ffffff;
+    --btn: min(68px, calc((100vw - 96px) / 4));   /* fallback before Main's fit() sets --btn-w/--btn-h */
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --page-bg: #0b0a14;
+      --page-fg: #e8e6ff;
+      --page-muted: #9d9bc0;
+      --frame: #26214f;
+      --frame-glow: rgba(120, 104, 255, 0.28);
+      --key-bg: #1b1933;
+      --key-fg: #e8e6ff;
+      --key-edge: #3c3868;
+      --btn-bg: #1b1933;
+      --btn-fg: #e8e6ff;
+      --btn-edge: #4a4680;
+      --btn-on: #ff6fae;
+      --btn-on-fg: #1b1033;
+      --veil: rgba(4, 3, 14, 0.5);
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --page-bg: #0b0a14;
+    --page-fg: #e8e6ff;
+    --page-muted: #9d9bc0;
+    --frame: #26214f;
+    --frame-glow: rgba(120, 104, 255, 0.28);
+    --key-bg: #1b1933;
+    --key-fg: #e8e6ff;
+    --key-edge: #3c3868;
+    --btn-bg: #1b1933;
+    --btn-fg: #e8e6ff;
+    --btn-edge: #4a4680;
+    --btn-on: #ff6fae;
+    --btn-on-fg: #1b1033;
+    --veil: rgba(4, 3, 14, 0.5);
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { margin: 0; height: 100%; }
+  /* No pinch / double-tap zoom, no pull-to-refresh or rubber-banding, no text selection (Ut1).
+     pan-x pan-y (instead of none) keeps a degenerate, overflowing frame scrollable. */
+  html, body {
+    touch-action: pan-x pan-y; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+  }
+  html { overflow-x: hidden; }
+  body {
+    background: var(--page-bg);
+    color: var(--page-fg);
+    font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+    padding: 8px 16px;                 /* 16 px side gutters, also on a 360 px phone */
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  /* ---- stage: canvas + legend. margin-block:auto centres it vertically but, unlike justify-content:center,
+     never pushes an overflowing stage above the top edge where it could not be scrolled to (Ut4). ---- */
+  #stage {
+    flex: 0 0 auto; width: 100%; margin-block: auto;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  /* Phones in portrait (K2): the page is exactly as tall as the padded viewport (Main publishes --page-h), the controls rest at its
+     bottom (thumb zone, inside any root padding / safe area) and the picture is centred in the space above them. No band below. */
+  html.touch:not(.land) body { min-height: var(--page-h, 100%); }
+  html.touch:not(.land) #stage { flex: 1 1 auto; margin-block: 0; }
+  html.touch:not(.land) #frame { margin-block: auto; }
+  #frame { position: relative; line-height: 0; max-width: 100%; }
+  #screen {
+    display: block;
+    /* Safe default before Main's fit() sets explicit px sizes: never wider than the page. */
+    width: min(100%, 768px); height: auto; aspect-ratio: 256 / 224;
+    background: #000;
+    image-rendering: crisp-edges;
+    image-rendering: pixelated;       /* Main switches to auto (sharp-bilinear) when the scale is not a whole device-pixel multiple */
+    border-radius: 3px;
+    outline: 4px solid var(--frame);
+    box-shadow: 0 10px 34px var(--frame-glow);
+    touch-action: none;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+
+  /* click-to-play / focus overlay (an Artifact iframe starts without keyboard focus). Light veil: the picture stays visible. */
+  #focus {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    background: var(--veil); color: var(--veil-fg);
+    border-radius: 3px; cursor: pointer; text-align: center; line-height: 1.3;
+    font-weight: 800; letter-spacing: 0.14em; font-size: clamp(16px, 4.4vw, 30px);
+    outline: none; -webkit-tap-highlight-color: transparent;
+  }
+  #focus .cta {
+    padding: 0.35em 1.1em; border-radius: 999px;
+    background: rgba(8, 6, 22, 0.78); border: 2px solid rgba(255, 255, 255, 0.85);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
+    animation: pulse 1.4s ease-in-out infinite;
+  }
+  #focus small {
+    font-weight: 600; letter-spacing: 0.03em; font-size: clamp(11px, 2.4vw, 14px);
+    padding: 3px 10px; border-radius: 8px; background: rgba(8, 6, 22, 0.6); max-width: 92%;
+  }
+  @keyframes pulse { 50% { opacity: 0.55; } }
+  @media (prefers-reduced-motion: reduce) { #focus .cta { animation: none; } }
+
+  /* compact controls legend (desktop only; Main hides it when it would cost the picture a scale step) */
+  #legend {
+    margin: 12px 0 0; max-width: 940px; text-align: center;
+    color: var(--page-muted); font-size: 12px; line-height: 1.9;
+  }
+  #legend .grp { display: inline-block; margin: 0 8px; white-space: nowrap; }
+  #legend b { color: var(--page-fg); margin-right: 3px; }
+  #legend kbd {
+    display: inline-block; min-width: 1.6em; padding: 0 5px; margin: 0 1px; text-align: center;
+    font: 600 11px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    color: var(--key-fg); background: var(--key-bg);
+    border: 1px solid var(--key-edge); border-bottom-width: 2px; border-radius: 4px;
+  }
+
+  /* ---- touch controls: shown for (pointer: coarse) or after the first touch (class .touch on the root element).
+     Main's fit() sets --btn-w / --btn-h and one of three arrangements on the root element:
+       (none)   portrait: picture on top, then a PAUSE/SOUND row, then the four big buttons directly below it
+       .land    landscape: pads at both sides of the picture, PAUSE/SOUND stacked top right
+       .over    frames too small for either: the same fixed pads, drawn translucent over the picture's margins ---- */
+  #touch { display: none; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  html.touch #legend { display: none; }
+  html.touch #touch {
+    display: flex; flex-direction: column; align-items: stretch; gap: 10px;
+    width: 100%; flex: 0 0 auto; padding: 10px 0 8px;
+  }
+  #touch .pads { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
+  #touch .grp { display: flex; gap: 8px; align-items: flex-start; }
+  #touch .mid { order: -1; justify-content: center; align-items: center; gap: 16px; }
+  #touch button {
+    appearance: none; -webkit-appearance: none; margin: 0; padding: 0;
+    width: var(--btn-w, var(--btn)); height: var(--btn-h, var(--btn)); border-radius: 50%;
+    font: 800 12px/1 system-ui, sans-serif; letter-spacing: 0;
+    color: var(--btn-fg); background: var(--btn-bg);
+    border: 2px solid var(--btn-edge); box-shadow: 0 3px 0 var(--btn-edge);
+    touch-action: none; -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
+  }
+  html:not(.land) #touch .pads button { border-radius: 24px; }
+  #touch button[data-k="left"], #touch button[data-k="right"] { font-size: 28px; }
+  #touch button.on { background: var(--btn-on); color: var(--btn-on-fg); transform: translateY(2px); box-shadow: 0 1px 0 var(--btn-edge); }
+  #touch button.sm { width: auto; min-width: 96px; height: 44px; padding: 0 18px; border-radius: 22px; font-size: 12px; letter-spacing: 0.04em; }
+  #touch button[data-k="sound"][data-muted="1"] { text-decoration: line-through; opacity: 0.7; }
+
+  /* landscape + overlay: the groups are fixed to the screen sides so they never push the picture around */
+  html.touch.land #touch { position: fixed; inset: 0; display: block; padding: 0; pointer-events: none; }
+  html.touch.land #touch .pads { display: block; }
+  html.touch.land #touch .grp { position: absolute; pointer-events: auto; }
+  /* inside the root padding Main measured (--pad-*: a host that pads :root for safe areas) and inside env() insets, whichever is larger (R3) */
+  html.touch.land #touch .left { left: max(calc(var(--pad-l, 0px) + 12px), env(safe-area-inset-left)); bottom: max(calc(var(--pad-b, 0px) + 12px), env(safe-area-inset-bottom)); align-items: flex-end; }
+  html.touch.land #touch .right { right: max(calc(var(--pad-r, 0px) + 12px), env(safe-area-inset-right)); bottom: max(calc(var(--pad-b, 0px) + 12px), env(safe-area-inset-bottom)); align-items: flex-end; }
+  html.touch.land #touch .mid {
+    top: max(calc(var(--pad-t, 0px) + 12px), env(safe-area-inset-top)); right: max(calc(var(--pad-r, 0px) + 12px), env(safe-area-inset-right));
+    flex-direction: column; align-items: flex-end; gap: 8px;
+  }
+  html.touch.over #touch .grp { opacity: 0.62; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="frame">
+    <canvas id="screen" width="256" height="224" role="img" aria-label="Fizz and Pop game screen"></canvas>
+    <div id="focus" role="button" tabindex="0" hidden>
+      <span class="cta">CLICK TO PLAY</span>
+      <small>Click here to focus the game and switch the sound on</small>
+    </div>
+  </div>
+  <p id="legend">
+    <span class="grp"><b>P1</b> <kbd>&larr;</kbd><kbd>&rarr;</kbd> move <kbd>&uarr;</kbd>/<kbd>X</kbd> jump <kbd>Space</kbd>/<kbd>Z</kbd> bubble</span>
+    <span class="grp"><b>P2</b> <kbd>A</kbd><kbd>D</kbd> move <kbd>W</kbd> jump <kbd>Q</kbd>/<kbd>Left Shift</kbd> bubble <small>(keys follow the WASD block)</small></span>
+    <span class="grp"><b>Pad</b> stick / d-pad move <kbd>A</kbd> jump <kbd>B</kbd> bubble <kbd>Start</kbd> pause</span>
+    <span class="grp"><kbd>Enter</kbd> start <kbd>P</kbd> pause <kbd>M</kbd> sound <kbd>H</kbd> help</span>
+  </p>
+  <noscript><p style="color:var(--page-fg)">Fizz &amp; Pop needs JavaScript.</p></noscript>
+</div>
+<div id="touch" aria-label="Touch controls">
+  <div class="grp mid"><button type="button" class="sm" data-k="pause" tabindex="-1">PAUSE</button><button type="button" class="sm" data-k="sound" tabindex="-1">SOUND</button></div>
+  <div class="pads">
+    <div class="grp left"><button type="button" data-k="left" tabindex="-1" aria-label="Move left">&#9664;</button><button type="button" data-k="right" tabindex="-1" aria-label="Move right">&#9654;</button></div>
+    <div class="grp right"><button type="button" data-k="fire" tabindex="-1">BUBBLE</button><button type="button" data-k="jump" tabindex="-1">JUMP</button></div>
+  </div>
+</div>
+<!--@@SCRIPTS@@-->
+</body>
+</html>

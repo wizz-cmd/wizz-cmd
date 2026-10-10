@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fizz &amp; Pop stubs</title>
+<!--
+  Per-module test page template (SPEC §2.2: modules also work as separate classic scripts, in order).
+  Loads the shared module, the four STUB modules and the scaffold Main, so the whole game runs with
+  window.__fizzpop available. To test a real module, copy this file next to your test script and
+  replace the matching stub line by the real src file, e.g.
+      <script src="../../src/10_gfx.js"></script>      instead of     <script src="gfx_stub.js"></script>
+  Paths below are relative to test/stubs/ (adjust when you copy the page elsewhere).
+-->
+<style>
+  :root { --bg: #0b0a14; --fg: #e8e6ff; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--fg); display: flex; align-items: center; justify-content: center; }
+  #screen { display: block; width: 768px; height: 672px; image-rendering: pixelated; background: #000; }
+</style>
+</head>
+<body>
+<canvas id="screen" width="256" height="224"></canvas>
+<script src="../../src/00_shared.js"></script>
+<script src="gfx_stub.js"></script>
+<script src="audio_stub.js"></script>
+<script src="levels_stub.js"></script>
+<script src="game_stub.js"></script>
+<script src="../../src/50_main.js"></script>
+</body>
+</html>

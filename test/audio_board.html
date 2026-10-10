@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fizz &amp; Pop sound board</title>
+<!--
+  Manual listening board for src/20_audio.js (dev tool, not part of the game bundle).
+  Open this file in a browser (file:// is fine). A button per music loop, jingle and SFX, plus tempo / mute / pause
+  controls, SFX pitch + volume sliders, a live level meter and the engine's internal counters.
+  Loads ../src/00_shared.js and ../src/20_audio.js as classic scripts, exactly like the bundle order.
+-->
+<style>
+  :root { --bg: #f4f2fb; --fg: #1d1b2e; --card: #fff; --line: #cfc9e6; --accent: #d2308f; --accent2: #1c8fa8; --mute: #6a6585; --on: #ffe36b; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0e0c1a; --fg: #ece9ff; --card: #1a1730; --line: #3a3560; --accent: #ff7ac6; --accent2: #5fd6ee; --mute: #9b96c4; --on: #5b4b00; } }
+  :root[data-theme="dark"] { --bg: #0e0c1a; --fg: #ece9ff; --card: #1a1730; --line: #3a3560; --accent: #ff7ac6; --accent2: #5fd6ee; --mute: #9b96c4; --on: #5b4b00; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.4 system-ui, sans-serif; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; } h2 { font-size: 14px; letter-spacing: .08em; text-transform: uppercase; color: var(--mute); margin: 18px 0 8px; }
+  p { margin: 0 0 8px; color: var(--mute); }
+  .bar { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .grid { display: flex; flex-wrap: wrap; gap: 8px; }
+  button { font: inherit; color: var(--fg); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
+  button:hover { border-color: var(--accent); } button:active { transform: translateY(1px); }
+  button.loop { border-color: var(--accent2); } button.jingle { border-color: var(--accent); }
+  button.playing { background: var(--on); }
+  label { display: inline-flex; align-items: center; gap: 6px; } input[type=range] { width: 140px; }
+  #meter { width: 160px; height: 12px; background: var(--line); border-radius: 6px; overflow: hidden; } #meterFill { height: 100%; width: 0; background: var(--accent2); transition: width .05s; }
+  #stats { font: 12px/1.4 ui-monospace, monospace; color: var(--mute); white-space: pre-wrap; margin-top: 10px; }
+  #log { font: 12px ui-monospace, monospace; color: var(--mute); margin-top: 6px; min-height: 18px; }
+</style>
+</head>
+<body>
+<h1>Fizz &amp; Pop sound board</h1>
+<p>Click anywhere first (browsers need a gesture), then play with the buttons.</p>
+
+<div class="bar" id="ctl">
+  <button id="bInit">Init audio</button>
+  <button id="bStop">Stop music</button>
+  <button id="bMute">Mute: off</button>
+  <button id="bPause">Pause</button>
+  <label>Tempo <input id="tempo" type="range" min="0.6" max="1.6" step="0.05" value="1"> <output id="tempoOut">1.00</output></label>
+  <label>SFX pitch <input id="pitch" type="range" min="-12" max="12" step="1" value="0"> <output id="pitchOut">0</output></label>
+  <label>SFX vol <input id="vol" type="range" min="0" max="1.5" step="0.05" value="1"> <output id="volOut">1.00</output></label>
+  <label><input id="resume" type="checkbox" checked> jingle resumes loop</label>
+  <span id="meter" title="output level"><div id="meterFill"></div></span>
+</div>
+
+<h2>Music loops</h2><div class="grid" id="loops"></div>
+<h2>Jingles</h2><div class="grid" id="jingles"></div>
+<h2>Sound effects</h2><div class="grid" id="sfx"></div>
+<div id="log"></div>
+<div id="stats"></div>
+
+<script src="../src/00_shared.js"></script>
+<script src="../src/20_audio.js"></script>
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const LOOPS = ['title', 'stage1', 'stage2', 'boss', 'entry', 'ending'];
+  const JINGLES = ['start', 'extend', 'gameover', 'clear_boss'];
+  const log = (s) => { $('log').textContent = s; };
+  const mk = (parent, name, cls, fn) => {
+    const b = document.createElement('button'); b.textContent = name; b.className = cls; b.dataset.name = name;
+    b.addEventListener('click', () => { AUDIO.init(); fn(name); });
+    $(parent).appendChild(b);
+  };
+  LOOPS.forEach((n) => mk('loops', n, 'loop', (x) => { AUDIO.music(x, { restart: true }); log('music ' + x); }));
+  JINGLES.forEach((n) => mk('jingles', n, 'jingle', (x) => {
+    AUDIO.jingle(x, { resume: $('resume').checked, onEnd: () => log('jingle ' + x + ' ended (onEnd)') }); log('jingle ' + x);
+  }));
+  AUDIO.sfxNames().forEach((n) => mk('sfx', n, 'sfx', (x) => {
+    AUDIO.sfx(x, { pitch: +$('pitch').value, vol: +$('vol').value }); log('sfx ' + x);
+  }));
+  $('bInit').addEventListener('click', () => { AUDIO.init(); log('init'); });
+  $('bStop').addEventListener('click', () => { AUDIO.init(); AUDIO.stopMusic(0.3); log('stopMusic(0.3)'); });
+  const showMute = () => { $('bMute').textContent = 'Mute: ' + (AUDIO.isMuted() ? 'ON' : 'off'); };
+  $('bMute').addEventListener('click', () => { AUDIO.init(); AUDIO.toggleMuted(); showMute(); });
+  let paused = false;
+  $('bPause').addEventListener('click', () => { AUDIO.init(); paused = !paused; paused ? AUDIO.pause() : AUDIO.resume(); $('bPause').textContent = paused ? 'Resume' : 'Pause'; });
+  $('tempo').addEventListener('input', (e) => { AUDIO.setTempo(+e.target.value); $('tempoOut').textContent = (+e.target.value).toFixed(2); });
+  $('pitch').addEventListener('input', (e) => { $('pitchOut').textContent = e.target.value; });
+  $('vol').addEventListener('input', (e) => { $('volOut').textContent = (+e.target.value).toFixed(2); });
+  showMute();
+  window.addEventListener('keydown', (e) => { if (e.code === 'KeyM') { AUDIO.init(); AUDIO.toggleMuted(); showMute(); } });
+
+  // meter + stats
+  const buf = new Float32Array(1024);
+  setInterval(() => {
+    const tap = AUDIO._tap();
+    if (tap) { tap.getFloatTimeDomainData(buf); let mx = 0; for (let i = 0; i < buf.length; i++) mx = Math.max(mx, Math.abs(buf[i])); $('meterFill').style.width = Math.min(100, mx * 110) + '%'; }
+    const st = AUDIO._stats(), s = AUDIO._state();
+    $('stats').textContent = 'state: ' + JSON.stringify(s) + '\ncounters: voices ' + st.voices + '  tracks ' + st.tracks + '  groups ' + st.groups + '  step ' + st.curPos;
+    document.querySelectorAll('button.loop,button.jingle').forEach((b) => b.classList.toggle('playing', b.dataset.name === s.music || b.dataset.name === s.jingle));
+  }, 100);
+})();
+</script>
+</body>
+</html>

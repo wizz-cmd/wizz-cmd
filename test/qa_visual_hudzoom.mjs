@@ -1,0 +1,11 @@
+import path from 'path';
+import { launch, fp, PROJECT } from '../tools/harness.mjs';
+import { crop } from './qa_visual_lib.mjs';
+const OUT = path.join(PROJECT, 'out/qa/visual/hud');
+const t = await launch({ viewport: { width: 1280, height: 800 } });
+const g = fp(t.page); await g.freeze(true);
+await g.start(2, 1, 3); await g.step(100);
+await crop(t.page, path.join(OUT, 'hud_top_x8.png'), 0, 0, 256, 40, 5);
+await g.evaluate(() => { fz.Game.debug.setPlayer(0, { x: 100, y: 200 }); });
+await crop(t.page, path.join(OUT, 'players_x10.png'), 70, 180, 60, 40, 12);
+await t.close();
