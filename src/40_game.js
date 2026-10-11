@@ -65,6 +65,23 @@
  *    blinking cues; quality 0 / 1 / 2 scales ambient count, particle cap and burst size (trails need quality >= 1).
  *    GFX.particle / GFX.draw {tint, glow} are feature-detected (typeof GFX.particle === 'function'); without them simple canvas
  *    fallbacks are drawn. The banner text asks for {outline}.
+ *  - V3 wave (FIXPLAN_V3 "Game"; everything below is cosmetic, mechanics are bit-identical: test/game_equiv.mjs):
+ *      G1  boss ink telegraph = a smooth glow RAMP over the 22 wind-up frames (kraken_angry crossfading in, an amber glow heating towards white-hot), a 16-frame fade after
+ *          the volley: one slow swell per 2 s instead of the 10 Hz white flip-flop (reducedMotion: the steady 0.3 white as before).
+ *      G2  shockwave rings are ONE blit of GFX.particle('ring'); a ring whose sprite would exceed RING_SPRITE_PX (the boss / bomb / thunder giants) is two source-over strokes;
+ *          kill rings share one white hue (small particle cache); at most RING_CAP rings are drawn per frame.
+ *      G3  nothing blinks: invulnerability = alpha pulse 0.4..1.0 at 4 Hz (reducedMotion: steady 0.6), HURRY UP! fades in / pulses at 2 Hz / fades out, READY! pulses,
+ *          EXTEND! colour crossfades every 24 frames, special / letter expiry pulses at 2.5 Hz, bubble_warn flickers at 3 Hz, flames die down smoothly, the last second of a
+ *          freeze THAWS in a gentle pulse, trap stages get smooth shimmer / pulse waves on top of the cast's shape cues (C2).
+ *      G4  trails restart on teleports (respawn, bubble release, floor-gap wrap, watchdog relocation, round start) and whenever an entity was not sampled in the previous frame.
+ *      G5  the round change scrolls with a FRACTIONAL offset (no whole-pixel stepping); leftover items / bubbles / popups / effects fade over FADE_FRAMES (S.fade, cosmetic)
+ *          instead of vanishing, the plankton keeps drifting and crossfades from the old round's colours to the new one's, glints and the last effects play out.
+ *      G6  the join hint shows only while Game.join can succeed.   G7  no per-frame allocation in the update paths (hyp(), hitP / hitF, indexed loops), scratch GFX draw
+ *          options, sprite-name tables, cached gradients / strings / colour tables (the remaining render garbage is boxed numbers crossing into GFX).
+ *      G8  the missing EXTEND letters are >= 3:1 against every wall; the round counter reads "R01" (labelled, inset, in the ceiling row, clear of the playfield).
+ *      V1  frozen enemies draw the cast's <e>_frozen ice cast (plain, frames 0..3 = twinkles) when GFX.has it, else the old tint recipe; V2 the HUD band is the round's own
+ *          water (the backdrop's top rows mirrored up from the seam) under a soft veil, not a flat strip; V6 chain / bomb light: a few small pools + the wash in the CHAIN
+ *          OWNER's colour, additive fill area capped per frame (LIGHT_CAP, newest particles win), POOL_MAX live pools.
  *  - Debug extras (non-contract): debug._S(), skipIntro(), clearEnemies(), noClear(on), setPlayer(),
  *    setHurryTimer(), give(), addScore(). `spawn` also accepts 'bonefin', 'kraken', 'letter', 'food_N',
  *    'pu_xxx' (or just 'shoes'...), 'moonpearl'.
@@ -72,7 +89,7 @@
  *
  * Sprites used: p1_/p2_ idle walk jump fall shoot die stun icon; bubble_shot bubble bubble_warn
  * bubble_pop trap_overlay bubble_thunder bubble_fire bubble_water bubble_letter; <e>_move <e>_angry
- * <e>_trapped <e>_die for nibbler crabbit jellop springle glimmer; crabbit_throw springle_squash
+ * <e>_trapped <e>_die for nibbler crabbit jellop springle glimmer (+ <e>_frozen when GFX.has it); crabbit_throw springle_squash
  * glimmer_fire bonefin kraken kraken_angry kraken_trapped pebble spark ink bolt fire_drop flame
  * water_flow water_fall sparkle poof food_0..7 pu_shoes pu_pink pu_blue pu_gold pu_parasol pu_clock
  * pu_bomb pu_heart moonpearl.
@@ -165,6 +182,14 @@ const Game = (() => {
   const AMBIENT_N = [40, 56, 80];                    // drifting plankton specks (halved under reduced motion)
   const MOTE_MAX = 14;                               // slow light motes orbiting floating bubbles
   const TRAIL_N = 8, TRAIL_BACK = [3, 6], TRAIL_A = [0.24, 0.12];   // trail ring buffer, ghost offsets (frames back), ghost alpha
+  // v3 presentation (FIXPLAN_V3 Game; cosmetic only)
+  const LIGHT_CAP = 36000, POOL_MAX = 2;             // V6: light budget = additive FILL AREA of the cosmetic particles per frame (logical px^2, ~ 2/3 of the playfield) and number of live chain pools
+  const RING_CAP = 12;                               // G2: shockwave rings drawn per frame (the newest = brightest ones win)
+  const RING_SPRITE_PX = 300;                        // G2: a ring whose baked sprite would be wider than this many device px (software-raster 'lighter' blit cliff, big cache entries) is stroked instead
+  const INK_FADE = 16;                               // G1: frames the ink glow takes to fade out after the volley
+  const THAW_FRAMES = 60;                            // G3: the last second of a freeze thaws in a gentle pulse
+  const FADE_FRAMES = 14;                            // G5: leftovers (items, bubbles, popups, specks) fade over this many frames when a round change starts
+  const TRAIL_JUMP = 20;                             // G4: a position jump of more than this many px in one frame is a teleport: the trail restarts
 
   const PLAYER_COLOR = ['#ff3ea5', '#3cf2ff'], PLAYER_HOT = ['#ffd9ee', '#d9fcff'];
   const HUE = { cyan: '#3cf2ff', magenta: '#ff3ea5', lime: '#b6ff3b', amber: '#ffb23e', violet: '#8a5cff', white: '#eaffff', ember: '#ff6a3d',
@@ -187,6 +212,17 @@ const Game = (() => {
   const sfx = (name, opts) => { AUDIO.sfx(name, opts); };
   const sign = (v) => (v > 0 ? 1 : v < 0 ? -1 : 0);
   const ease = (k) => (k < 0.5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+  /** Math.hypot(a, b) without the rest-args allocation (G7): V8's own algorithm for two arguments (scale by the larger one, compensated sum), so the
+   *  result is bit-identical to Math.hypot and every distance test of the mechanics stays exactly as before (test/game_equiv.mjs proves it). */
+  function hyp(a, b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    const m = a > b ? a : b;
+    if (m === 0) return 0;
+    if (m === Infinity || m !== m) return Math.hypot(a, b);
+    const n0 = a / m, n1 = b / m, s0 = n0 * n0, c = (s0 - 0) - s0;
+    return Math.sqrt(s0 + (n1 * n1 - c)) * m;
+  }
 
   function makePlayer(i) {
     return {
@@ -310,18 +346,20 @@ const Game = (() => {
       const ceil = e.t ? MAP_Y : PLAY_TOP;
       if (e.y < ceil) { e.y = Math.min(y0, ceil); e.vy = 0; }
     }
-    if (e.y > SCREEN_H) e.y -= SCREEN_H;                // fell out of a floor gap: re-enter from the top
+    if (e.y > SCREEN_H) { e.y -= SCREEN_H; trailClear(e); }   // fell out of a floor gap: re-enter from the top (G4: the trail does not follow the wrap)
   }
 
-  const playerRect = (p) => [p.x + BODY_X, p.y + BODY_Y, BODY_W, BODY_H];
-  function foeRect(e) { return e.t === 'kraken' ? [e.x + 6, e.y + 6, 36, 36] : [e.x + 2, e.y + 2, 12, 12]; }
-  const hits = (a, b) => U.overlap(a[0], a[1], a[2], a[3], b[0], b[1], b[2], b[3]);
+  // Hit tests (G7: allocation-free, called per entity per frame): the 12x14 body box of a player / the 12x12 body (36x36 for the Kraken) of a foe against an x, y, w, h rectangle
+  const hitP = (p, x, y, w, h) => U.overlap(p.x + BODY_X, p.y + BODY_Y, BODY_W, BODY_H, x, y, w, h);
+  const hitF = (e, x, y, w, h) => (e.t === 'kraken' ? U.overlap(e.x + 6, e.y + 6, 36, 36, x, y, w, h) : U.overlap(e.x + 2, e.y + 2, 12, 12, x, y, w, h));
 
   function nearestPlayer(cx, cy) {
     let best = null, bd = Infinity;
-    for (const p of S.players) {
+    const L = S.players;
+    for (let i = 0; i < L.length; i++) {
+      const p = L[i];
       if (p.state !== 'normal') continue;
-      const d = Math.hypot(p.x + 8 - cx, p.y + 8 - cy);
+      const d = hyp(p.x + 8 - cx, p.y + 8 - cy);
       if (d < bd) { bd = d; best = p; }
     }
     return best;
@@ -364,10 +402,11 @@ const Game = (() => {
   function ring(x, y, col, r0, r1, dur, a) {
     addPart({ k: 'ring', x, y, vx: 0, vy: 0, g: 0, dur, s0: r0, s1: r1, col, a: a === undefined ? 0.85 : a, rot: 0 });
   }
-  /** A soft additive light pool (chain light) that swells and fades. */
+  /** A soft additive light pool (chain light) that swells and fades. lt = 1 marks it as a pool (counted by poolCount, capped in drawParts). */
   function pool(x, y, col, size, dur, a) {
-    addPart({ k: 'dot', x, y, vx: 0, vy: 0, g: 0, dur, s0: size, s1: size * 1.25, col, a, rot: 0 });
+    addPart({ k: 'dot', x, y, vx: 0, vy: 0, g: 0, dur, s0: size, s1: size * 1.25, col, a, rot: 0, lt: 1 });
   }
+  function poolCount() { let n = 0; const L = S.parts; for (let i = 0; i < L.length; i++) if (L[i].lt === 1) n++; return n; }
   /** n sparks / droplets / streaks flying out of (x, y); n is scaled by quality and reduced motion. */
   function burst(x, y, col, n, speed, o) {
     n = Math.round(n * qScale());
@@ -431,28 +470,39 @@ const Game = (() => {
     ring(x, y, HUE.white, 3, 9 * big, 10, 0.5);
     burst(x, y, col, 7, 1.15, { size: 1.0, life: 20, g: 0.02 });
   }
-  /** Chain light: a soft coloured pool at the kill + a faint full-screen wash (<= 12 %, rate-limited by flash()). */
+  /** Chain light (V6): ONE hue for the whole chain, the OWNER's colour (the old pools took the colour of every enemy that died: a multicoloured mess in a bomb chain).
+   *  A small soft pool at every third kill from the third on (never more than POOL_MAX alive, none at quality 0) + the faint full-screen wash in the same colour
+   *  (<= 12 %, rate-limited by flash()). The total additive light of everything on screen is capped in drawParts (LIGHT_CAP). */
   function chainLight(x, y, col, n) {
-    if (!(n & 1)) pool(x, y, col, 2.0 + Math.min(n, 7) * 0.25, 12, 0.17);             // every other kill: pools cost fill rate
-    flash(10, 0.045 + 0.012 * n, col);
+    if (n >= 3 && n % 3 === 0 && OPT.quality >= 1 && poolCount() < POOL_MAX) pool(x, y, col, 1.4 + Math.min(n, 9) * 0.1, 12, 0.13);
+    flash(10, 0.04 + 0.01 * n, col);
   }
-  function killFx(e, k) {
+  function killFx(e, k, owner) {
     if (!S) return;
     const x = e.x + 8, y = e.y + 8, hue = e.angry ? HUE.crimson : (ENEMY_HUE[e.t] || HUE.white);
-    ring(x, y, hue, 3, 21, 16, 0.8);
+    ring(x, y, HUE.white, 5, 21, 16, 0.8);                 // one white-hot ring colour for every kill (the sprite cache holds one size ladder instead of six); the enemy's hue is in the burst
     burst(x, y, hue, 8 + Math.min(k, 4) * 2, 2.1, { size: 1.6, life: 34 });
-    if (k >= 2) chainLight(x, y, hue, k + 1);
+    if (k >= 2) chainLight(x, y, PLAYER_COLOR[owner] || hue, k + 1);
   }
   const itemHue = (kind) => (kind.startsWith('pu_') ? PU_HUE[kind.slice(3)] || HUE.cyan : kind === 'moonpearl' ? HUE.white : FOOD_HUE[+kind.slice(5)] || HUE.amber);
 
   // trail ring buffers: positions of a moving entity, one sample per update frame (WeakMap: cosmetic, entities stay plain objects)
   const TRAILS = new WeakMap();
+  /** G4: a trail only follows the REAL path of the last few frames. It restarts (n = 0) whenever the entity was not sampled in the previous frame (dying, trapped in a
+   *  bubble, carried, a round transition ...: respawn and bubble release come back this way) or jumped more than TRAIL_JUMP px in one frame (floor-gap wrap, watchdog
+   *  relocation, spawn pad). trailClear(e) is the explicit form (respawn / release / round start call it too). */
   function trailPush(e) {
     let t = TRAILS.get(e);
-    if (!t) { t = { b: new Float32Array(2 * TRAIL_N), h: 0, n: 0 }; TRAILS.set(e, t); }
+    if (!t) { t = { b: new Float32Array(2 * TRAIL_N), h: 0, n: 0, f: -9 }; TRAILS.set(e, t); }
+    if (t.n > 0) {
+      const dx = e.x - t.b[2 * t.h], dy = e.y - t.b[2 * t.h + 1];
+      if (t.f !== S.frame - 1 || dx > TRAIL_JUMP || dx < -TRAIL_JUMP || dy > TRAIL_JUMP || dy < -TRAIL_JUMP) t.n = 0;
+    }
+    t.f = S.frame;
     t.h = (t.h + 1) % TRAIL_N; t.b[2 * t.h] = e.x; t.b[2 * t.h + 1] = e.y;
     if (t.n < TRAIL_N) t.n++;
   }
+  function trailClear(e) { const t = TRAILS.get(e); if (t) t.n = 0; }
   const TP = [0, 0];
   /** Position `back` samples ago into TP; false when the buffer is not that deep. */
   function trailAt(e, back) {
@@ -464,8 +514,9 @@ const Game = (() => {
   }
   function sampleTrails() {
     if (OPT.reducedMotion || OPT.quality < 1) return;
-    for (const p of S.players) if (p.state === 'normal') trailPush(p);
-    for (const e of S.enemies) if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'dying')) trailPush(e);
+    const P = S.players, E = S.enemies;
+    for (let i = 0; i < P.length; i++) if (P[i].state === 'normal') trailPush(P[i]);
+    for (let i = 0; i < E.length; i++) { const e = E[i]; if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'dying')) trailPush(e); }
   }
 
   function addScore(pi, pts) {
@@ -530,7 +581,7 @@ const Game = (() => {
       angry: S.hurry, onGround: false, hitWall: false,
       animT: S.rng.int(0, 60), ledge: 0, turnCool: 0, bump: 0, bumpT: 0, pauseT: 0, cool: S.rng.int(30, 90), sqT: S.rng.int(0, 20),
       poseT: 0, freezeT: 0, dieT: 0, foodIdx: 0, baseY: sy, jx: def.d || 1, jy: S.rng.chance(0.5) ? 1 : -1,
-      bubble: null, hp: big ? S.bossMax : 0, flashT: 0, inkT: BOSS_INK_PERIOD, dead: false, stream: null,
+      bubble: null, hp: big ? S.bossMax : 0, flashT: 0, inkT: BOSS_INK_PERIOD, relT: 99, dead: false, stream: null,
       wx0: sx, wx1: sx, wy0: sy, wy1: sy, wdT: 0, wdHist: [], wdFires: 0, wdLast: -1e9, fx: 0, fy: 0, passT: 0,
     };
   }
@@ -562,13 +613,14 @@ const Game = (() => {
     S.thunderT = BOSS_THUNDER_PERIOD;
     S.letterT = LETTER_PERIOD;
     S.puT = L.boss ? -1 : S.rng.int(PU_MIN, PU_MAX);
-    S.skipTo = 0; S.tr = null; S.clearT = 0; S.idleT = 0;
+    S.skipTo = 0; S.tr = null; S.fade = null; S.clearT = 0; S.idleT = 0;
     if (S.pendingJoin) { S.pendingJoin = false; addPlayer2(); }
     for (const p of S.players) {
       // a player who lost the last life and is still in the death animation is out, not revived (M8/M14)
       if (p.state === 'out' || (p.state === 'dying' && p.lives <= 0)) { p.state = 'out'; continue; }
       p.state = 'normal'; p.x = SPAWN_X[p.i]; p.y = SPAWN_Y; p.vx = 0; p.vy = 0; p.onGround = true;
       p.face = p.i === 0 ? 1 : -1; p.stunT = 0; p.cooldown = 0; p.shootT = 0; p.jumpBuf = 0; p.fireBuf = 0; p.coyote = -1;
+      trailClear(p);
     }
     S.enemies = L.enemies.map((d, i) => makeEnemy(d, i, L.enemies.length));
     S.phase = 'intro'; S.phaseT = 0;
@@ -667,6 +719,7 @@ const Game = (() => {
   function respawn(p) {
     p.state = 'normal'; p.x = SPAWN_X[p.i]; p.y = SPAWN_Y; p.vx = 0; p.vy = 0; p.onGround = true;
     p.face = p.i === 0 ? 1 : -1; p.inv = RESPAWN_INV; p.cooldown = 0; p.stunT = 0; p.fireBuf = 0; p.coyote = -1;
+    trailClear(p);                                                       // G4: no afterimage at the spot where the player died
   }
 
   // ================================================================================================
@@ -712,11 +765,12 @@ const Game = (() => {
   function endShot(b) { b.state = 'float'; pickAttractor(b); }
 
   function findCapturable(b) {
-    const br = [b.x + 1, b.y + 1, 14, 14];
-    for (const e of S.enemies) {
+    const L = S.enemies;
+    for (let i = 0; i < L.length; i++) {
+      const e = L[i];
       if (e.dead || e.t === 'kraken') continue;
       if (e.state !== 'active' && e.state !== 'frozen') continue;
-      if (hits(br, foeRect(e))) return e;
+      if (hitF(e, b.x + 1, b.y + 1, 14, 14)) return e;
     }
     return null;
   }
@@ -737,6 +791,7 @@ const Game = (() => {
     if (e && e.state === 'trapped') {
       e.state = 'active'; e.bubble = null; e.angry = true; e.x = b.x; e.y = b.y; e.baseY = b.y;
       e.vx = 0; e.vy = 0; e.onGround = false; e.ledge = 0; e.turnCool = 20;
+      trailClear(e);                                                     // G4: its old trail is where it was trapped, 150+ frames ago
     }
   }
 
@@ -787,7 +842,7 @@ const Game = (() => {
         const b = L[j];
         if (b.dead || b.state !== 'float' || b.popAt) continue;
         let dx = b.x - a.x, dy = b.y - a.y;
-        const d = Math.hypot(dx, dy);
+        const d = hyp(dx, dy);
         if (d >= PUSH_DIST) continue;
         if (d < 0.01) { dx = (i + j) % 2 ? 1 : -1; dy = 0; } else { dx /= d; dy /= d; }
         const push = Math.min(PUSH_MAX, (PUSH_DIST - d) * 0.25 + 0.02);   // soft near PUSH_DIST, strong when really overlapping
@@ -795,7 +850,8 @@ const Game = (() => {
         a.x -= dx * push * wx; a.y -= dy * push * wy; b.x += dx * push * wx; b.y += dy * push * wy;
       }
     }
-    for (const b of L) {
+    for (let i = 0; i < L.length; i++) {
+      const b = L[i];
       if (b.dead || b.state !== 'float') continue;
       b.x = U.clamp(b.x, C.INNER_L, C.INNER_R - 16);
       b.y = Math.max(PLAY_TOP, b.y);
@@ -803,12 +859,14 @@ const Game = (() => {
   }
 
   function playerBubbleContacts() {
-    for (const p of S.players) {
+    const PL = S.players, BL = S.bubbles;
+    for (let pi = 0; pi < PL.length; pi++) {
+      const p = PL[pi];
       if (p.state !== 'normal') continue;
-      const pr = playerRect(p);
-      for (const b of S.bubbles) {
+      for (let bi = 0; bi < BL.length; bi++) {
+        const b = BL[bi];
         if (b.dead || b.state !== 'float') continue;
-        const touching = hits(pr, [b.x + 2, b.y + 2, 12, 12]);
+        const touching = hitP(p, b.x + 2, b.y + 2, 12, 12);
         if (b.grace === p.i) { if (!touching) b.grace = -1; continue; }
         if (!touching || b.popAt) continue;
         // land on the upper half while holding jump (not when there is no room above it: ceiling bubbles just pop)
@@ -842,7 +900,7 @@ const Game = (() => {
     pushApart();
     playerBubbleContacts();
     tickChainPops();
-    for (const b of S.bubbles) if (!b.dead && b.enemy && b.enemy.state === 'trapped') { b.enemy.x = b.x; b.enemy.y = b.y; }
+    for (let i = 0; i < S.bubbles.length; i++) { const b = S.bubbles[i]; if (!b.dead && b.enemy && b.enemy.state === 'trapped') { b.enemy.x = b.x; b.enemy.y = b.y; } }
   }
 
   /** Pop a bubble: scoring / effect by kind, then start the chain reaction on neighbours. */
@@ -869,9 +927,10 @@ const Game = (() => {
         sfx('pop');
         triggerSpecial(b, chain);
     }
-    for (const o of S.bubbles) {
+    for (let i = 0; i < S.bubbles.length; i++) {
+      const o = S.bubbles[i];
       if (o.dead || o === b || o.state !== 'float' || o.popAt || o.age < o.chainImmune) continue;
-      if (Math.hypot(o.x - b.x, o.y - b.y) <= CHAIN_DIST) { o.popAt = S.frame + CHAIN_DELAY; o.chain = chain; }
+      if (hyp(o.x - b.x, o.y - b.y) <= CHAIN_DIST) { o.popAt = S.frame + CHAIN_DELAY; o.chain = chain; }
     }
   }
 
@@ -887,7 +946,7 @@ const Game = (() => {
     e.vx = (S.rng.chance(0.5) ? 1 : -1) * S.rng.float(1.5, 2.5);
     e.vy = -3.5; e.onGround = false;
     sfx('kill', { pitch: Math.min(2 * k, 12) });                 // the chain is audible: each kill rings higher
-    killFx(e, k);
+    killFx(e, k, chain.owner);
     if (chain.kills === CHAIN_LETTER_KILLS) spawnLetterBubble(chain.owner, e.x, e.y);
   }
 
@@ -1014,12 +1073,12 @@ const Game = (() => {
       if (bo.seek) seekBoss(bo);
       if (bo.age % 3 === 0) ember(bo.x + 8 - bo.dir * 6, bo.y + 4, HUE.amber, S.vrng.float(-0.2, 0.2), S.vrng.float(-0.25, 0.1), 12, 1.1);
       if (bo.dir > 0 ? bo.x + 16 >= C.INNER_R : bo.x <= C.INNER_L) { bo.dead = true; continue; }
-      const br = [bo.x, bo.y, 16, 8];
-      for (const e of S.enemies) {
+      for (let k = 0; k < S.enemies.length; k++) {
+        const e = S.enemies[k];
         if (e.dead) continue;
         if (e.t === 'kraken') {
-          if (e.state === 'active' && !bo.hitBoss && hits(br, foeRect(e))) { bo.hitBoss = true; damageBoss(e, bo.owner); }
-        } else if ((e.state === 'active' || e.state === 'frozen') && hits(br, foeRect(e))) killEnemy(e, bo.chain);
+          if (e.state === 'active' && !bo.hitBoss && hitF(e, bo.x, bo.y, 16, 8)) { bo.hitBoss = true; damageBoss(e, bo.owner); }
+        } else if ((e.state === 'active' || e.state === 'frozen') && hitF(e, bo.x, bo.y, 16, 8)) killEnemy(e, bo.chain);
       }
     }
   }
@@ -1054,12 +1113,13 @@ const Game = (() => {
       if (f.dead) continue;
       if (++f.t >= FLAME_FRAMES) { f.dead = true; continue; }
       if ((f.t + (f.x >> 3) * 5) % 18 === 0) ember(f.x + 4 + S.vrng.float(-2, 2), f.y + 6, f.t % 2 ? HUE.ember : HUE.amber, S.vrng.float(-0.1, 0.1), -0.32, 28, 0.9);
-      const fr = [f.x + 1, f.y + 2, 6, 14];
-      for (const e of S.enemies) {
-        if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'frozen') && hits(fr, foeRect(e))) killEnemy(e, f.chain);
+      for (let k = 0; k < S.enemies.length; k++) {
+        const e = S.enemies[k];
+        if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'frozen') && hitF(e, f.x + 1, f.y + 2, 6, 14)) killEnemy(e, f.chain);
       }
-      for (const p of S.players) {
-        if (p.state === 'normal' && p.stunT === 0 && p.flameImmune === 0 && hits(fr, playerRect(p))) {
+      for (let k = 0; k < S.players.length; k++) {
+        const p = S.players[k];
+        if (p.state === 'normal' && p.stunT === 0 && p.flameImmune === 0 && hitP(p, f.x + 1, f.y + 2, 6, 14)) {
           p.stunT = STUN_FRAMES; p.flameImmune = STUN_FRAMES + FLAME_IMMUNE_FRAMES; p.vx = 0;
         }
       }
@@ -1094,13 +1154,13 @@ const Game = (() => {
         s.trail.push({ x: s.x, y: s.y, k: s.mode });
         if (s.trail.length > STREAM_SEGMENTS - 1) s.trail.shift();
       }
-      const hr = [s.x - 1, s.y - 1, 10, 10];
-      for (const e of S.enemies) {
-        if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'frozen') && hits(hr, foeRect(e))) {
+      for (let k = 0; k < S.enemies.length; k++) {
+        const e = S.enemies[k];
+        if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'frozen') && hitF(e, s.x - 1, s.y - 1, 10, 10)) {
           e.state = 'carried'; e.stream = s; s.carried.push(e);
         }
       }
-      s.carried.forEach((e, k) => { e.x = U.clamp(s.x - 4 + (k % 2) * 2, C.INNER_L, C.INNER_R - 16); e.y = s.y - 8 - (k % 3); });
+      for (let k = 0; k < s.carried.length; k++) { const e = s.carried[k]; e.x = U.clamp(s.x - 4 + (k % 2) * 2, C.INNER_L, C.INNER_R - 16); e.y = s.y - 8 - (k % 3); }
       if (s.age >= STREAM_LIFE) endStream(s, false);
     }
   }
@@ -1150,10 +1210,10 @@ const Game = (() => {
       }
     }
     // contact with players: only truly active enemies hurt
-    for (const e of S.enemies) {
+    for (let i = 0; i < S.enemies.length; i++) {
+      const e = S.enemies[i];
       if (e.dead || e.state !== 'active') continue;
-      const er = foeRect(e);
-      for (const p of S.players) if (p.state === 'normal' && hits(er, playerRect(p))) killPlayer(p);
+      for (let k = 0; k < S.players.length; k++) { const p = S.players[k]; if (p.state === 'normal' && hitF(e, p.x + BODY_X, p.y + BODY_Y, BODY_W, BODY_H)) killPlayer(p); }
     }
   }
 
@@ -1216,12 +1276,13 @@ const Game = (() => {
     for (let tries = 0; tries < 24; tries++) {
       const sp = S.rng.pick(S.spots);
       if (S.players.some((p) => {
-        if (p.state === 'normal') return Math.hypot(p.x - sp.x, p.y - sp.y) < 64;
-        return p.state === 'dying' && p.lives > 0 && Math.hypot(SPAWN_X[p.i] - sp.x, SPAWN_Y - sp.y) < 64;
+        if (p.state === 'normal') return hyp(p.x - sp.x, p.y - sp.y) < 64;
+        return p.state === 'dying' && p.lives > 0 && hyp(SPAWN_X[p.i] - sp.x, SPAWN_Y - sp.y) < 64;
       })) continue;
       if (S.enemies.some((o) => o !== e && !o.dead && (o.state === 'active' || o.state === 'frozen') && Math.abs(o.x - sp.x) < 16 && Math.abs(o.y - sp.y) < 16)) continue;
       poof(e.x, e.y);
       e.x = sp.x; e.y = sp.y; e.vx = 0; e.vy = 0; e.onGround = false; resetWatch(e); e.passT = 0;
+      trailClear(e);
       poof(e.x, e.y);
       return true;
     }
@@ -1409,12 +1470,11 @@ const Game = (() => {
     g.age++;
     const t = nearestPlayer(g.x + 8, g.y + 8);
     if (t) {
-      const dx = t.x - g.x, dy = t.y - g.y, d = Math.hypot(dx, dy) || 1;
+      const dx = t.x - g.x, dy = t.y - g.y, d = hyp(dx, dy) || 1;
       g.vx = (dx / d) * GHOST_SPEED; g.vy = (dy / d) * GHOST_SPEED;
     } else { g.vx = 0; g.vy = 0; }
     g.x += g.vx; g.y += g.vy;
-    const gr = [g.x + 3, g.y + 3, 10, 10];
-    for (const p of S.players) if (p.state === 'normal' && hits(gr, playerRect(p)) && killPlayer(p)) break;
+    for (let k = 0; k < S.players.length; k++) { const p = S.players[k]; if (p.state === 'normal' && hitP(p, g.x + 3, g.y + 3, 10, 10) && killPlayer(p)) break; }
   }
 
   // ---- projectiles ----------------------------------------------------------------------------
@@ -1434,8 +1494,7 @@ const Game = (() => {
         const fx = cx + Math.sign(q.vx) * 4;
         if (isSolid(Math.floor(fx / T), Math.floor((cy - MAP_Y) / T))) { q.dead = true; continue; }
       }
-      const qr = [q.x + 1, q.y + 1, 6, 6];
-      for (const p of S.players) if (p.state === 'normal' && hits(qr, playerRect(p)) && killPlayer(p)) { q.dead = true; break; }
+      for (let k = 0; k < S.players.length; k++) { const p = S.players[k]; if (p.state === 'normal' && hitP(p, q.x + 1, q.y + 1, 6, 6) && killPlayer(p)) { q.dead = true; break; } }
     }
   }
 
@@ -1455,7 +1514,8 @@ const Game = (() => {
     if (e.x < C.INNER_L) { e.x = C.INNER_L; e.jx = 1; } else if (e.x > xmax) { e.x = xmax; e.jx = -1; }
     if (e.y < PLAY_TOP) { e.y = PLAY_TOP; e.jy = 1; } else if (e.y > ymax) { e.y = ymax; e.jy = -1; }
     e.d = e.jx;
-    if (--e.inkT <= 0) { e.inkT = BOSS_INK_PERIOD; fireInk(e); }     // the last INK_WIND frames before this are the telegraph
+    if (e.relT < 99) e.relT++;                                       // cosmetic: frames since the volley (the ink glow fades out over INK_FADE frames, G1)
+    if (--e.inkT <= 0) { e.inkT = BOSS_INK_PERIOD; e.relT = 0; fireInk(e); }     // the last INK_WIND frames before this are the telegraph
   }
 
   const inkWinding = (e) => e.inkT > 0 && e.inkT <= INK_WIND;
@@ -1466,7 +1526,7 @@ const Game = (() => {
     const cx = e.x + 24, cy = e.y + 24;
     const t = nearestPlayer(cx, cy);
     const base = t ? Math.atan2(t.y + 8 - cy, t.x + 8 - cx) : Math.PI / 2;
-    const near = !!t && Math.hypot(t.x + 8 - cx, t.y + 8 - cy) <= INK_NEAR;
+    const near = !!t && hyp(t.x + 8 - cx, t.y + 8 - cy) <= INK_NEAR;
     for (const k of near ? [-1.5, 1.5] : [-1.5, -0.5, 0.5, 1.5]) {
       if (S.proj.length >= PROJ_CAP) break;
       const a = base + k * INK_STEP;
@@ -1503,9 +1563,9 @@ const Game = (() => {
     if (!bb) return;
     bb.age++;
     bb.y = Math.max(PLAY_TOP, bb.y - BOSS_BUBBLE_RISE);
-    const br = [bb.x + 6, bb.y + 6, 52, 52];
-    for (const p of S.players) {
-      if (p.state === 'normal' && hits(playerRect(p), br)) { popBossBubble(bb); break; }
+    for (let k = 0; k < S.players.length; k++) {
+      const p = S.players[k];
+      if (p.state === 'normal' && hitP(p, bb.x + 6, bb.y + 6, 52, 52)) { popBossBubble(bb); break; }
     }
   }
 
@@ -1547,7 +1607,7 @@ const Game = (() => {
     let spot = null;
     for (let tries = 0; tries < 24 && !spot; tries++) {
       const s = S.rng.pick(S.spots);
-      if (S.players.every((p) => p.state !== 'normal' || Math.hypot(p.x - s.x, p.y - s.y) >= PU_AVOID)) spot = s;
+      if (S.players.every((p) => p.state !== 'normal' || hyp(p.x - s.x, p.y - s.y) >= PU_AVOID)) spot = s;
     }
     if (!spot) spot = S.rng.pick(S.spots);
     S.items.push({ kind: 'pu_' + kind, x: spot.x, y: spot.y, age: 0, life: PU_LIFE, dead: false });
@@ -1572,9 +1632,10 @@ const Game = (() => {
       const pearl = it.kind === 'moonpearl';
       if (pearl) updatePearl(it);
       else if (it.age >= it.life) { it.dead = true; poof(it.x, it.y); continue; }
-      const r = pearl ? [it.x + 4, it.y + 4, 24, 24] : [it.x + 2, it.y + 2, 12, 12];
-      for (const p of S.players) {
-        if (p.state === 'normal' && hits(playerRect(p), r)) { collectItem(it, p); break; }
+      const o = pearl ? 4 : 2, w = pearl ? 24 : 12;
+      for (let k = 0; k < S.players.length; k++) {
+        const p = S.players[k];
+        if (p.state === 'normal' && hitP(p, it.x + o, it.y + o, w, w)) { collectItem(it, p); break; }
       }
     }
   }
@@ -1626,7 +1687,7 @@ const Game = (() => {
 
   function bomb(p) {
     sfx('bomb');
-    flash(14, FLASH_MAX, '#ffd9b0');
+    flash(14, FLASH_MAX, PLAYER_COLOR[p.i]);                     // V6: the bomb's wash is in the owner's colour too
     ring(p.x + 8, p.y + 8, HUE.ember, 6, 160, 26, 0.7);
     ring(p.x + 8, p.y + 8, HUE.white, 4, 100, 20, 0.5);
     const chain = newChain(p.i);
@@ -1717,9 +1778,19 @@ const Game = (() => {
     S.phase = 'transition'; S.phaseT = 0;
     S.tr = { from: S.level, to, t: 0, start: S.players.map((p) => ({ x: p.x, y: p.y })) };
     for (const p of S.players) { p.stunT = 0; p.vx = 0; p.vy = 0; }
+    // G5 (cosmetic): the leftovers are kept as a fade list instead of vanishing in one frame (the arrays themselves are emptied as before)
+    S.fade = { t: 0, items: S.items, bubbles: S.bubbles, popups: S.popups, fx: S.fx, ghost: S.ghost };
     S.bubbles = []; S.items = []; S.proj = []; S.bolts = []; S.drops = []; S.flames = []; S.streams = [];
     S.popups = []; S.enemies = []; S.fx = []; S.bossBubble = null;
     resetHurry();
+  }
+  /** Ages the fade list (items, bubbles, popups, effects of the round that just ended) for the round change; gone after FADE_FRAMES. */
+  function updateFade() {
+    const F = S.fade;
+    if (!F) return;
+    if (++F.t >= FADE_FRAMES) { S.fade = null; return; }
+    for (let i = 0; i < F.fx.length; i++) { const f = F.fx[i]; f.t++; f.x += f.vx; f.y += f.vy; f.vy += f.g; }
+    for (let i = 0; i < F.popups.length; i++) { const q = F.popups[i]; q.t++; q.y -= 0.5; }
   }
 
   function updateTransition() {
@@ -1735,6 +1806,7 @@ const Game = (() => {
       p.onGround = false;
     });
     updateFx();
+    updateFade();
     if (tr.t >= TRANSITION_FRAMES) startRound(tr.to, false);
   }
 
@@ -1790,12 +1862,17 @@ const Game = (() => {
   // Per-frame driver
   // ================================================================================================
   function updateFx() {
-    for (const f of S.fx) {
+    const FXL = S.fx;
+    for (let i = 0; i < FXL.length; i++) {
+      const f = FXL[i];
       f.t++; f.x += f.vx; f.y += f.vy; f.vy += f.g;
       if (f.t >= f.dur) f.dead = true;
     }
-    for (const q of S.popups) { q.t++; q.y -= 0.5; }
-    S.popups = S.popups.filter((q) => q.t < 40);
+    const PQ = S.popups;
+    for (let i = 0; i < PQ.length; i++) { const q = PQ[i]; q.t++; q.y -= 0.5; }
+    let j = 0;
+    for (let i = 0; i < PQ.length; i++) if (PQ[i].t < 40) PQ[j++] = PQ[i];
+    PQ.length = j;
   }
 
   function prune(a) {
@@ -1811,7 +1888,7 @@ const Game = (() => {
 
   /** hostile=false freezes everything that can hurt a player (used by the extend / victory phases). */
   function updateWorld(ins, hostile) {
-    for (const p of S.players) updatePlayer(p, ins[p.i] || NO_INPUT);
+    for (let i = 0; i < S.players.length; i++) { const p = S.players[i]; updatePlayer(p, ins[p.i] || NO_INPUT); }
     if (hostile) { updateEnemies(); updateGhost(); }
     updateBubbles();
     if (hostile) { updateProjectiles(); updateBolts(); updateDrops(); updateFlames(); updateStreams(); }
@@ -1830,9 +1907,11 @@ const Game = (() => {
     for (const p of S.players) if (p.state === 'normal') p.inv = Math.max(p.inv, INTRO_INV);
   }
 
+  const INS = [NO_INPUT, NO_INPUT];
   function update(inputs) {
     if (!S || S.over) return;
-    const ins = [(inputs && inputs[0]) || NO_INPUT, (inputs && inputs[1]) || NO_INPUT];
+    const ins = INS;
+    ins[0] = (inputs && inputs[0]) || NO_INPUT; ins[1] = (inputs && inputs[1]) || NO_INPUT;      // G7: one scratch array, no allocation per frame
     S.frame++; S.phaseT++;
     S.burstBudget = 28;
     if (S.flashT > 0) S.flashT--;                              // cosmetic timers run in every phase
@@ -1865,7 +1944,11 @@ const Game = (() => {
   // ================================================================================================
   const OUTLINE = '#02040a';
   const TAU = Math.PI * 2;
-  const RSTAT = { ghosts: 0, ambient: 0, motes: 0, parts: 0, calls: 0 };          // what the last render() drew (debug.fxStats)
+  const RSTAT = { ghosts: 0, ambient: 0, motes: 0, parts: 0, calls: 0, rings: 0, light: 0 };          // what the last render() drew (debug.fxStats)
+  let RK = 1;                                                                     // device px per logical px of the current frame (ctx transform, read once per render)
+  /** Smooth 0..1 wave with `period` frames per cycle (a cosine: no hard edge anywhere). */
+  const wave = (f, period) => 0.5 + 0.5 * Math.cos(f * TAU / period);
+  const smooth = (u) => (u <= 0 ? 0 : u >= 1 ? 1 : u * u * (3 - 2 * u));
   const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
   const hasV2 = () => typeof GFX.particle === 'function';
 
@@ -1880,26 +1963,44 @@ const Game = (() => {
     ctx.globalCompositeOperation = go; ctx.globalAlpha = ga;
   }
 
-  /** Soft dark pool (radial, feathered): keeps HUD glyphs legible on bright wall looks without an opaque plate. */
+  /** Soft dark pool (radial, feathered): keeps HUD glyphs legible on bright wall looks without an opaque plate. The gradient is built ONCE per alpha at unit radius
+   *  (G7: a new CanvasGradient per pool per frame was a steady garbage source) and scaled to rx x ry by the transform. */
+  const SOFT_G = new Map();
   function softDark(ctx, cx, cy, rx, ry, a) {
-    ctx.save(); ctx.translate(cx, cy); ctx.scale(1, ry / rx);
-    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
-    g.addColorStop(0, 'rgba(2,4,10,' + a + ')'); g.addColorStop(0.62, 'rgba(2,4,10,' + (a * 0.72).toFixed(3) + ')'); g.addColorStop(1, 'rgba(2,4,10,0)');
-    ctx.fillStyle = g; ctx.fillRect(-rx, -rx, 2 * rx, 2 * rx);
+    const key = Math.round(a * 1000);
+    let g = SOFT_G.get(key);
+    if (!g) {
+      g = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+      g.addColorStop(0, 'rgba(2,4,10,' + a + ')'); g.addColorStop(0.62, 'rgba(2,4,10,' + (a * 0.72).toFixed(3) + ')'); g.addColorStop(1, 'rgba(2,4,10,0)');
+      SOFT_G.set(key, g);
+    }
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(rx, ry);
+    ctx.fillStyle = g; ctx.fillRect(-1, -1, 2, 2);
     ctx.restore();
   }
 
   /** Dark translucent band across the whole canvas width with feathered top / bottom edges (no opaque rectangle) behind a centred
-   *  banner; optional accent hairlines fading out toward the sides. */
+   *  banner; optional accent hairlines fading out toward the sides. Gradients are cached (G7). */
+  const BAND_G = new Map(), BAND_HL = new Map();
   function band(ctx, y0, y1, accent, a, feather) {
     a = a === undefined ? 0.74 : a;
-    const f = feather === undefined ? 8 : feather, h = y1 - y0 + 2 * f, s = f / h;
-    const g = ctx.createLinearGradient(0, y0 - f, 0, y1 + f);
-    g.addColorStop(0, 'rgba(2,5,12,0)'); g.addColorStop(s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1 - s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1, 'rgba(2,5,12,0)');
+    const f = feather === undefined ? 8 : feather, h = y1 - y0 + 2 * f;
+    const key = ((y0 * 512 + y1) * 64 + f) * 128 + Math.round(a * 100);
+    let g = BAND_G.get(key);
+    if (!g) {
+      const s = f / h;
+      g = ctx.createLinearGradient(0, y0 - f, 0, y1 + f);
+      g.addColorStop(0, 'rgba(2,5,12,0)'); g.addColorStop(s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1 - s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1, 'rgba(2,5,12,0)');
+      BAND_G.set(key, g);
+    }
     ctx.fillStyle = g; ctx.fillRect(0, y0 - f, C.W, h);
     if (accent) {
-      const hl = ctx.createLinearGradient(0, 0, C.W, 0);
-      hl.addColorStop(0, rgba(accent, 0)); hl.addColorStop(0.18, rgba(accent, 0.55)); hl.addColorStop(0.5, rgba(accent, 0.8)); hl.addColorStop(0.82, rgba(accent, 0.55)); hl.addColorStop(1, rgba(accent, 0));
+      let hl = BAND_HL.get(accent);
+      if (!hl) {
+        hl = ctx.createLinearGradient(0, 0, C.W, 0);
+        hl.addColorStop(0, rgba(accent, 0)); hl.addColorStop(0.18, rgba(accent, 0.55)); hl.addColorStop(0.5, rgba(accent, 0.8)); hl.addColorStop(0.82, rgba(accent, 0.55)); hl.addColorStop(1, rgba(accent, 0));
+        BAND_HL.set(accent, hl);
+      }
       const go = ctx.globalCompositeOperation;
       ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = hl;
       ctx.fillRect(0, y0, C.W, 0.7); ctx.fillRect(0, y1 - 0.7, C.W, 0.7);
@@ -1915,23 +2016,35 @@ const Game = (() => {
     for (let i = 0; i < 80; i++) out.push({ x: rnd() * 224, y: rnd() * 208, vy: 0.03 + rnd() * 0.1, dx: (rnd() - 0.5) * 0.04, ph: rnd() * TAU, sz: 0.32 + rnd() * 0.4, w: 0.012 + rnd() * 0.03, c: i % 6 });
     return out;
   })();
-  function drawAmbient(ctx, level) {
+  const AMB_COLS = [];                                                      // per round index: the six speck colours (G7: built once, not per frame)
+  function ambientColors(level) {
+    let c = AMB_COLS[level];
+    if (!c) {
+      const th = typeof GFX.theme === 'function' ? GFX.theme(level) : null;
+      c = th ? [th.glow || HUE.cyan, '#bfe8ff', th.accent || HUE.cyan, th.glow || HUE.cyan, '#d9f4ff', th.accent2 || HUE.violet] : [HUE.cyan, '#bfe8ff', HUE.cyan, HUE.cyan, '#d9f4ff', HUE.violet];
+      AMB_COLS[level] = c;
+    }
+    return c;
+  }
+  /** `wgt` = overall weight 0..1 (a round change crossfades the old and the new round's specks, G5). */
+  function drawAmbient(ctx, level, wgt) {
     const n = AMBIENT_N[OPT.quality] >> (OPT.reducedMotion ? 1 : 0), f = S.frame;
     RSTAT.ambient = n;
-    const th = typeof GFX.theme === 'function' ? GFX.theme(level) : null;
-    const cols = th ? [th.glow || HUE.cyan, '#bfe8ff', th.accent || HUE.cyan, th.glow || HUE.cyan, '#d9f4ff', th.accent2 || HUE.violet] : [HUE.cyan, '#bfe8ff', HUE.cyan, HUE.cyan, '#d9f4ff', HUE.violet];
+    const cols = ambientColors(level);
     const plain = OPT.quality < 1;                                          // quality 0: plain additive specks instead of cached glow dots
-    const go = ctx.globalCompositeOperation;
+    const go = ctx.globalCompositeOperation, ga = ctx.globalAlpha;
     if (plain) ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < n; i++) {
       const a = AMB[i];
       const x = C.INNER_L + (((a.x + f * a.dx + Math.sin(f * a.w + a.ph) * 4) % 224) + 224) % 224;
       const y = MAP_Y + (((a.y - f * a.vy) % MAP_H) + MAP_H) % MAP_H;
       const al = 0.14 + 0.32 * (0.5 + 0.5 * Math.sin(f * 0.035 + a.ph * 3));
-      if (plain) { ctx.fillStyle = rgba(cols[a.c], (al * 0.8).toFixed(2)); ctx.fillRect(x - 0.45, y - 0.45, 0.9, 0.9); }
-      else P(ctx, 'dot', x, y, a.sz, cols[a.c], al);
+      if (plain) { ctx.fillStyle = cols[a.c]; ctx.globalAlpha = ga * wgt * al * 0.8; ctx.fillRect(x - 0.45, y - 0.45, 0.9, 0.9); }
+      else if (wgt === 1) P(ctx, 'dot', x, y, a.sz, cols[a.c], al);
+      else { ctx.globalAlpha = ga * wgt; P(ctx, 'dot', x, y, a.sz, cols[a.c], al); }
     }
     if (plain) ctx.globalCompositeOperation = go;
+    ctx.globalAlpha = ga;
   }
   /** Slow light motes orbiting floating bubbles. */
   function drawMotes(ctx) {
@@ -1939,7 +2052,8 @@ const Game = (() => {
     if (OPT.quality < 1) return;
     const cap = MOTE_MAX >> (OPT.reducedMotion ? 1 : 0);
     let n = 0;
-    for (const b of S.bubbles) {
+    for (let i = 0; i < S.bubbles.length; i++) {
+      const b = S.bubbles[i];
       if (b.dead || b.state === 'shot') continue;
       if (n++ >= cap) break;
       RSTAT.motes = n;
@@ -1947,26 +2061,46 @@ const Game = (() => {
       P(ctx, 'dot', b.x + 8 + Math.cos(a) * r, b.y + 8 + Math.sin(a) * r * 0.85, 0.6, bubbleHue(b), 0.5);
     }
   }
-  /** Shockwaves are stroked directly (crisp at any radius, and cheap: cost ~ circumference instead of the sprite's whole bounding box). */
-  function bigRing(ctx, x, y, r, col, a) {
-    const go = ctx.globalCompositeOperation;
-    ctx.globalCompositeOperation = 'lighter';
+  /** Shockwave ring (G2): ONE blit of the baked GFX ring particle (it was 3 stroked passes in 'lighter'). The decision is made per RING from its largest radius (so a ring never
+   *  changes style while it expands): a ring whose sprite would exceed RING_SPRITE_PX device px (the boss / bomb / thunder giants at the common scales) is two cheap
+   *  source-over strokes instead - on a software raster that is the cheaper path there (a 340 px ring blit costs 5x a 290 px one) and it keeps the particle cache small. */
+  const ringIsSprite = (p) => (p.s1 > p.s0 ? p.s1 : p.s0) * 3.5 * RK <= RING_SPRITE_PX;
+  function shockRing(ctx, x, y, r, col, a, sprite) {
+    if (sprite) { P(ctx, 'ring', x, y, r, col, a); return; }
     ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
-    ctx.lineWidth = 3.2; ctx.strokeStyle = rgba(col, (0.16 * a).toFixed(3)); ctx.stroke();
-    ctx.lineWidth = 1.3; ctx.strokeStyle = rgba(col, (0.55 * a).toFixed(3)); ctx.stroke();
-    ctx.lineWidth = 0.55; ctx.strokeStyle = 'rgba(255,255,255,' + (0.6 * a).toFixed(3) + ')'; ctx.stroke();
-    ctx.globalCompositeOperation = go;
+    ctx.lineWidth = 3; ctx.strokeStyle = rgba(col, (0.2 * a).toFixed(3)); ctx.stroke();
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(240,250,255,' + (0.55 * a).toFixed(3) + ')'; ctx.stroke();
   }
+  /** Additive fill area (logical px^2) of one particle: the bounding box its baked sprite is blitted with. This is what a 'lighter' blit costs (and what lights the water),
+   *  so it is the unit of the LIGHT budget. Rings too big for the sprite ladder are thin strokes: no area. */
+  function partArea(p, u) {
+    const s = p.s0 + (p.s1 - p.s0) * u;
+    switch (p.k) {
+      case 'ring': { if (!ringIsSprite(p)) return 0; const d = 3.5 * s; return d * d; }
+      case 'dot': { const d = 8.8 * s; return d * d; }
+      case 'spark': { const d = 5.2 * s; return d * d; }
+      default: return 1.24 * s * 0.62 * s;
+    }
+  }
+  const VIS = new Uint8Array(512);
   function drawParts(ctx) {
-    RSTAT.parts = S.parts.length;
-    for (const p of S.parts) {
-      const u = p.t / p.dur, k = 1 - u;
+    const L = S.parts, n = L.length;
+    RSTAT.parts = n;
+    // V6 light budget: the additive fill area of everything drawn this frame is capped (a bomb / long chain must not white the water out or stall a CPU raster): walking from
+    // the NEWEST (brightest) particle back, a particle is kept while the budget lasts. G2: at most RING_CAP rings, the oldest give way.
+    let area = 0, rings = 0;
+    for (let i = n - 1; i >= 0; i--) {
+      const p = L[i], a = partArea(p, p.t / p.dur);
+      if (p.k === 'ring' && rings >= RING_CAP || area + a > LIGHT_CAP) { VIS[i] = 0; continue; }
+      VIS[i] = 1; area += a;
+      if (p.k === 'ring') rings++;
+    }
+    RSTAT.light = area; RSTAT.rings = rings;
+    for (let i = 0; i < n; i++) {
+      if (VIS[i] === 0) continue;
+      const p = L[i], u = p.t / p.dur, k = 1 - u;
       switch (p.k) {
-        case 'ring': {
-          const r = p.s0 + (p.s1 - p.s0) * (1 - k * k), a = p.a * k * Math.sqrt(k);
-          if (r >= 5) bigRing(ctx, p.x, p.y, r, p.col, a); else P(ctx, 'ring', p.x, p.y, r, p.col, a);     // direct strokes: a ring sprite's blit costs its whole bounding box
-          break;
-        }
+        case 'ring': shockRing(ctx, p.x, p.y, p.s0 + (p.s1 - p.s0) * (1 - k * k), p.col, p.a * k * Math.sqrt(k), ringIsSprite(p)); break;
         case 'dot': P(ctx, 'dot', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * k); break;
         case 'spark': P(ctx, 'spark', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * Math.min(1, k * 2.2) * (0.75 + 0.25 * Math.sin(p.t * 1.9 + p.rot * 5)), p.rot + p.t * 0.12); break;
         default: P(ctx, 'streak', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * k, Math.atan2(p.vy, p.vx)); break;
@@ -1975,6 +2109,19 @@ const Game = (() => {
   }
 
   // ---- sprites -------------------------------------------------------------------------------------------------------------------
+  // G7: draw options are ONE scratch object (GFX.draw reads it during the call and keeps nothing), sprite names come from tables (no string concat per draw)
+  const OD = { flip: false, alpha: undefined, white: false, tint: undefined, glow: undefined };
+  function gdo(ctx, name, frame, x, y, flip, alpha, tint, white, glow) {
+    OD.flip = flip; OD.alpha = alpha; OD.tint = tint; OD.white = white; OD.glow = glow;
+    GFX.draw(ctx, name, frame, x, y, OD);
+  }
+  const gd = (ctx, name, frame, x, y, flip, alpha) => gdo(ctx, name, frame, x, y, flip, alpha, undefined, false, undefined);
+  const PN = [1, 2].map((n) => { const p = 'p' + n; return { die: p + '_die', stun: p + '_stun', shoot: p + '_shoot', jump: p + '_jump', fall: p + '_fall', walk: p + '_walk', idle: p + '_idle' }; });
+  const EN = {};
+  for (const t of ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer']) EN[t] = { move: t + '_move', angry: t + '_angry', die: t + '_die', trapped: t + '_trapped', frozen: t + '_frozen' };
+  const POSE = { crabbit_throw: 'crabbit_throw_angry', springle_squash: 'springle_squash_angry', glimmer_fire: 'glimmer_fire_angry' };
+  const BUBBLE_SPRITE = { thunder: 'bubble_thunder', fire: 'bubble_fire', water: 'bubble_water' };
+
   /** Motion trail: faint additive ghosts of the baked sprite at its earlier positions (only while it really moves). */
   function drawGhosts(ctx, e, name, frame, flip) {
     if (OPT.reducedMotion || OPT.quality < 1) return;
@@ -1986,123 +2133,143 @@ const Game = (() => {
       if (dx * dx + dy * dy < 4 + g * 2) continue;
       if (!on) { go = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter'; on = true; }
       RSTAT.ghosts++;
-      GFX.draw(ctx, name, frame, TP[0], TP[1], { flip, alpha: TRAIL_A[g] });
+      gd(ctx, name, frame, TP[0], TP[1], flip, TRAIL_A[g]);
     }
     if (on) ctx.globalCompositeOperation = go;
   }
 
   function drawPlayer(ctx, p) {
     if (p.state === 'out') return;
-    const pre = 'p' + (p.i + 1);
-    let name, frame = 0, alpha = 1;
-    if (p.state === 'dying') { name = pre + '_die'; frame = Math.floor(p.dieT / 6) % 4; }
+    const N = PN[p.i];
+    let name, frame = 0, alpha;
+    if (p.state === 'dying') { name = N.die; frame = Math.floor(p.dieT / 6) % 4; }
     else {
-      if (p.inv > 0) {                                                          // invulnerable: blink (steady half-bright under reduced motion)
-        if (OPT.reducedMotion) alpha = 0.55; else if (Math.floor(p.inv / 3) % 2 === 0) alpha = 0.3;
-      }
-      if (p.stunT > 0) { name = pre + '_stun'; frame = Math.floor(p.animT / 8) % 2; }
-      else if (p.shootT > 0) { name = pre + '_shoot'; frame = p.shootT > 4 ? 1 : 0; }
-      else if (!p.onGround) name = pre + (p.vy < 0 ? '_jump' : '_fall');
-      else if (p.vx !== 0) { name = pre + '_walk'; frame = Math.floor(p.animT / 5) % 4; }
-      else { name = pre + '_idle'; frame = p.animT % 180 >= 172 ? 1 : 0; }
+      if (p.inv > 0) alpha = OPT.reducedMotion ? 0.6 : 0.4 + 0.6 * wave(p.inv, 15);     // invulnerable: a smooth alpha pulse 0.4..1.0 at 4 Hz (G3; steady 0.6 under reduced motion)
+      if (p.stunT > 0) { name = N.stun; frame = Math.floor(p.animT / 8) % 2; }
+      else if (p.shootT > 0) { name = N.shoot; frame = p.shootT > 4 ? 1 : 0; }
+      else if (!p.onGround) name = p.vy < 0 ? N.jump : N.fall;
+      else if (p.vx !== 0) { name = N.walk; frame = Math.floor(p.animT / 5) % 4; }
+      else { name = N.idle; frame = p.animT % 180 >= 172 ? 1 : 0; }
       drawGhosts(ctx, p, name, frame, p.face < 0);
-      if (OPT.quality >= 2) P(ctx, 'dot', p.x + 8, p.y + 9, 2.6, PLAYER_COLOR[p.i], 0.14 * alpha);        // the twin lights the water around it
+      if (OPT.quality >= 2) P(ctx, 'dot', p.x + 8, p.y + 9, 2.6, PLAYER_COLOR[p.i], 0.14 * (alpha === undefined ? 1 : alpha));        // the twin lights the water around it
     }
-    GFX.draw(ctx, name, frame, p.x, p.y, alpha === 1 ? { flip: p.face < 0 } : { flip: p.face < 0, alpha });
+    gd(ctx, name, frame, p.x, p.y, p.face < 0, alpha);
   }
 
-  function actionPose(base, e) { return e.angry && GFX.has(base + '_angry') ? base + '_angry' : base; }
+  function actionPose(base, e) { return e.angry && GFX.has(POSE[base]) ? POSE[base] : base; }
 
   function drawEnemy(ctx, e) {
     if (e.dead || e.state === 'trapped') return;
     if (e.state === 'enter' && e.enterT < 0) return;
     if (e.t === 'kraken') { drawBoss(ctx, e); return; }
-    const o = { flip: e.d < 0 };
-    let name, frame = 0;
-    if (e.state === 'dying') { name = e.t + '_die'; frame = Math.floor(e.dieT / 5) % 4; o.flip = false; }
-    else if (e.state === 'carried') { name = e.t + '_trapped'; frame = Math.floor(S.frame / 6) % 2; }
+    const N = EN[e.t];
+    let flip = e.d < 0, name, frame = 0, alpha;
+    if (e.state === 'dying') { name = N.die; frame = Math.floor(e.dieT / 5) % 4; flip = false; }
+    else if (e.state === 'carried') { name = N.trapped; frame = Math.floor(S.frame / 6) % 2; }
     // action poses have *_angry twins so the angry cue never drops out; the twin is looked up only for these three
     else if (e.t === 'crabbit' && e.pauseT > 0) name = actionPose('crabbit_throw', e);
     else if (e.t === 'springle' && e.onGround && e.sqT > 0) name = actionPose('springle_squash', e);
     else if (e.t === 'glimmer' && e.poseT > 0) name = actionPose('glimmer_fire', e);
-    else { name = e.t + (e.angry ? '_angry' : '_move'); frame = Math.floor(e.animT / 6) % 4; }
-    if (e.state === 'enter') o.alpha = Math.min(1, Math.max(0, e.enterT) / 30);
-    if (e.state === 'frozen') { frame = 0; drawFrozen(ctx, e, name, frame, o.flip); return; }
-    if (e.state === 'active' || e.state === 'dying') drawGhosts(ctx, e, name, frame, o.flip);
+    else { name = e.angry ? N.angry : N.move; frame = Math.floor(e.animT / 6) % 4; }
+    if (e.state === 'enter') alpha = Math.min(1, Math.max(0, e.enterT) / 30);
+    if (e.state === 'frozen') { drawFrozen(ctx, e, name, 0, flip); return; }
+    if (e.state === 'active' || e.state === 'dying') drawGhosts(ctx, e, name, frame, flip);
     // the angry look (crimson contour, steam, brows, pulsing heat halo) is baked into the *_angry frames (the K4 aura is gone); Game adds only a faint steady red light pool
     if (e.angry && e.state === 'active' && OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.2, HUE.crimson, 0.1);                   // steady (not pulsing: no K4 aura)
-    GFX.draw(ctx, name, frame, e.x, e.y, o);
+    gd(ctx, name, frame, e.x, e.y, flip, alpha);
   }
 
-  /** Ice look for the clock power-up: the sprite tinted icy cyan (GFX tint), a cold light pool and twinkling sparks. Blinks off during
-   *  the last second (a steady fade under reduced motion). Twinkle positions come from an integer hash of the frame: render never
-   *  touches any RNG. Without GFX.particle: a white silhouette wash instead. */
+  /** Frozen enemy (V1): the cast's `<e>_frozen` ice cast (pale white-lilac frost, its own crystalline twinkles; frame 0..3 only vary the twinkles) drawn plain, with a
+   *  cold light pool and two glints. Without the sprite (GFX.has) the old tint recipe is used: the sprite tinted icy cyan + a frosty white sheen; without GFX.particle a white
+   *  silhouette wash. The last second THAWS in a gentle pulse (G3: the ice thins out 2x per second while the creature comes back, never an on / off blink; steady 0.7 under
+   *  reduced motion). Twinkle positions come from an integer hash of the frame: render never touches any RNG. */
   function drawFrozen(ctx, e, name, frame, flip) {
-    const last = e.freezeT <= 60;
-    if (last && !OPT.reducedMotion && Math.floor(e.freezeT / 4) % 2 === 1) { GFX.draw(ctx, name, frame, e.x, e.y, { flip }); return; }
-    if (!hasV2()) {
-      GFX.draw(ctx, name, frame, e.x, e.y, { flip });
-      GFX.draw(ctx, name, frame, e.x, e.y, { flip, white: true, alpha: 0.5 });
+    const rm = OPT.reducedMotion, ice = EN[e.t] && GFX.has(EN[e.t].frozen) ? EN[e.t].frozen : '';
+    let fa = 1;
+    if (e.freezeT <= THAW_FRAMES) fa = rm ? 0.7 : (e.freezeT / THAW_FRAMES) * (0.55 + 0.45 * wave(e.freezeT, 30));
+    if (fa < 0.985) gd(ctx, name, frame, e.x, e.y, flip, undefined);          // the creature underneath returns as the ice thins
+    if (fa < 0.02) return;
+    const fal = fa < 0.985 ? fa : undefined;
+    if (ice) {
+      if (OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.0, HUE.ice, 0.18 * fa);
+      gd(ctx, ice, rm ? 0 : Math.floor(S.frame / 10) % 4, e.x, e.y, flip, fal);
+    } else if (!hasV2()) {
+      gd(ctx, name, frame, e.x, e.y, flip, fal);
+      gdo(ctx, name, frame, e.x, e.y, flip, 0.5 * fa, undefined, true, undefined);      // white silhouette wash
       return;
+    } else {
+      if (OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.0, HUE.ice, 0.18 * fa);
+      gdo(ctx, name, frame, e.x, e.y, flip, fal, '#4fc8ff', false, undefined);   // icy cyan body ...
+      const go = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = 'lighter';
+      gdo(ctx, name, frame, e.x, e.y, flip, (e.t === 'glimmer' ? 0.24 : 0.1) * fa, undefined, true, undefined);   // ... with a frosty white sheen on top (a stronger sheen blew the light bodies out to white with the bloom)
+      ctx.globalCompositeOperation = go;
     }
-    if (OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.0, HUE.ice, 0.18);
-    const fa = last && OPT.reducedMotion ? 0.7 : 1;
-    GFX.draw(ctx, name, frame, e.x, e.y, { flip, tint: '#4fc8ff', alpha: fa });   // icy cyan body ...
-    const go = ctx.globalCompositeOperation;
-    ctx.globalCompositeOperation = 'lighter';
-    GFX.draw(ctx, name, frame, e.x, e.y, { flip, white: true, alpha: (e.t === 'glimmer' ? 0.24 : 0.1) * fa });                         // ... with a frosty white sheen on top (integrator: 0.2 -> 0.1: the colour-blend tint keeps its detail; with the bloom a stronger sheen blew the light bodies out to white)
-    ctx.globalCompositeOperation = go;
-    const step = OPT.reducedMotion ? 15 : 5, k = Math.floor(S.frame / step), ns = OPT.quality >= 1 ? 3 : 1;
+    if (!hasV2()) return;
+    const step = rm ? 15 : 5, k = Math.floor(S.frame / step), ns = OPT.quality >= 1 ? (ice ? 2 : 3) : 1;
     const u = (S.frame % step) / step;
     for (let i = 0; i < ns; i++) {
       const h = Math.imul(k + i * 31 + (e.sx | 0), 2654435761) >>> 0;
-      P(ctx, 'spark', e.x + 1 + (h % 14), e.y + 1 + ((h >>> 8) % 14), 1.0 + 0.7 * Math.sin(u * Math.PI), (k + i) % 2 ? '#ffffff' : '#8fe6ff', 0.4 + 0.55 * Math.sin(u * Math.PI));
+      P(ctx, 'spark', e.x + 1 + (h % 14), e.y + 1 + ((h >>> 8) % 14), 1.0 + 0.7 * Math.sin(u * Math.PI), (k + i) % 2 ? '#ffffff' : '#8fe6ff', (0.4 + 0.55 * Math.sin(u * Math.PI)) * fa);
     }
   }
 
+  /** The Kraken. G1: the ink telegraph is a smooth glow RAMP (the angry face crossfading in + an amber glow that swells towards a white-hot core, linear over the 22 wind-up
+   *  frames, then fading out over INK_FADE frames after the volley): one slow swell per 2 s, no strobe (it was a 10 Hz white on / off). reducedMotion: the steady 0.3 white. */
   function drawBoss(ctx, e) {
-    const wind = e.state === 'active' && inkWinding(e);                  // ink telegraph: angry face + pulsing white flash
-    const name = e.angry || wind ? 'kraken_angry' : 'kraken';
+    const act = e.state === 'active', wind = act && inkWinding(e), rm = OPT.reducedMotion;
+    const g = !act || rm ? 0 : wind ? (INK_WIND - e.inkT + 1) / INK_WIND : e.relT < INK_FADE ? smooth(1 - e.relT / INK_FADE) : 0;
+    const name = e.angry || (rm && wind) ? 'kraken_angry' : 'kraken';
     const fr = Math.floor(e.animT / 14) % 2;
-    const o = { flip: false, alpha: e.state === 'enter' ? Math.min(1, Math.max(0, e.enterT) / 30) : 1 };
-    if (OPT.quality >= 2) P(ctx, 'dot', e.x + 24, e.y + 26, 6, e.angry ? HUE.crimson : HUE.purple, 0.12);
-    GFX.draw(ctx, name, fr, e.x, e.y, o);
-    if (e.flashT > 0) GFX.draw(ctx, name, fr, e.x, e.y, { white: true });
-    else if (wind) {
-      if (OPT.reducedMotion) GFX.draw(ctx, name, fr, e.x, e.y, { white: true, alpha: 0.3 });
-      else if (Math.floor(e.inkT / 3) % 2 === 0) GFX.draw(ctx, name, fr, e.x, e.y, { white: true, alpha: 0.55 });
+    const al = e.state === 'enter' ? Math.min(1, Math.max(0, e.enterT) / 30) : undefined;
+    if (OPT.quality >= 2) {
+      P(ctx, 'dot', e.x + 24, e.y + 26, 6, e.angry ? HUE.crimson : HUE.purple, 0.12);
+      if (g > 0.01) P(ctx, 'dot', e.x + 24, e.y + 26, 6 + 3 * g, HUE.ember, 0.24 * g);
+    }
+    gd(ctx, name, fr, e.x, e.y, false, al);
+    if (e.flashT > 0) { gdo(ctx, name, fr, e.x, e.y, false, undefined, undefined, true, undefined); return; }       // the single 4-frame hit flash
+    if (rm) { if (wind) gdo(ctx, name, fr, e.x, e.y, false, 0.3, undefined, true, undefined); return; }
+    if (g > 0.01) {
+      if (!e.angry) gd(ctx, 'kraken_angry', fr, e.x, e.y, false, g);                                                    // the angry face fades in (it used to swap at once)
+      const go = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = 'lighter';
+      const ta = 0.34 * g, wa = 0.11 * g * g;
+      if (ta > 0.008) gdo(ctx, name, fr, e.x, e.y, false, ta, '#ffb23e', false, undefined);                              // the heat of the ink it is about to spit ...
+      if (wa > 0.008) gdo(ctx, name, fr, e.x, e.y, false, wa, undefined, true, undefined);                               // ... turning white-hot
+      ctx.globalCompositeOperation = go;
     }
   }
 
   function drawBubble(ctx, b) {
     if (b.dead) return;
-    const t = b.age;
+    const t = b.age, rm = OPT.reducedMotion;
     if (b.state === 'shot') {
-      GFX.draw(ctx, 'bubble_shot', Math.min(2, Math.floor((b.dist / b.range) * 3)), b.x, b.y);
+      gd(ctx, 'bubble_shot', Math.min(2, Math.floor((b.dist / b.range) * 3)), b.x, b.y, false, undefined);
       return;
     }
-    // end-of-life warning of special / letter bubbles: blink (steady half-bright under reduced motion)
-    const dying = b.life - b.age < 90, fade = !dying ? 1 : OPT.reducedMotion ? 0.7 : Math.floor(t / 4) % 2 ? 0.5 : 1;
+    // end-of-life warning of special / letter bubbles: a smooth pulse 0.5..1 at ~2.5 Hz (G3; it was a 7.5 Hz hard blink), steady half-bright under reduced motion
+    const dying = b.life - b.age < 90, fade = !dying ? 1 : rm ? 0.7 : 0.5 + 0.5 * wave(t, 24);
     switch (b.kind) {
       case 'trapped': {
         const e = b.enemy;
         const frac = b.trapT / b.trapTime, stage = frac < 0.5 ? 0 : frac < 0.8 ? 1 : 2;
-        const jx = stage === 2 && t % 4 < 2 ? 1 : 0;
-        if (e) GFX.draw(ctx, e.t + '_trapped', Math.floor(t / 8) % 2, b.x + jx, b.y, { flip: e.d < 0 });
-        GFX.draw(ctx, 'trap_overlay', stage, b.x + jx, b.y);
+        const jx = stage === 2 && !rm && t % 4 < 2 ? 1 : 0;
+        if (e) gd(ctx, EN[e.t].trapped, Math.floor(t / 8) % 2, b.x + jx, b.y, e.d < 0, undefined);
+        // C2: the cast gives the stages different SHAPES (dashed rim, cracks); the shimmer / pulse cues are smooth alpha waves on top (stage 1 ~3 Hz shimmer, stage 2 2 Hz pulse)
+        gd(ctx, 'trap_overlay', stage, b.x + jx, b.y, false, rm || stage === 0 ? undefined : stage === 1 ? 0.78 + 0.22 * wave(t, 20) : 0.62 + 0.38 * wave(t, 30));
         break;
       }
       case 'empty':
-        if (b.life - b.age <= WARN_FRAMES) GFX.draw(ctx, 'bubble_warn', Math.floor(t / 6) % 2, b.x, b.y);
-        else GFX.draw(ctx, 'bubble', Math.floor(t / 16) % 2, b.x, b.y);
+        if (b.life - b.age <= WARN_FRAMES) gd(ctx, 'bubble_warn', Math.floor(t / 10) % 2, b.x, b.y, false, undefined);      // the red flicker is 3 Hz now (G3)
+        else gd(ctx, 'bubble', Math.floor(t / 16) % 2, b.x, b.y, false, undefined);
         break;
       case 'letter':
-        GFX.draw(ctx, 'bubble_letter', Math.floor(t / 12) % 2, b.x, b.y, { alpha: fade });
-        // integrator: SPEC_V2 documents only {align, scale, shadow, outline, glow} for GFX.text -> fade through ctx.globalAlpha (GFX.text multiplies it)
-        { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * fade; GFX.text(ctx, b.letter, b.x + 8, b.y + 4, '#ffffff', { align: 'center' }); ctx.globalAlpha = ga; }
+        gd(ctx, 'bubble_letter', Math.floor(t / 12) % 2, b.x, b.y, false, fade);
+        // SPEC_V2 documents only {align, scale, shadow, outline, glow} for GFX.text -> fade through ctx.globalAlpha (GFX.text multiplies it)
+        { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * fade; GFX.text(ctx, b.letter, b.x + 8, b.y + 4, '#ffffff', TX_C); ctx.globalAlpha = ga; }
         break;
       default:
-        GFX.draw(ctx, 'bubble_' + b.kind, Math.floor(t / 12) % 2, b.x, b.y, { alpha: fade });
+        gd(ctx, BUBBLE_SPRITE[b.kind], Math.floor(t / 12) % 2, b.x, b.y, false, fade);
     }
   }
 
@@ -2113,12 +2280,14 @@ const Game = (() => {
     let a = 1;
     if (!pearl && left < FOOD_BLINK) a = OPT.reducedMotion ? 0.7 : 0.3 + 0.7 * (0.5 + 0.5 * Math.cos(left * Math.PI / 12));    // expiry cue: smooth pulse, never a hard strobe
     const bob = it.kind.startsWith('pu_') ? Math.round(Math.sin(it.age / 10) * 1.5) : 0;
-    const pulse = 0.5 + 0.5 * Math.sin(it.age * 0.11 + it.x * 0.05), hue = itemHue(it.kind);
+    const pulse = 0.5 + 0.5 * Math.sin(it.age * 0.11 + it.x * 0.05);
+    let hue = it.hue;
+    if (hue === undefined) hue = it.hue = itemHue(it.kind);                                           // G7: the colour of an item never changes (no substring work per frame)
     if (pearl) P(ctx, 'dot', it.x + 16, it.y + 17, 4.6 + pulse * 0.8, hue, (0.16 + 0.16 * pulse) * a);
     else P(ctx, 'dot', it.x + 8, it.y + 9 + bob, 2.6 + pulse * 0.6, hue, (0.2 + 0.22 * pulse) * a);        // glow pulse
     const gl = 0.5 + 0.5 * pulse;                                                                       // the sprite's own halo breathes with the pulse (GFX {glow}; plain draw without v2 GFX)
-    if (pearl) GFX.draw(ctx, 'moonpearl', Math.floor(it.age / 10) % 2, it.x, it.y, { glow: gl });
-    else GFX.draw(ctx, it.kind, 0, it.x, it.y + bob, a === 1 ? { glow: gl } : { alpha: a, glow: gl });
+    if (pearl) gdo(ctx, 'moonpearl', Math.floor(it.age / 10) % 2, it.x, it.y, false, undefined, undefined, false, gl);
+    else gdo(ctx, it.kind, 0, it.x, it.y + bob, false, a === 1 ? undefined : a, undefined, false, gl);
   }
 
   function drawFx(ctx, f) {
@@ -2126,75 +2295,82 @@ const Game = (() => {
     const nf = GFX.frames(f.sprite) || 1;
     const frame = Math.min(nf - 1, Math.floor(f.t / f.tick));
     const fade = f.dur - f.t < 10 ? (f.dur - f.t) / 10 : 1;
-    GFX.draw(ctx, f.sprite, frame, f.x, f.y, fade < 1 ? { alpha: fade } : undefined);
+    gd(ctx, f.sprite, frame, f.x, f.y, false, fade < 1 ? fade : undefined);
+  }
+
+  /** The chain / thunder / bomb light: a faint tinted wash over the playfield, <= FLASH_MAX (12 %), onsets >= 20 frames apart. */
+  function drawFlash(ctx) {
+    if (S.flashT <= 0) return;
+    const ga = ctx.globalAlpha;
+    ctx.globalAlpha = ga * flashAlpha();
+    ctx.fillStyle = S.flashCol;
+    ctx.fillRect(0, MAP_Y, C.W, MAP_H);
+    ctx.globalAlpha = ga;
   }
 
   function drawWorldEntities(ctx) {
-    for (const f of S.flames) {
-      if (f.t > FLAME_FRAMES - 30 && Math.floor(f.t / 3) % 2) continue;
-      GFX.draw(ctx, 'flame', Math.floor(f.t / 4) % 3, f.x, f.y);
+    const FL = S.flames, IT = S.items, EN_ = S.enemies, ST = S.streams, BU = S.bubbles, PL = S.players, PR = S.proj, BO = S.bolts, DR = S.drops, FX = S.fx;
+    for (let i = 0; i < FL.length; i++) {
+      const f = FL[i], left = FLAME_FRAMES - f.t;
+      if (left < 30) { if (left > 1) gd(ctx, 'flame', Math.floor(f.t / 4) % 3, f.x, f.y, false, left / 30); continue; }      // the flame dies down smoothly over its last half second (G3: no 10 Hz blink)
+      gd(ctx, 'flame', Math.floor(f.t / 4) % 3, f.x, f.y, false, undefined);
     }
-    for (const it of S.items) drawItem(ctx, it);
-    for (const e of S.enemies) drawEnemy(ctx, e);
-    for (const s of S.streams) {
-      const fr = Math.floor(S.frame / 5) % 2;
-      for (const seg of s.trail) GFX.draw(ctx, seg.k === 'fall' ? 'water_fall' : 'water_flow', fr, seg.x, seg.y);
-      GFX.draw(ctx, s.mode === 'fall' ? 'water_fall' : 'water_flow', fr, s.x, s.y);
+    for (let i = 0; i < IT.length; i++) drawItem(ctx, IT[i]);
+    for (let i = 0; i < EN_.length; i++) drawEnemy(ctx, EN_[i]);
+    for (let i = 0; i < ST.length; i++) {
+      const s = ST[i], fr = Math.floor(S.frame / 5) % 2;
+      for (let j = 0; j < s.trail.length; j++) { const seg = s.trail[j]; gd(ctx, seg.k === 'fall' ? 'water_fall' : 'water_flow', fr, seg.x, seg.y, false, undefined); }
+      gd(ctx, s.mode === 'fall' ? 'water_fall' : 'water_flow', fr, s.x, s.y, false, undefined);
     }
-    for (const b of S.bubbles) drawBubble(ctx, b);
-    if (S.bossBubble) GFX.draw(ctx, 'kraken_trapped', 0, S.bossBubble.x, S.bossBubble.y);
-    for (const p of S.players) drawPlayer(ctx, p);
+    for (let i = 0; i < BU.length; i++) drawBubble(ctx, BU[i]);
+    if (S.bossBubble) gd(ctx, 'kraken_trapped', 0, S.bossBubble.x, S.bossBubble.y, false, undefined);
+    for (let i = 0; i < PL.length; i++) drawPlayer(ctx, PL[i]);
     if (S.ghost) {
       const g = S.ghost;
-      GFX.draw(ctx, 'bonefin', Math.floor(g.age / 10) % 2, g.x, g.y, { flip: g.vx < 0, alpha: 0.85 });
+      gd(ctx, 'bonefin', Math.floor(g.age / 10) % 2, g.x, g.y, g.vx < 0, 0.85);
     }
-    for (const q of S.proj) GFX.draw(ctx, q.type, Math.floor(q.age / 4) % 2, q.x, q.y);
-    for (const bo of S.bolts) {                                           // bolt with two fading afterimages
-      const fr = Math.floor(bo.age / 2) % 2, flip = bo.dir < 0;
+    for (let i = 0; i < PR.length; i++) { const q = PR[i]; gd(ctx, q.type, Math.floor(q.age / 4) % 2, q.x, q.y, false, undefined); }
+    for (let i = 0; i < BO.length; i++) {                                 // bolt with two fading afterimages
+      const bo = BO[i], fr = Math.floor(bo.age / 2) % 2, flip = bo.dir < 0;
       if (OPT.quality >= 1) P(ctx, 'dot', bo.x + 8, bo.y + 4, 2.4, HUE.amber, 0.2);
-      GFX.draw(ctx, 'bolt', fr, bo.x - bo.dir * 12, bo.y, { flip, alpha: 0.25 });
-      GFX.draw(ctx, 'bolt', fr, bo.x - bo.dir * 6, bo.y, { flip, alpha: 0.5 });
-      GFX.draw(ctx, 'bolt', fr, bo.x, bo.y, { flip });
+      gd(ctx, 'bolt', fr, bo.x - bo.dir * 12, bo.y, flip, 0.25);
+      gd(ctx, 'bolt', fr, bo.x - bo.dir * 6, bo.y, flip, 0.5);
+      gd(ctx, 'bolt', fr, bo.x, bo.y, flip, undefined);
     }
-    for (const d of S.drops) { P(ctx, 'dot', d.x + 4, d.y + 4, 1.8, HUE.ember, 0.2); GFX.draw(ctx, 'fire_drop', Math.floor(d.age / 3) % 2, d.x, d.y); }
-    for (const f of S.fx) drawFx(ctx, f);
+    for (let i = 0; i < DR.length; i++) { const d = DR[i]; P(ctx, 'dot', d.x + 4, d.y + 4, 1.8, HUE.ember, 0.2); gd(ctx, 'fire_drop', Math.floor(d.age / 3) % 2, d.x, d.y, false, undefined); }
+    for (let i = 0; i < FX.length; i++) drawFx(ctx, FX[i]);
     drawMotes(ctx);
     drawParts(ctx);
-    if (S.flashT > 0) {                                                    // chain / thunder / bomb light: a faint tinted wash, <= FLASH_MAX
-      ctx.globalAlpha = flashAlpha();
-      ctx.fillStyle = S.flashCol;
-      ctx.fillRect(0, MAP_Y, C.W, MAP_H);
-      ctx.globalAlpha = 1;
-    }
+    drawFlash(ctx);
   }
 
   /** Score / life popups, drawn after the banner bands (renderOverlays) so a popup rising through a band stays fully bright.
-   *  Clipped to the playfield; fades out over its last 12 frames. */
-  function drawPopups(ctx) {
-    if (!S.popups.length) return;
-    ctx.save();
-    ctx.beginPath();
-    ctx.rect(0, MAP_Y, C.W, MAP_H);
-    ctx.clip();
-    for (const q of S.popups) {
+   *  Clipped to the playfield (unless `noClip`: the round change already clips); fades out over its last 12 frames. */
+  function drawPopups(ctx, list, noClip) {
+    if (!list.length) return;
+    if (!noClip) { ctx.save(); ctx.beginPath(); ctx.rect(0, MAP_Y, C.W, MAP_H); ctx.clip(); }
+    for (let i = 0; i < list.length; i++) {
+      const q = list[i];
       const x = U.clamp(q.x, 16 + (q.text.length * 4), 240 - q.text.length * 4);
       const a = q.t > 28 ? Math.max(0, (40 - q.t) / 12) : 1;
       if (OPT.quality >= 2) P(ctx, 'dot', x, q.y + 4.5, 1.9, q.color, 0.14 * a);
-      { const ga = ctx.globalAlpha; if (a !== 1) ctx.globalAlpha = ga * a;      // integrator: fade via globalAlpha (contract: no `alpha` text option)
-        GFX.text(ctx, q.text, x, q.y, q.color, { align: 'center', outline: OUTLINE }); ctx.globalAlpha = ga; }
+      { const ga = ctx.globalAlpha; if (a !== 1) ctx.globalAlpha = ga * a;      // fade via globalAlpha (contract: no `alpha` text option)
+        GFX.text(ctx, q.text, x, q.y, q.color, TX_POP); ctx.globalAlpha = ga; }
     }
-    ctx.restore();
+    if (!noClip) ctx.restore();
   }
 
-  /** Round number on the left wall: thin glowing digits on a soft dark pool (legible on every wall look). */
+  // ---- round number, backdrop, HUD band --------------------------------------------------------------------------------------------
+  const pad2 = (n) => (n < 10 ? '0' + n : '' + n);
+  const ROUND_STR = []; for (let i = 0; i < 31; i++) ROUND_STR.push(pad2(i));
+  const ACC_RGBA = [];                                                                // per round index: the underline / label tint (G7: one string per round, not one per frame)
+  /** Round counter on the left wall (G8): 'R' + the two digits ("R01"), inset 1 px from the edge, in the CEILING row so no game object ever sits behind it; thin glowing
+   *  digits on a soft dark pool (legible on every wall look). y = top of the 8 px cell. */
   function drawRoundNumber(ctx, n, y) {
-    softDark(ctx, 8, y + 4, 12, 9, 0.66);
-    GFX.text(ctx, String(n).padStart(2, '0'), 0, y, '#cffaff', { outline: OUTLINE });
-    const go = ctx.globalCompositeOperation;
-    ctx.globalCompositeOperation = 'lighter';
-    ctx.fillStyle = rgba(GFX.theme(n - 1).accent2, 0.6);
-    ctx.fillRect(2, y + 9.2, 12, 0.6);
-    ctx.globalCompositeOperation = go;
+    softDark(ctx, 12, y + 4, 17, 8, 0.66);
+    const accent = (ACC_RGBA[n - 1] || (ACC_RGBA[n - 1] = rgba(GFX.theme(n - 1).accent2, 0.9)));
+    GFX.text(ctx, 'R', 1, y, accent, TX_OUT);
+    GFX.text(ctx, ROUND_STR[n] || pad2(n), 9, y, '#cffaff', TX_OUT);
   }
 
   /** Round backdrop: GFX.bgCanvas (drawn at 256 x 208 logical px, whatever its backing size) when the GFX module has it, else the flat theme colour. */
@@ -2204,34 +2380,114 @@ const Game = (() => {
     ctx.fillRect(0, y, C.W, MAP_H);
   }
 
+  /** The top 16 px (V2): NO flat black strip. The HUD sits on the same water as the playfield: the top rows of the round's backdrop mirrored upward from the seam (so the
+   *  gradient and the god rays run on continuously), under a soft dark veil that keeps the thin glowing numbers legible, and a faint hairline at the seam. The band is
+   *  composed ONCE per backdrop canvas into a small cache canvas (one 1:1 blit per frame afterwards; it is rebuilt when GFX hands out a new backdrop canvas, e.g. after a
+   *  scale change). Without GFX.bgCanvas (stub) the flat theme colour + the same veil are drawn live. */
+  const HUD_BANDS = new Map();                                              // round index -> { src, w, cv }
+  let hudVeil = null;
+  function veilInto(g, w, h) {
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, 'rgba(2,4,10,0.62)'); gr.addColorStop(1, 'rgba(2,4,10,0.18)');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = 'rgba(110,190,235,0.16)'; g.fillRect(0, h - Math.max(1, h / MAP_Y * 0.5), w, Math.max(1, h / MAP_Y * 0.5));
+    g.globalCompositeOperation = 'source-over';
+  }
+  function hudBandCanvas(levelIndex) {
+    const src = GFX.bgCanvas(levelIndex);
+    let e = HUD_BANDS.get(levelIndex);
+    if (e && e.src === src && e.w === src.width) return e.cv;
+    const w = src.width, h = Math.max(1, Math.round(src.height * MAP_Y / MAP_H));
+    if (HUD_BANDS.size >= 3 && !e) { const k0 = HUD_BANDS.keys().next().value; const o = HUD_BANDS.get(k0); o.cv.width = 1; o.cv.height = 1; HUD_BANDS.delete(k0); }
+    const cv = e && e.cv.width === w && e.cv.height === h ? e.cv : document.createElement('canvas');
+    cv.width = w; cv.height = h;
+    const g = cv.getContext('2d');
+    g.save(); g.translate(0, h); g.scale(1, -1);
+    g.drawImage(src, 0, 0, w, h, 0, 0, w, h);                                // the first h rows of the backdrop, mirrored about the seam
+    g.restore();
+    veilInto(g, w, h);
+    HUD_BANDS.set(levelIndex, { src, w, cv });
+    return cv;
+  }
+  function drawHudBand(ctx, levelIndex, a) {
+    const ga = ctx.globalAlpha;
+    if (a !== 1) ctx.globalAlpha = ga * a;
+    if (typeof GFX.bgCanvas === 'function') ctx.drawImage(hudBandCanvas(levelIndex), 0, 0, C.W, MAP_Y);
+    else {
+      ctx.fillStyle = GFX.theme(levelIndex).bg; ctx.fillRect(0, 0, C.W, MAP_Y);
+      if (!hudVeil) { hudVeil = ctx.createLinearGradient(0, 0, 0, MAP_Y); hudVeil.addColorStop(0, 'rgba(2,4,10,0.62)'); hudVeil.addColorStop(1, 'rgba(2,4,10,0.18)'); }
+      ctx.fillStyle = hudVeil; ctx.fillRect(0, 0, C.W, MAP_Y);
+    }
+    ctx.globalAlpha = ga;
+  }
+
   function renderPlayfield(ctx) {
     drawBackdrop(ctx, S.level - 1, MAP_Y);
-    drawAmbient(ctx, S.level - 1);
+    drawAmbient(ctx, S.level - 1, 1);
     ctx.drawImage(GFX.levelCanvas(S.level - 1, S.map), 0, MAP_Y, C.W, MAP_H);
     if (OPT.quality >= 2 && typeof GFX.levelGlints === 'function') GFX.levelGlints(ctx, S.level - 1, S.map, S.frame / 60);   // travelling glints on the lit top faces
     drawWorldEntities(ctx);
   }
 
+  /** Round change. G5: the scroll offset is NOT rounded to logical pixels any more (that stepped 3-5 device px at a time and ticked 0/1 px for ~35 frames): it is fractional,
+   *  the canvases are baked at the exact device scale so the image is resampled only while it moves (and lands on a whole device pixel at rest). Leftover items, bubbles,
+   *  popups, effects and the chain light FADE over FADE_FRAMES frames instead of vanishing in one frame, and the ambient plankton keeps drifting, crossfading from the old
+   *  round's colours to the new one's. */
   function renderTransition(ctx) {
-    const tr = S.tr;
-    const k = ease(Math.min(1, tr.t / TRANSITION_FRAMES));
-    const off = Math.round(k * MAP_H);
+    const tr = S.tr, F = S.fade;
+    const u = Math.min(1, tr.t / TRANSITION_FRAMES), k = ease(u);
+    const off = k >= 1 ? MAP_H : k * MAP_H;
     const from = LEVELS[tr.from - 1], to = LEVELS[tr.to - 1];
     drawBackdrop(ctx, tr.from - 1, MAP_Y - off);
-    ctx.drawImage(GFX.levelCanvas(tr.from - 1, from.map), 0, MAP_Y - off, C.W, MAP_H);
     drawBackdrop(ctx, tr.to - 1, MAP_Y + MAP_H - off);
+    const wTo = smooth((u - 0.3) / 0.4);
+    if (wTo < 0.99) drawAmbient(ctx, tr.from - 1, 1 - wTo);
+    if (wTo > 0.01) drawAmbient(ctx, tr.to - 1, wTo);
+    ctx.drawImage(GFX.levelCanvas(tr.from - 1, from.map), 0, MAP_Y - off, C.W, MAP_H);
     ctx.drawImage(GFX.levelCanvas(tr.to - 1, to.map), 0, MAP_Y + MAP_H - off, C.W, MAP_H);
-    drawRoundNumber(ctx, tr.from, MAP_Y + 4 - off);
-    drawRoundNumber(ctx, tr.to, MAP_Y + 4 + MAP_H - off);
-    for (const p of S.players) {                                           // players ride bubbles to their spawn
+    if (OPT.quality >= 2 && typeof GFX.levelGlints === 'function') {         // the lit-face glints fade out with the old round / in with the new one
+      const ga = ctx.globalAlpha, fo = 1 - smooth(u * 4), fi = smooth((u - 0.8) / 0.2);
+      ctx.save(); ctx.translate(0, -off);
+      if (fo > 0.01) { ctx.globalAlpha = ga * fo; GFX.levelGlints(ctx, tr.from - 1, from.map, S.frame / 60); }
+      ctx.restore(); ctx.save(); ctx.translate(0, MAP_H - off);
+      if (fi > 0.01) { ctx.globalAlpha = ga * fi; GFX.levelGlints(ctx, tr.to - 1, to.map, S.frame / 60); }
+      ctx.restore(); ctx.globalAlpha = ga;
+    }
+    drawRoundNumber(ctx, tr.from, MAP_Y - off);
+    drawRoundNumber(ctx, tr.to, MAP_Y + MAP_H - off);
+    if (F) {                                                                  // leftovers of the cleared round fade out where they were, scrolling away with it
+      const fa = 1 - smooth(F.t / FADE_FRAMES), ga = ctx.globalAlpha;
+      if (fa > 0.01) {
+        ctx.save(); ctx.translate(0, -off); ctx.globalAlpha = ga * fa;
+        for (let i = 0; i < F.items.length; i++) drawItem(ctx, F.items[i]);
+        for (let i = 0; i < F.bubbles.length; i++) drawBubble(ctx, F.bubbles[i]);
+        if (F.ghost) gd(ctx, 'bonefin', Math.floor(F.ghost.age / 10) % 2, F.ghost.x, F.ghost.y, F.ghost.vx < 0, 0.85);
+        for (let i = 0; i < F.fx.length; i++) drawFx(ctx, F.fx[i]);
+        drawPopups(ctx, F.popups, true);
+        ctx.restore(); ctx.globalAlpha = ga;
+      }
+    }
+    if (S.parts.length) { ctx.save(); ctx.translate(0, -off); drawParts(ctx); ctx.restore(); }      // the last effects of the round (rings, sparks) keep playing out
+    drawFlash(ctx);
+    for (let i = 0; i < S.players.length; i++) {                                 // players ride bubbles to their spawn
+      const p = S.players[i];
       if (p.state !== 'normal') continue;
       P(ctx, 'dot', p.x + 8, p.y + 9, 3.0, PLAYER_COLOR[p.i], 0.13);
-      GFX.draw(ctx, 'p' + (p.i + 1) + '_idle', 0, p.x, p.y, { flip: p.face < 0 });
-      GFX.draw(ctx, 'bubble', Math.floor(tr.t / 12) % 2, p.x, p.y);
+      gd(ctx, PN[p.i].idle, 0, p.x, p.y, p.face < 0, undefined);
+      gd(ctx, 'bubble', Math.floor(tr.t / 12) % 2, p.x, p.y, false, undefined);
     }
   }
 
-  const pad6 = (n) => String(Math.max(0, Math.floor(n))).padStart(6, '0');
+  const SC = [{ v: -1, s: '' }, { v: -1, s: '' }, { v: -1, s: '' }];            // G7: the score strings are rebuilt only when a score changes
+  function pad6(slot, n) {
+    n = n > 0 ? Math.floor(n) : 0;
+    const c = SC[slot];
+    if (c.v !== n) { c.v = n; c.s = String(n).padStart(6, '0'); }
+    return c.s;
+  }
+  const TX_R = { align: 'right' }, TX_C = { align: 'center' }, TX_DIM = { align: 'center', shadow: false, glow: false }, TX_OUT = { outline: OUTLINE }, TX_POP = { align: 'center', outline: OUTLINE };
+  const LETTER_DIM = 'rgba(190,234,250,0.72)';                                   // G8: the letters still missing (they were rgba(120,205,230,0.36) = 1.9:1; now 3.3:1 at k=2, 4.2 at k=3, 5.1 at k=4 on every theme)
 
   /** A life pearl: glowing core + faint ring in the player's colour. */
   function drawPearl(ctx, x, y, i) {
@@ -2242,41 +2498,49 @@ const Game = (() => {
 
   function renderHud(ctx) {
     const p1 = S.players[0], p2 = S.players[1];
-    ctx.fillStyle = '#02040a';
-    ctx.fillRect(0, 0, C.W, MAP_Y);
+    // V2: the HUD band is the continuous water (the backdrop's top rows mirrored up from the seam), not a flat black strip; the round change crossfades the two backdrops
+    if (S.phase === 'transition' && S.tr) {
+      const w = smooth((Math.min(1, S.tr.t / TRANSITION_FRAMES) - 0.3) / 0.4);
+      drawHudBand(ctx, S.tr.from - 1, 1);
+      if (w > 0.01) drawHudBand(ctx, S.tr.to - 1, w);
+    } else drawHudBand(ctx, S.level - 1, 1);
     GFX.text(ctx, '1UP', 16, 0, PLAYER_COLOR[0]);
-    GFX.text(ctx, 'HI SCORE', 128, 0, HUE.amber, { align: 'center' });
+    GFX.text(ctx, 'HI SCORE', 128, 0, HUE.amber, TX_C);
     P(ctx, 'dot', 12.2, 4.2, 0.7, PLAYER_COLOR[0], 0.9);
-    if (p2) { GFX.text(ctx, '2UP', 240, 0, PLAYER_COLOR[1], { align: 'right' }); P(ctx, 'dot', 243.8, 4.2, 0.7, PLAYER_COLOR[1], 0.9); }
-    else if (S.joinHint && Math.floor(S.frame / 30) % 2 === 0) GFX.text(ctx, S.joinHint, 240, 0, PLAYER_COLOR[1], { align: 'right' });
-    GFX.text(ctx, pad6(p1.score), 64, 8, PLAYER_HOT[0], { align: 'right' });
-    GFX.text(ctx, pad6(Math.max(S.hiScore, p1.score, p2 ? p2.score : 0)), 152, 8, '#fff1d6', { align: 'right' });
-    if (p2) GFX.text(ctx, pad6(p2.score), 240, 8, PLAYER_HOT[1], { align: 'right' });
-    if (S.phase !== 'transition') drawRoundNumber(ctx, S.level, MAP_Y + 4);
-    S.players.forEach((p, i) => {
+    if (p2) { GFX.text(ctx, '2UP', 240, 0, PLAYER_COLOR[1], TX_R); P(ctx, 'dot', 243.8, 4.2, 0.7, PLAYER_COLOR[1], 0.9); }
+    // G6: the join hint shows only while pressing Q can really join a second player (Game.join refuses after game over / victory, once P1 is out, with a join already queued)
+    else if (S.joinHint && !S.over && !S.pendingJoin && S.phase !== 'gameover' && S.phase !== 'victory' && p1.state !== 'out' && Math.floor(S.frame / 30) % 2 === 0) GFX.text(ctx, S.joinHint, 240, 0, PLAYER_COLOR[1], TX_R);
+    GFX.text(ctx, pad6(0, p1.score), 64, 8, PLAYER_HOT[0], TX_R);
+    GFX.text(ctx, pad6(1, Math.max(S.hiScore, p1.score, p2 ? p2.score : 0)), 152, 8, '#fff1d6', TX_R);
+    if (p2) GFX.text(ctx, pad6(2, p2.score), 240, 8, PLAYER_HOT[1], TX_R);
+    if (S.phase !== 'transition') drawRoundNumber(ctx, S.level, MAP_Y);
+    for (let i = 0; i < S.players.length; i++) {
+      const p = S.players[i];
       const x = i === 0 ? 8 : 248;
       const reserve = Math.min(8, Math.max(0, p.lives - 1));
       if (reserve > 0) {                                                    // lives: small glowing pearls up the foot of the wall
         softDark(ctx, x, 207 - (reserve - 1) * 3.5, 8, (reserve * 7 + 6) / 2, 0.5);
         for (let k = 0; k < reserve; k++) drawPearl(ctx, x, 207 - k * 7, i);
       }
-      softDark(ctx, x, MAP_Y + 4 * T + 3 * T - 1, 9, 31, 0.5);              // EXTEND letters down the side walls: lit = ringed + glowing, dim = faint
-      const extending = S.phase === 'extend' && S.extend && S.extend.pi === i;   // all six lit and pulsing (slowly; steady under reduced motion)
-      const hotNow = extending && !OPT.reducedMotion && Math.floor(S.phaseT / 14) % 2 === 0;
+      softDark(ctx, x, MAP_Y + 4 * T + 3 * T - 1, 9, 31, 0.5);              // EXTEND letters down the side walls: lit = ringed + glowing, dim = clearly readable
+      const extending = S.phase === 'extend' && S.extend && S.extend.pi === i;   // all six lit and pulsing (a smooth swell at 2.5 Hz, G3; steady under reduced motion)
+      const hotW = extending && !OPT.reducedMotion ? wave(S.phaseT, 24) : 0;
       for (let k = 0; k < 6; k++) {
-        const y = MAP_Y + (4 + k) * T;
+        const y = MAP_Y + (4 + k) * T, ch = LETTERS[k];
         if (p.letters[k]) {
           P(ctx, 'dot', x, y + 4, 3.4, PLAYER_COLOR[i], 0.2);
           P(ctx, 'ring', x, y + 4, 3.7, PLAYER_COLOR[i], 0.55);
-          GFX.text(ctx, LETTERS[k], x, y, hotNow ? '#ffffff' : PLAYER_HOT[i], { align: 'center' });
-        } else GFX.text(ctx, LETTERS[k], x, y, 'rgba(120,205,230,0.36)', { align: 'center', shadow: false, glow: false });
+          GFX.text(ctx, ch, x, y, PLAYER_HOT[i], TX_C);
+          if (hotW > 0.02) { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * hotW; GFX.text(ctx, ch, x, y, '#ffffff', TX_C); ctx.globalAlpha = ga; }
+        } else GFX.text(ctx, ch, x, y, LETTER_DIM, TX_DIM);
       }
-    });
+    }
   }
 
   /** Boss gauge: a thin neon bar in the ceiling row with a glowing crown glyph; white flash on a hit. Hidden during the intro. */
+  const CROWN_PTS = [[0, 5.5], [0, 1.2], [2.6, 3.4], [5, 0], [7.4, 3.4], [10, 1.2], [10, 5.5]], CROWN_JEWELS = [[0, 1.2], [5, 0], [10, 1.2]];
   function crownGlyph(ctx, x, y, col) {
-    const pts = [[0, 5.5], [0, 1.2], [2.6, 3.4], [5, 0], [7.4, 3.4], [10, 1.2], [10, 5.5]];
+    const pts = CROWN_PTS;
     ctx.save();
     ctx.translate(x, y); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
     ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath();
@@ -2285,7 +2549,7 @@ const Game = (() => {
     ctx.strokeStyle = rgba(col, 0.55); ctx.lineWidth = 1.7; ctx.stroke();
     ctx.strokeStyle = 'rgba(255,248,225,0.95)'; ctx.lineWidth = 0.7; ctx.stroke();
     ctx.restore();
-    for (const j of [[0, 1.2], [5, 0], [10, 1.2]]) P(ctx, 'dot', x + j[0], y + j[1], 0.7, HUE.white, 0.9);
+    for (let i = 0; i < CROWN_JEWELS.length; i++) { const j = CROWN_JEWELS[i]; P(ctx, 'dot', x + j[0], y + j[1], 0.7, HUE.white, 0.9); }
   }
   function renderBossBar(ctx) {
     const boss = S.enemies.find((e) => e.t === 'kraken' && !e.dead);
@@ -2316,35 +2580,49 @@ const Game = (() => {
   }
 
   const EXTEND_COLS = [HUE.magenta, HUE.amber, '#ffe27a', HUE.lime, HUE.cyan, HUE.violet];
+  const CEN1 = { align: 'center', scale: 1, outline: OUTLINE }, CEN2 = { align: 'center', scale: 2, outline: OUTLINE };
+  const ROUND_TXT = []; for (let i = 0; i < 31; i++) ROUND_TXT.push('ROUND ' + i);
+  const center = (ctx, str, y, color, scale) => GFX.text(ctx, str, 128, y, color, scale === 2 ? CEN2 : CEN1);
 
   function renderOverlays(ctx) {
-    const th = GFX.theme(S.level - 1);
-    const center = (str, y, color, scale) => GFX.text(ctx, str, 128, y, color, { align: 'center', scale: scale || 1, outline: OUTLINE });
+    const th = GFX.theme(S.level - 1), rm = OPT.reducedMotion, ga = ctx.globalAlpha;
     if (S.phase === 'intro') {
       const boss = S.level === 30;
       band(ctx, 78, boss ? 140 : 124, th.accent2);
-      center('ROUND ' + S.level, 84, '#eaffff', 2);
-      if (boss) center('THE KRAKEN KING!', 108, '#ffa090');
-      if (S.phaseT > 60 && (OPT.reducedMotion || Math.floor(S.phaseT / 8) % 4 !== 3)) center('READY!', boss ? 124 : 108, '#fff2b0');
+      center(ctx, ROUND_TXT[S.level] || 'ROUND ' + S.level, 84, '#eaffff', 2);
+      if (boss) center(ctx, 'THE KRAKEN KING!', 108, '#ffa090');
+      if (S.phaseT > 60) {                                                  // READY!: a gentle pulse (~1.9 Hz) after a short fade-in, steady under reduced motion
+        const a = Math.min(1, (S.phaseT - 60) / 8) * (rm ? 1 : 0.6 + 0.4 * wave(S.phaseT, 32));
+        ctx.globalAlpha = ga * a; center(ctx, 'READY!', boss ? 124 : 108, '#fff2b0'); ctx.globalAlpha = ga;
+      }
     }
-    if (S.hurryBanner > 0 && (OPT.reducedMotion || Math.floor(S.hurryBanner / 5) % 2 === 0)) {
-      // hostile moment (every enemy turns angry): outlined text on a faint soft band, so enemies, pebbles and ink in the rows behind stay readable
-      band(ctx, 96, 112, null, 0.34, 6);
-      center('HURRY UP!', 96, '#ff6a5e', 2);
+    if (S.hurryBanner > 0) {
+      // hostile moment (every enemy turns angry): outlined text on a faint soft band, so enemies, pebbles and ink in the rows behind stay readable.
+      // G3: it fades in, then swells and dims smoothly at 2 Hz (it was a 6 Hz hard blink) and fades out; steady under reduced motion
+      const hb = S.hurryBanner;
+      const a = Math.min(1, (HURRY_BANNER - hb + 1) / 8, hb / 14) * (rm ? 1 : 0.62 + 0.38 * wave(hb, 30));
+      if (a > 0.02) {
+        ctx.globalAlpha = ga * a;
+        band(ctx, 96, 112, null, 0.34, 6);
+        center(ctx, 'HURRY UP!', 96, '#ff6a5e', 2);
+        ctx.globalAlpha = ga;
+      }
     }
     if (S.phase === 'extend') {
       band(ctx, 84, 134);
-      center('EXTEND!', 92, EXTEND_COLS[Math.floor(S.frame / 14) % 6], 2);
-      center('1UP', 116, '#9dffa8');
+      const ci = Math.floor(S.frame / 24), cf = (S.frame % 24) / 24;       // G3: the colour changes every 24 frames (2.5 Hz) as a smooth crossfade (it was a hard change every 14 frames)
+      center(ctx, 'EXTEND!', 92, EXTEND_COLS[ci % 6], 2);
+      if (!rm && cf > 0.02) { ctx.globalAlpha = ga * smooth(cf); center(ctx, 'EXTEND!', 92, EXTEND_COLS[(ci + 1) % 6], 2); ctx.globalAlpha = ga; }
+      center(ctx, '1UP', 116, '#9dffa8');
     }
-    if (S.phase === 'gameover') { band(ctx, 88, 120); center('GAME OVER', 96, '#eaffff', 2); }
+    if (S.phase === 'gameover') { band(ctx, 88, 120); center(ctx, 'GAME OVER', 96, '#eaffff', 2); }
     if (S.phase === 'victory') {
       band(ctx, 68, 138, '#ffe27a');
-      center('THE MOON', 76, '#ffe27a', 2);
-      center('PEARL IS', 96, '#ffe27a', 2);
-      center('SAFE!', 116, '#ffffff', 2);
+      center(ctx, 'THE MOON', 76, '#ffe27a', 2);
+      center(ctx, 'PEARL IS', 96, '#ffe27a', 2);
+      center(ctx, 'SAFE!', 116, '#ffffff', 2);
     }
-    drawPopups(ctx);
+    drawPopups(ctx, S.popups, false);
     if (lvDef().boss && S.bossPhase === 'fight') renderBossBar(ctx);
   }
 
@@ -2366,6 +2644,7 @@ const Game = (() => {
   function render(ctx) {
     if (!S) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, C.W, C.H); return; }
     RSTAT.ghosts = 0;
+    try { RK = ctx.getTransform().a || 1; } catch (e) { RK = 1; }                  // device px per logical px (ring sprite limit); once per frame
     if (S.warm < 40 && OPT.quality >= 1 && hasV2()) warmFx(ctx);
     ctx.fillStyle = '#02040a';
     ctx.fillRect(0, 0, C.W, C.H);
@@ -2403,7 +2682,7 @@ const Game = (() => {
       pendingJoin: false, joinHint: o.joinHint === undefined ? 'PUSH Q' : String(o.joinHint),
       players: [], enemies: [], bubbles: [], proj: [], bolts: [], drops: [], flames: [], streams: [], items: [], fx: [], popups: [],
       ghost: null, bossBubble: null, bossPhase: '', bossPhase2: false, fanfareT: 0, hurry: false, hurryT: 0, hurryBanner: 0,
-      flashT: 0, flashDur: 14, flashA: 0, flashCool: 0, flashCol: '#ffffff', parts: [], burstBudget: 28, warm: 0,
+      flashT: 0, flashDur: 14, flashA: 0, flashCool: 0, flashCol: '#ffffff', parts: [], burstBudget: 28, warm: 0, fade: null,
       vrng: U.rng(((o.seed === undefined ? 12345 : o.seed) ^ 0x5bd1e995) >>> 0),          // cosmetic stream: effects never consume S.rng
       specialT: 0, thunderT: 0, letterT: 0, puT: 0, skipTo: 0, tr: null, clearT: 0, idleT: 0,
       extend: null, map: null, solid: null, gaps: [], spots: [], bossMax: BOSS_HP_1P,
@@ -2504,7 +2783,8 @@ const Game = (() => {
     flash() { return S ? { alpha: flashAlpha(), t: S.flashT, cool: S.flashCool, col: S.flashCol, max: FLASH_MAX, cooldown: FLASH_COOL } : { alpha: 0, t: 0, cool: 0, col: '#fff', max: FLASH_MAX, cooldown: FLASH_COOL }; },
     /** Live cosmetic counts and the caps they must respect. */
     fxStats() { return S ? { parts: S.parts.length, partCap: PART_CAP[OPT.quality], ambient: AMBIENT_N[OPT.quality] >> (OPT.reducedMotion ? 1 : 0), fx: S.fx.length, fxCap: FX_CAP, popups: S.popups.length, popupCap: POPUP_CAP,
-      drawn: { ghosts: RSTAT.ghosts, ambient: RSTAT.ambient, motes: RSTAT.motes, parts: RSTAT.parts } } : null; },
+      drawn: { ghosts: RSTAT.ghosts, ambient: RSTAT.ambient, motes: RSTAT.motes, parts: RSTAT.parts, rings: RSTAT.rings },
+      light: { total: RSTAT.light, cap: LIGHT_CAP, pools: S.parts.filter((p) => p.lt === 1).length, poolMax: POOL_MAX, ringCap: RING_CAP }, fade: S.fade ? S.fade.t : -1 } : null; },
     /** Spawn a cosmetic effect by name (visual tests only): 'ring' | 'burst' | 'chain' | 'flash'. */
     _fx(kind, x, y, arg) {
       if (!S) return;

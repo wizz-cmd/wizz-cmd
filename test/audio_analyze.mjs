@@ -7,7 +7,8 @@
 //          loop seam (cycle 2 == cycle 3 envelope, no level jump / click at the boundary), key-lifted pass checked too, per-section loudness arc printed,
 //          bass stem still audible on a phone-class speaker (300 Hz high-pass: the stem may lose at most 14 dB), jingles end clean (last 50 ms silent),
 //          form gates of the SPEC_V2 §6 table (bars / bpm) unless the song is flagged `placeholder`.
-//   SFX    every non-quiet SFX sits on the same K-active level (target SFX_TARGET +- 1.0 dB incl. its `lvl` bonus), quiet ones (`quiet`) that many dB below,
+//   SFX    (FIXPLAN_V3 A1: every SFX is rendered WARM -- started at 1.0 s on an already running chain, the way the game plays it; the old t=0 render hit the cold
+//          master limiter, which swallowed up to 14 dB of the quiet sounds and mis-fitted every trim)  every non-quiet SFX sits on the same K-active level (target SFX_TARGET +- 1.0 dB incl. its `lvl` bonus), quiet ones (`quiet`) that many dB below,
 //          true peak <= -1 dBFS, zero clipping, DC, tail silent, durations (clear <= 0.8 s, mostly < 0.45 s), SFX are clearly above the music (>= +3 dB K-active vs
 //          the music median), the `kill` pitch ladder (+0..+12: level within 3 dB, spectral centroid rising), a phone-speaker check (<= 6 dB loss).
 //   DEMOS  every instrument demo renders clean (no NaN / clipping / over-peak) and is within +-4 dB of its calibration target.
@@ -40,6 +41,11 @@ if (argVal('--src')) {
 }
 const t = await launch({ html: pageHtml });
 await t.page.addScriptTag({ content: DSP_SRC });
+// FIXPLAN_V3 A1: warm SFX render = the sound starts at 1.0 s of a silent running chain (a muted carrier), the result is cut at 0.98 s
+await t.page.addScriptTag({ content: `window.warmSfx = async (n, pitch) => {
+  const r = await AUDIO._renderOffline('menu_move', 3.9, { vol: 0, sfx: [[n, 1.0, 0, pitch || 0]] }), a = Math.round(0.98 * r.sampleRate);
+  return { sampleRate: r.sampleRate, channels: r.channels.map((c) => c.slice(a)) };
+};` });
 
 const names = await t.page.evaluate(() => ({ tracks: AUDIO.trackNames(), sfx: AUDIO.sfxNames(), demos: AUDIO._demoNames() }));
 const want = (n) => !onlyArg || onlyArg.includes(n);
@@ -152,7 +158,7 @@ const sfxRows = [];
 for (const name of names.sfx.filter(want)) {
   const info = await t.page.evaluate((n) => AUDIO._info(n), name);
   const r = await t.page.evaluate(async (n) => {
-    const res = await AUDIO._renderOffline(n, 2.8), d = __dsp, st = d.stats(res);
+    const res = await warmSfx(n), d = __dsp, st = d.stats(res);
     const end = Math.round(Math.min(res.channels[0].length, (st.effDur + 0.1) * res.sampleRate));
     const chs = d.slice(res, 0, end), ph = d.phone(chs, res.sampleRate);
     return { st, act: d.active(chs, res.sampleRate), tp: d.truePeak(res.channels), phoneAct: d.active(ph.chs, res.sampleRate).active, lowShare: ph.lowShare, tail: d.tailDb(res, 100),
@@ -184,7 +190,7 @@ if (!onlyArg || onlyArg.includes('kill')) {
   const ladder = await t.page.evaluate(async () => {
     const out = [], d = __dsp;
     for (const pitch of [0, 2, 4, 6, 8, 10, 12]) {
-      const res = await AUDIO._renderOffline('kill', 1.2, { pitch });
+      const res = await warmSfx('kill', pitch);
       const st = d.stats(res), end = Math.round(Math.min(res.channels[0].length, (st.effDur + 0.1) * res.sampleRate));
       out.push({ pitch, peak: st.peak, act: d.active(d.slice(res, 0, end), res.sampleRate).active, tp: d.truePeak(res.channels), cen: d.centroid(res, 0, 0.17) });
     }
@@ -199,7 +205,7 @@ if (!onlyArg || onlyArg.includes('kill')) {
 
 // ---------------------------------------------------------------- instrument demos
 const demoRows = [];
-const DEMO_TARGET = { demo_kit: -21, demo_industrial: -21, demo_fx: -22 };
+const DEMO_TARGET = { demo_kit: -21, demo_industrial: -21, demo_fx: -22, demo_arp: -11.5 };      // demo_arp: FIXPLAN_V3 A5 raised INST.arp lv by 21 dB (the cold arp was 20-37 dB under its band at the authored lane vols of 0.3), so its demo sits 12.5 dB above the -24 convention
 for (const name of names.demos.filter((n) => !onlyArg || onlyArg.includes(n) || onlyArg.includes('demos'))) {
   if (onlyArg && !onlyArg.includes(name) && !onlyArg.includes('demos')) continue;
   if (!onlyArg && QUICK) continue;

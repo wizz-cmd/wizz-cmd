@@ -1,13 +1,17 @@
-/* FIZZ & POP v2.0 - 10_gfx.js  ->  const GFX   (GFX core + world; the sprite DEFINITIONS live in 11_gfx_cast.js)
- * "Abyss Glow": resolution independent, everything is drawn in code, nothing is loaded.  Contract: SPEC_V2 sec. 1-2.
+/* FIZZ & POP v2.0 (wave 3) - 10_gfx.js  ->  const GFX   (GFX core + world; the sprite DEFINITIONS live in 11_gfx_cast.js)
+ * "Abyss Glow": resolution independent, everything is drawn in code, nothing is loaded.  Contract: SPEC_V2 sec. 1-2, amended by FIXPLAN_V3 (GFX core).
  *
  *  RENDER MODEL
  *   - Main sizes the canvas to k x 256 and calls GFX.setScale(k) (k = output px per logical px, 0.25 steps, 1..8). Game and the
  *     scenes keep drawing in LOGICAL units (256 x 224) under ctx.setTransform(k,0,0,k,0,0).
- *   - Every registry sprite is drawn ONCE per (name, frame, variant, k-bucket) into a cached canvas and blitted with one drawImage
- *     per entity. Baking is lazy (first draw) plus an idle-time warm-up queue; memory is bounded (MAX_PX, least recently used
- *     entries are evicted); GFX.setScale drops everything baked for another bucket.  k-buckets: 1 1.5 2 2.5 3 3.5 4 5 6 8
- *     (a sprite is baked at the smallest bucket >= 0.94 k, so blits are never up-scaled by more than ~6 %).
+ *   - ONE RESOLUTION, NO RESAMPLING (v3): every registry sprite, glyph tile / string, particle, world canvas, logo and big twin is baked at the
+ *     EXACT k (no buckets) and blitted 1:1 on the device pixel grid. A registry sprite is drawn ONCE per (name, frame, k) into a cached canvas
+ *     (lazy + a warm-up queue; memory bounded by MAX_PX with least-recently-used eviction, previous-scale bakes go first).
+ *   - RE-BAKE WITHOUT HITCHES (v3, V10c): GFX.setScale does not throw the baked data away. The previous scale's bakes keep being drawn (re-sampled,
+ *     at the right logical size) while their replacements are produced in <= ~2 ms (draw side) + ~2.5 ms (pump) slices per frame, most recently
+ *     drawn first; big layers (logo, world canvases) are produced step by step (generators, full-resolution fills in bands). A canvas that was never
+ *     built is of course made when it is first asked for. Background work (warm-up queue, world jobs, logo, overlay) runs in idle callbacks; when
+ *     those starve (didTimeout) or while a scale change is being migrated a requestAnimationFrame pump spends <= 3 ms per frame (X2).
  *   - Sprites are authored by 11_gfx_cast.js with GFX.define(name, {w, h, frames, pad:{l,r,t,b}, draw(ctx, frame, opts)}).
  *     draw() paints ONE frame in LOGICAL units, origin = top-left of the w x h registry box, under a transform that already
  *     scales by the bake scale; opts = { k: bake scale (output px per logical px, for lwFor(k) / LOD), frame, frames, name,
@@ -15,40 +19,51 @@
  *     by the blit).  ox, oy = where the box origin lies in the baked canvas in OUTPUT px: code that works in output px (NEON.placeSprite style)
  *     does  ctx.setTransform(1,0,0,1,0,0)  and draws its {x: opts.ox, y: opts.oy, k: opts.k} sprite there.
  *     pad = how far the luminous overdraw may extend beyond the box (logical px); GFX.draw(x, y) takes the BOX top-left and
- *     applies the pad itself. A missing pad defaults to 25 % of the box on every side.
+ *     applies the pad itself (below k = 2 the bake adds a margin of (2 - k) * 1.5 logical px: chunkier strokes and glows reach further, X7).
+ *     A missing pad defaults to 25 % of the box on every side.
  *
  *  PUBLIC API (everything else is private; underscore names are test hooks)
- *   GFX.init()                                   idempotent, cheap (no baking), starts the idle warm-up
- *   GFX.setScale(k)                              bake resolution; drops baked data of other buckets
+ *   GFX.init()                                   idempotent, cheap (no baking), starts the warm-up
+ *   GFX.setScale(k)                              bake resolution (exact k); stale-while-revalidate re-bake, see above
  *   GFX.define(name, spec)                       register / replace a sprite (see above); returns true, false when malformed
  *   GFX.draw(ctx, name, frame, x, y, opts)       opts: flip, alpha (0..1), white (white silhouette), tint '#rrggbb' (tinted
- *                                                silhouette over the sprite, e.g. frozen ice), glow 0..1 (halo intensity, default 1)
+ *                                                silhouette over the sprite, e.g. frozen ice), glow 0..1.5 (halo intensity, default 1; the core / halo
+ *                                                split is made with canvas operations only: no getImageData, X4)
  *                                                unknown names draw a small labelled placeholder (warn once), never throw
  *   GFX.frames(name) / size(name) / has(name)    registry box (size) - unknown -> 0 / {w:0,h:0} / false
- *   GFX.warm(namesOrPrefixes?)                   NEW (additive): bake these sprites (all frames) on idle, e.g. warm('kraken') before round 30
+ *   GFX.warm(namesOrPrefixes?)                   bake these sprites (all frames) in the background, e.g. warm('kraken') before round 30; the next
+ *                                                real round's Bonefin / Kraken / moon pearl are warmed by GFX itself (V10d)
+ *   GFX.warmStep(ms = 3)                         NEW (additive): bake queued sprites for at most ms now (Main may call it with its frame headroom)
  *   GFX.text(ctx, s, x, y, color, opts)          opts: align 'left'|'center'|'right', scale (default 1), shadow (default true: soft dark
  *                                                halo), outline '#rrggbb', glow (default true), alpha; (x,y) = top-left of the 8x8 cell
- *                                                (glyph cap box = 6 x scale high, 1 x scale below the cell top); returns the width drawn
+ *                                                (glyph cap box = 6 x scale high, 1 x scale below the cell top); returns the width drawn.
+ *                                                v3 font: wide round O against a narrow SLASHED zero, squarer D / B (O / 0 / D / B / 8 stay apart at k <= 1.5)
  *   GFX.textWidth(s, scale)                      8 * scale per glyph (code point)
- *   GFX.levelGlints(ctx, i, map, t)              NEW (optional, additive): travelling glints along the lit top faces (the baked canvas is static)
- *   GFX.levelCanvas(i, map) / bgCanvas(i)        256k x 208k canvases (draw at 0,MAP_Y with size 256 x 208); levelCanvas is transparent
- *   GFX.theme(i) -> {bg, accent, accent2, glow, edge, name}   '#rrggbb' strings (cached read-only object)
+ *   GFX.levelGlints(ctx, i, map, t)              optional, additive: travelling glints along the lit top faces (the baked canvas is static)
+ *   GFX.levelCanvas(i, map) / bgCanvas(i)        256k x 208k canvases (draw at 0,MAP_Y with size 256 x 208); levelCanvas is transparent. After a scale
+ *                                                change the previous canvas (another size) is returned until the new one is built: always draw them
+ *                                                with an explicit 256 x 208 destination
+ *   GFX.theme(i) -> {bg, accent, accent2, glow, edge, name}   '#rrggbb' strings (cached read-only object); round 1-5 = azure / lagoon crystal
  *   GFX.drawLogo(ctx, cx, y, t)                  glass-tube wordmark; returns {total, uy} (logical px width / underline y)
- *   GFX.postFX(ctx, quality)                     2 = bloom 1/4 res + vignette + grain, 1 = bloom 1/8 res + vignette, 0 = off
+ *   GFX.postFX(ctx, quality)                     0 = nothing | 1 = vignette only | 2 = bloom at 1/4 res (pipelined over 2 frames: steady cost) + vignette + grain
  *   GFX.particle(ctx, kind, x, y, size, color, alpha, rot?)    cached ADDITIVE sprites ('lighter'; ctx composite/alpha restored), x,y = centre
  *                                                dot: size = core radius (halo reaches 4.2x) | ring: size = ring radius (thin neon line) |
  *                                                spark: size = 4-point star half size (glow 2.4x) | streak: size = full length, head at +x,
- *                                                rot (radians) turns it. Baked at power-of-two pixel sizes, so crisp at every scale and bounded
- *   GFX.sheet()                                  debug canvas of every defined sprite x frame
+ *                                                rot (radians) turns it. Baked at a device-pixel size on a ~9 % ladder (drawn size = requested
+ *                                                size rounded to the nearest rung, <= ~4.5 %) and blitted 1:1 at an integer device origin
+ *   GFX.drawHero(ctx, who, x, y, scale, t, opts) NEW (V11): the big title / ending twins, see 9c below (who 'fizz'|'pop'); no GFX_CAST access needed
+ *   GFX.drawBig(kind, ctx, x, y, scale, t, opts) NEW (V11): same for 'fizz' | 'pop' | 'kraken' | 'kraken_angry'
+ *   GFX.sheet()                                  debug canvas of every defined sprite x frame (v3: labels never overlap the next cell)
  *
  *  Colours given to GFX are CSS strings ('#rrggbb', 'rgb()', 'rgba()') or NEON [r,g,b] arrays.
- *  Non-contract extras (tests only): GFX._registry(), _lint(), _timings(), _stats(), _warmNow(ms), _reset(), _undefine(prefix), _postMode('fast'|'neon').
+ *  Non-contract extras (tests only): GFX._registry(), _lint(), _timings(), _stats(), _warmNow(ms), _bgOff(on), _bgRun(ms), _sliceTop(), _stepLog(),
+ *  _sheetLayout(), _reset(), _undefine(prefix), _postMode('fast'|'neon').
  *
- *  WORLD: levelCanvas / bgCanvas are baked by generators (a stage of 3-8 ms per step). The requested canvas is always finished
- *  synchronously; additionally building round i queues its background and round i+1's level + background (LEVELS is read lazily) for the
- *  idle time, so a round transition normally finds everything cached. levelCanvas is cached per (index, map content) - a custom map under
- *  index 0 (the title's ledges) and round 1's own map coexist; bounded to 4 levels + 4 backgrounds. Sizes: 256 x kL by 208 x kL with kL = bucket
- *  (levels: capped at 6, backgrounds at 4; Game draws them with an explicit 256 x 208 destination, so any size works).
+ *  WORLD: levelCanvas / bgCanvas are baked by generators (steps of ~2-8 ms, bands for the full-resolution fills). The requested canvas is
+ *  finished synchronously when it never existed; otherwise (a previous scale exists) it is rebuilt in the background. Building a REAL round i
+ *  (its own map from LEVELS, not the title's custom ledges) queues its background and, ~1.5 s later, round i+1's level + background; so a round
+ *  transition normally finds everything cached. levelCanvas is cached per (index, map content). Sizes: exactly 256 x k by 208 x k at every k (v3: no
+ *  caps); bounded by count (4 + 4) and by pixels (0.9 x the sprite budget: the current and the next round stay, X5).
  */
 const GFX = (() => {
   'use strict';
@@ -65,12 +80,13 @@ const GFX = (() => {
   const warnOnce = (() => { const seen = new Set(); return (key, msg) => { if (seen.has(key)) return; seen.add(key); lint(msg); try { console.warn('GFX: ' + msg); } catch (e) { /* no console */ } }; })();
 
   /* ================================================================================================================
-   * 1. SCALE
+   * 1. SCALE: ONE resolution. Everything that is baked (sprites, text tiles, particles, world canvases, logo, big heroes) is baked at the
+   *    exact quantised scale K that Main gives (0.25 steps, 1..8), so every blit is 1:1 in device pixels (v3: no buckets, no resampling).
+   *    A scale change re-bakes without a hitch (stale-while-revalidate, see 2b): the previous scale's bake keeps being drawn until its
+   *    replacement exists, and the replacements are produced in <= 3 ms slices.
    * ============================================================================================================== */
-  const BUCKETS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8];
-  const bucketOf = (k) => { for (let i = 0; i < BUCKETS.length; i++) if (BUCKETS[i] >= k * 0.94) return BUCKETS[i]; return 8; };
   let K = 0;                // exact scale last given to setScale (0 = never set: the first draw adopts the ctx transform)
-  let KB = 2;               // bake bucket
+  let KB = 2;               // bake scale of the CURRENT generation (== K once set; kept as its own name for the old "bucket")
   let initDone = false;
 
   function maxPx() {        // sprite bake budget in pixels (4 bytes each), scaled by the device memory when the browser tells
@@ -80,7 +96,20 @@ const GFX = (() => {
   }
   let MAX_PX = 16e6;
 
-  const state = { px: 0, clock: 0, bakes: 0, bakeMs: 0, evictions: 0, peakPx: 0, resets: 0, missing: 0 };
+  const state = { px: 0, clock: 0, bakes: 0, bakeMs: 0, evictions: 0, peakPx: 0, resets: 0, missing: 0, slices: 0, sliceMax: 0 };
+
+  /* the re-bake budget: while a scale change is being migrated, draw-time re-bakes may spend MIG_DRAW_MS per frame (the rest of the
+   * frame keeps drawing the previous bake); the background pump spends MIG_PUMP_MS per frame. mig.used is reset by the pump's rAF. */
+  const MIG_DRAW_MS = 2, MIG_PUMP_MS = 2.5;
+  const mig = { on: false, used: 0, t0: 0 };
+  const migOK = () => {                                // the budget also refills by the clock (one window per ~frame), so a missing rAF pump can never freeze a re-bake
+    if (!mig.on) return true;
+    const t = now();
+    if (t - mig.t0 > 14) { mig.t0 = t; mig.used = 0; }
+    return mig.used < MIG_DRAW_MS;
+  };
+  const migCharge = (ms) => { if (mig.on) mig.used += ms; };
+  let lastMs = 0;           // duration of the last bake (for migCharge)
 
   /* ================================================================================================================
    * 2. REGISTRY + BAKE CACHE
@@ -95,6 +124,8 @@ const GFX = (() => {
     const f = (v) => (v === undefined || v === null ? d : Math.max(0, +v || 0));
     return { l: f(p.l), r: f(p.r), t: f(p.t), b: f(p.b) };
   }
+  /* X7: at small scales the contours are chunkier in logical units (1 device px minimum) and glows reach further, so the pad grows below k = 2 */
+  const padBoost = (kb) => (kb < 2 ? (2 - kb) * 1.5 : 0);
 
   function define(name, spec) {
     if (typeof name !== 'string' || !name || !spec || typeof spec.draw !== 'function') { lint('define: malformed ' + name); return false; }
@@ -131,30 +162,32 @@ const GFX = (() => {
     for (let f = 0; f < def.slots.length; f++) { const e = def.slots[f]; if (e) { releaseEntry(e); def.slots[f] = undefined; } }
   }
 
-  /* bake one frame of a (possibly pseudo) def at the current bucket */
+  /* bake one frame of a (possibly pseudo) def at the current scale */
   function bakeInto(def, f) {
-    const t0 = now(), kb = KB, p = def.pad;
-    const pl = Math.ceil(p.l * kb), pr = Math.ceil(p.r * kb), pt = Math.ceil(p.t * kb), pb = Math.ceil(p.b * kb);
+    const t0 = now(), kb = KB, p = def.pad, xb = padBoost(kb);
+    const pl = Math.ceil((p.l + xb) * kb), pr = Math.ceil((p.r + xb) * kb), pt = Math.ceil((p.t + xb) * kb), pb = Math.ceil((p.b + xb) * kb);
     const cw = Math.max(1, Math.ceil(def.w * kb)) + pl + pr, ch = Math.max(1, Math.ceil(def.h * kb)) + pt + pb;
     const cv = makeCanvas(cw, ch), g = cv.getContext('2d');
     g.setTransform(kb, 0, 0, kb, pl, pt);
     try { def.draw(g, f, { k: kb, frame: f, frames: def.frames, name: def.name, t: f / def.frames, bake: true, ox: pl, oy: pt, w: def.w, h: def.h }); }
     catch (e) { def.errors++; warnOnce('bake:' + def.name, 'sprite ' + def.name + ' frame ' + f + ' threw: ' + (e && e.message)); }
-    const e = { cv, w: cw, h: ch, pl, pr, pt, pb, bw: def.w, px: cw * ch, last: ++state.clock, white: null, tints: null, gl: null };
-    state.px += e.px; state.bakes++; state.bakeMs += now() - t0;
+    const e = { cv, w: cw, h: ch, pl, pr, pt, pb, bw: def.w, px: cw * ch, last: ++state.clock, kb, white: null, tints: null, gl: null };
+    state.px += e.px; state.bakes++; lastMs = now() - t0; state.bakeMs += lastMs;
     if (state.px > state.peakPx) state.peakPx = state.px;
     return e;
   }
   function bake(def, f) {
+    const old = def.slots[f];
     const e = bakeInto(def, f);
     def.slots[f] = e;
+    if (old) releaseEntry(old);                       // the previous scale's bake of this frame is no longer needed
     if (state.px > MAX_PX) evict(e);
     return e;
   }
   function evict(keep) {
     const list = [];
-    for (const def of REG.values()) for (let f = 0; f < def.slots.length; f++) { const e = def.slots[f]; if (e && e !== keep) list.push([e, def, f]); }
-    list.sort((a, b) => a[0].last - b[0].last);
+    for (const def of REG.values()) for (let f = 0; f < def.slots.length; f++) { const e = def.slots[f]; if (e && e !== keep) list.push([e, def, f, e.last - (e.kb !== KB ? 1e12 : 0)]); }   // stale (previous scale) entries go first
+    list.sort((a, b) => a[3] - b[3]);
     const target = MAX_PX * 0.8;
     for (let i = 0; i < list.length && state.px > target; i++) { releaseEntry(list[i][0]); list[i][1].slots[list[i][2]] = undefined; state.evictions++; }
   }
@@ -193,6 +226,7 @@ const GFX = (() => {
       g.globalCompositeOperation = 'destination-in'; g.drawImage(e.cv, 0, 0);               // back to the sprite's own alpha (halo included)
       const t2 = makeCanvas(e.w, e.h); t2.getContext('2d').drawImage(c, 0, 0);
       g.globalCompositeOperation = 'lighter'; g.globalAlpha = 0.4; g.drawImage(t2, 0, 0);
+      t2.width = 1; t2.height = 1;
     } else {                                                                                 // no blend modes (very old engines): flat tint
       g.globalCompositeOperation = 'source-atop';
       g.globalAlpha = 0.6; g.fillStyle = key; g.fillRect(0, 0, e.w, e.h);                    // the body takes the tint ...
@@ -201,19 +235,27 @@ const GFX = (() => {
     e.tints.set(key, c); state.px += e.w * e.h; e.px = entryPx(e);
     return c;
   }
-  /* halo split for opts.glow: pixels with alpha >= 0.55 are the "core" (contour, body), the rest the halo; core + halo = original */
+  /* halo split for opts.glow (X4: NO getImageData / GPU read-back): a soft alpha-threshold mask is built with canvas operations only
+   * (alpha squared twice by self 'destination-in', doubled by 'lighter' -> ~0 below alpha 0.55, ~1 above 0.85); core = sprite x mask,
+   * halo = sprite x (1 - mask), so core + halo ('lighter') = the original sprite exactly. */
   function glowOf(e) {
     if (e.gl) return e.gl;
-    const w = e.w, h = e.h, core = makeCanvas(w, h), halo = makeCanvas(w, h);
-    const sg = e.cv.getContext('2d');
-    let id = null;
-    try { id = sg.getImageData(0, 0, w, h); } catch (err) { id = null; }
-    if (id) {
-      const d = id.data, a = new Uint8ClampedArray(d), b = new Uint8ClampedArray(d);
-      for (let i = 3; i < d.length; i += 4) { if (d[i] >= 140) b[i] = 0; else a[i] = 0; }
-      const mk = (cv, buf) => { const im = cv.getContext('2d').createImageData(w, h); im.data.set(buf); cv.getContext('2d').putImageData(im, 0, 0); };
-      mk(core, a); mk(halo, b);
-    } else { core.getContext('2d').drawImage(e.cv, 0, 0); }
+    const w = e.w, h = e.h;
+    const mask = makeCanvas(w, h), mg = mask.getContext('2d'), tmp = makeCanvas(w, h), tg = tmp.getContext('2d');
+    mg.drawImage(e.cv, 0, 0);
+    for (let i = 0; i < 2; i++) {
+      tg.globalCompositeOperation = 'copy'; tg.drawImage(mask, 0, 0);
+      mg.globalCompositeOperation = 'destination-in'; mg.drawImage(tmp, 0, 0);
+    }
+    tg.globalCompositeOperation = 'copy'; tg.drawImage(mask, 0, 0);
+    mg.globalCompositeOperation = 'lighter'; mg.drawImage(tmp, 0, 0);
+    const core = copyOf(e), cg = core.getContext('2d');
+    cg.globalCompositeOperation = 'destination-in'; cg.drawImage(mask, 0, 0);
+    tg.globalCompositeOperation = 'copy'; tg.fillStyle = '#000'; tg.fillRect(0, 0, w, h);          // inverse mask: opaque minus mask
+    tg.globalCompositeOperation = 'destination-out'; tg.drawImage(mask, 0, 0);
+    const halo = copyOf(e), hg = halo.getContext('2d');
+    hg.globalCompositeOperation = 'destination-in'; hg.drawImage(tmp, 0, 0);
+    mask.width = 1; mask.height = 1; tmp.width = 1; tmp.height = 1;
     e.gl = { core, halo }; e.px = entryPx(e); state.px += 2 * w * h;
     return e.gl;
   }
@@ -223,8 +265,8 @@ const GFX = (() => {
   function missingEntry(name) {
     let e = missing.get(name);
     if (e && e.kb === KB) return e;
-    if (e) { state.px -= e.px; missing.delete(name); }
-    if (missing.size >= 24) { const k0 = missing.keys().next().value; const o = missing.get(k0); state.px -= o.px; missing.delete(k0); }
+    if (e) { state.px -= e.px; e.cv.width = 1; e.cv.height = 1; missing.delete(name); }
+    if (missing.size >= 24) { const k0 = missing.keys().next().value; const o = missing.get(k0); state.px -= o.px; o.cv.width = 1; o.cv.height = 1; missing.delete(k0); }
     const label = String(name).slice(0, 5).toUpperCase();
     const def = {
       name, w: 16, h: 16, frames: 1, pad: { l: 2, r: 2, t: 2, b: 2 }, errors: 0,
@@ -237,7 +279,6 @@ const GFX = (() => {
       },
     };
     e = bakeInto(def, 0);
-    e.kb = KB;
     missing.set(name, e);
     state.missing++;
     return e;
@@ -252,8 +293,9 @@ const GFX = (() => {
     setScale(k);
   }
 
-  function blit(ctx, e, cv, x, y, o, w) {
-    const kb = KB, iK = 1 / (K || kb);
+  /** blit one baked entry; its own scale (e.kb) decides the logical size, so a previous-scale bake is drawn at the right size (re-sampled) */
+  function blit(ctx, e, cv, x, y, o) {
+    const kb = e.kb, iK = 1 / (K || kb);
     const sx = Math.round(x / iK) * iK, sy = Math.round(y / iK) * iK;     // snap the box origin to the device pixel grid (no shimmer)
     const dw = e.w / kb, dh = e.h / kb, dy = sy - e.pt / kb;
     const a = o.alpha === undefined ? 1 : o.alpha;
@@ -281,68 +323,64 @@ const GFX = (() => {
     if (f >= n || f < 0) { f %= n; if (f < 0) f += n; if (!(f >= 0 && f < n)) f = 0; }
     let e = def.slots[f];
     if (e === undefined) e = bake(def, f);
+    else if (e.kb !== KB && migOK()) { e = bake(def, f); migCharge(lastMs); }          // stale (previous scale): re-bake inside the per-frame slice, else keep drawing the old one
     e.last = ++state.clock;
     if (o.white) { blit(ctx, e, whiteOf(e), x, y, o); return; }
     if (o.tint) { blit(ctx, e, tintOf(e, o.tint), x, y, o); return; }
     const g = o.glow;
     if (g !== undefined && g !== 1 && g === g) {
-      const gl = glowOf(e), gg = g < 0 ? 0 : g > 1.5 ? 1.5 : g;
+      const gl = glowOf(e), gg = g < 0 ? 0 : g > 1.5 ? 1.5 : g, a = o.alpha === undefined ? 1 : o.alpha;
       blit(ctx, e, gl.core, x, y, o);
-      if (gg <= 1) {
-        const o2 = { flip: o.flip, alpha: (o.alpha === undefined ? 1 : o.alpha) * gg };
-        blit(ctx, e, gl.halo, x, y, o2);
-      } else {
-        blit(ctx, e, gl.halo, x, y, o);
-        const gco = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter';
-        blit(ctx, e, gl.halo, x, y, { flip: o.flip, alpha: (o.alpha === undefined ? 1 : o.alpha) * (gg - 1) });
-        ctx.globalCompositeOperation = gco;
-      }
+      const gco = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter';       // core + halo (additive) = the original sprite
+      blit(ctx, e, gl.halo, x, y, { flip: o.flip, alpha: a * (gg > 1 ? 1 : gg) });
+      if (gg > 1) blit(ctx, e, gl.halo, x, y, { flip: o.flip, alpha: a * (gg - 1) });
+      ctx.globalCompositeOperation = gco;
       return;
     }
     blit(ctx, e, e.cv, x, y, o);
   }
 
   /* ----------------------------------------------------------------------------------------------------------
-   * idle warm-up: bake what the first seconds need, in small slices, within the memory budget
+   * 2b. BACKGROUND WORK: the warm-up queue (sprites), the world jobs (levels / backgrounds) and the logo job all run in small slices.
+   *     Idle callbacks give big slices when the page has idle time; when they starve (busy page: didTimeout, timeRemaining() == 0) or while
+   *     a scale change is being migrated, a requestAnimationFrame pump spends <= MIG_PUMP_MS (3 ms while starving) per frame.
    * ------------------------------------------------------------------------------------------------------- */
-  let warmQ = [], warmHandle = 0;
-  const WARM_SLICE_MS = 5;
+  let warmQ = [];
   const WARM_LIMIT = () => MAX_PX * 0.55;
+  const PIPE_DEF = { name: '\u0000pipelines', frames: 1, slots: [] };
 
   function queueWarm(defs, front) {
     const add = [];
-    for (const def of defs) for (let f = 0; f < def.frames; f++) if (!def.slots[f]) add.push([def, f]);
+    for (const def of defs) for (let f = 0; f < def.frames; f++) { const s = def.slots[f]; if (!s || s.kb !== KB) add.push([def, f]); }
     warmQ = front ? add.concat(warmQ) : warmQ.concat(add);
-    scheduleWarm();
+    bgSchedule();
   }
   function rebuildWarm() {
-    warmQ = [];
+    const stale = [];
+    for (const def of REG.values()) for (let f = 0; f < def.frames; f++) { const s = def.slots[f]; if (s && s.kb !== KB) stale.push([def, f, s.last]); }
+    stale.sort((a, b) => b[2] - a[2]);                                   // what was drawn most recently is re-baked first
+    warmQ = stale.map((q) => [q[0], q[1]]);
     const defs = Array.from(REG.values()).filter((d) => !d.lazy).sort((a, b) => a.order - b.order);
-    queueWarm(defs);
+    const add = [];
+    for (const def of defs) for (let f = 0; f < def.frames; f++) if (!def.slots[f]) add.push([def, f]);
+    warmQ = warmQ.concat(add);
+    if (!pipesDone) warmQ.unshift([PIPE_DEF, 0]);
+    bgSchedule();
   }
   function warmStep(budgetMs) {
     const t0 = now();
     let n = 0;
-    while (warmQ.length && now() - t0 < budgetMs && state.px < WARM_LIMIT()) {
-      const [def, f] = warmQ.shift();
-      if (REG.get(def.name) === def && !def.slots[f] && K) { bake(def, f); n++; }
+    while (warmQ.length && (now() - t0 < budgetMs || n === 0) && K) {
+      const q = warmQ.shift(), def = q[0], f = q[1];
+      if (def === PIPE_DEF) { prewarmPipelines(); n++; continue; }
+      if (REG.get(def.name) !== def) continue;
+      const s = def.slots[f];
+      if (s && s.kb === KB) continue;                                    // already current
+      if (!s && state.px >= WARM_LIMIT()) continue;                      // new entries only within the warm budget (replacing a stale bake is memory neutral)
+      bake(def, f); n++;
     }
+    if (!warmQ.length && mig.on) { mig.on = false; mig.used = 0; partOldDrop(); }       // migration finished: everything recently drawn is re-baked
     return n;
-  }
-  function scheduleWarm() {
-    if (warmHandle || !warmQ.length || !initDone) return;
-    const run = (deadline) => {
-      warmHandle = 0;
-      if (!K) return;                                                  // no scale yet: setScale() restarts the warm-up
-      if (typeof document !== 'undefined' && document.hidden) { scheduleWarm(); return; }
-      const rem = deadline && deadline.timeRemaining ? deadline.timeRemaining() : WARM_SLICE_MS;
-      if (rem >= 2) warmStep(Math.min(WARM_SLICE_MS, rem - 1));
-      scheduleWarm();
-    };
-    try {
-      if (typeof requestIdleCallback === 'function') warmHandle = requestIdleCallback(run, { timeout: 400 });
-      else warmHandle = setTimeout(run, 40);
-    } catch (e) { warmHandle = 0; }
   }
   function warm(what) {
     if (what === undefined) { rebuildWarm(); return; }
@@ -352,28 +390,105 @@ const GFX = (() => {
     queueWarm(defs, true);
   }
 
+  /* GPU pipeline pre-exercise (X4): the distinct blend / paint / filter signatures the game uses later (lighter gradients, multiply, 'color',
+   * destination-in/out, blur filter ...) are drawn once into a tiny canvas during warm-up, so no shader / pipeline is first compiled mid-game. */
+  let pipesDone = false;
+  function prewarmPipelines() {
+    pipesDone = true;
+    try {
+      const c = makeCanvas(8, 8), g = c.getContext('2d');
+      const lg = g.createLinearGradient(0, 0, 8, 0); lg.addColorStop(0, 'rgba(255,255,255,0.5)'); lg.addColorStop(1, 'rgba(0,128,255,0.5)');
+      const rg = g.createRadialGradient(4, 4, 0, 4, 4, 4); rg.addColorStop(0, 'rgba(255,255,255,0.5)'); rg.addColorStop(1, 'rgba(255,0,128,0)');
+      for (const op of ['lighter', 'source-over', 'multiply', 'color', 'screen']) {
+        g.globalCompositeOperation = op;
+        g.fillStyle = lg; g.fillRect(0, 0, 8, 8); g.fillStyle = rg; g.fillRect(0, 0, 8, 8); g.fillStyle = 'rgba(255,200,100,0.5)'; g.fillRect(1, 1, 4, 4);
+        g.strokeStyle = 'rgba(255,255,255,0.6)'; g.lineWidth = 1.2; g.beginPath(); g.moveTo(0, 2); g.lineTo(8, 6); g.stroke();
+        g.globalAlpha = 0.5; g.drawImage(c, 1, 1, 6, 6); g.globalAlpha = 1;
+      }
+      if (g.createConicGradient) { const cg = g.createConicGradient(0, 4, 4); cg.addColorStop(0, '#f0f'); cg.addColorStop(1, '#0ff'); g.globalCompositeOperation = 'lighter'; g.strokeStyle = cg; g.lineWidth = 2; g.beginPath(); g.arc(4, 4, 3, 0, TAU); g.stroke(); }
+      for (const op of ['destination-in', 'destination-out', 'source-in', 'source-atop', 'copy']) { g.globalCompositeOperation = op; g.drawImage(c, 0, 0); }
+      g.globalCompositeOperation = 'source-over';
+      if (canFilter()) { g.filter = 'blur(1px)'; g.drawImage(c, 0, 0); g.filter = 'none'; }
+      c.width = 1; c.height = 1;
+    } catch (e) { /* a pipeline we cannot exercise is simply compiled on first use */ }
+  }
+
+  let idleH = 0, rafH = 0, idleReq = 0, bgOff = false;
+  function bgBusy() { return warmQ.length > 0 || !!jobCur || jobQ.length > 0 || !!logoJob || !!ovJob; }
+  const sliceTop = [];                                                   // test hook: the 8 longest slices {ms, what}
+  function bgRun(ms) {                                                   // one slice: world job step(s) first (the biggest stale thing), then the logo, then sprites
+    const t0 = now();
+    let did = false, what = '';
+    try {
+      for (let guard = 0; guard < 600; guard++) {
+        const left = ms - (now() - t0);
+        if (did && left <= 0) break;
+        if (logoJob && (!did || left > 1)) { logoStep(); did = true; what += 'L'; continue; }               // big stale layers first: drawing them re-sampled is the expensive part
+        if ((jobCur || jobQ.length) && jobPumpOne(left, did)) { did = true; what += 'W'; continue; }
+        if (ovJob && (!did || left > 1)) { ovStep(); did = true; what += 'O'; continue; }
+        if (warmQ.length) { warmStep(Math.max(0.5, left)); did = true; what += 'S'; continue; }
+        break;
+      }
+    } catch (e) { warnOnce('bg', 'background bake failed: ' + (e && e.message)); jobCur = null; logoJob = null; }
+    const dt = now() - t0;
+    state.slices++; if (dt > state.sliceMax) state.sliceMax = dt;
+    if (did && (sliceTop.length < 8 || dt > sliceTop[sliceTop.length - 1].ms)) { sliceTop.push({ ms: +dt.toFixed(1), what: what.slice(0, 12) }); sliceTop.sort((a, b) => b.ms - a.ms); if (sliceTop.length > 8) sliceTop.pop(); }
+    return did;
+  }
+  function bgIdle(dl) {
+    idleH = 0;
+    if (typeof document !== 'undefined' && document.hidden) { bgSchedule(); return; }
+    const rem = dl && dl.timeRemaining ? dl.timeRemaining() : 5;
+    const budget = dl && dl.didTimeout ? 3 : Math.min(10, rem - 1.5);
+    if (budget >= 1.5 && K) bgRun(budget);
+    bgSchedule();
+  }
+  function bgFrame() {
+    rafH = 0;
+    mig.used = 0; mig.t0 = now();
+    const starved = idleH !== 0 && now() - idleReq > 120;               // an idle callback has been pending for > 120 ms: the page is too busy for idle time
+    if (K && (mig.on || starved)) bgRun(mig.on ? MIG_PUMP_MS : 3);
+    bgSchedule();
+  }
+  function bgSchedule() {
+    if (bgOff || !initDone || !K || !bgBusy()) { if (!bgBusy() && mig.on && !warmQ.length) { mig.on = false; mig.used = 0; partOldDrop(); } return; }
+    try {
+      if (!idleH) { idleReq = now(); idleH = typeof requestIdleCallback === 'function' ? requestIdleCallback(bgIdle, { timeout: 300 }) : setTimeout(() => bgIdle(null), 40); }
+      if (!rafH && typeof requestAnimationFrame === 'function') rafH = requestAnimationFrame(bgFrame);
+    } catch (e) { idleH = 0; rafH = 0; }
+  }
+  /** Public: bake queued sprites for at most `ms` (default 3); Main can call it with its frame headroom. Returns the number of frames baked. */
+  function warmPublic(ms) { if (!K) return 0; return warmStep(ms === undefined ? 3 : ms); }
+
   /* ----------------------------------------------------------------------------------------------------------
    * setScale / init / reset
    * ------------------------------------------------------------------------------------------------------- */
-  function dropAll() {
+  function dropAll() {                       // full release (tests / _reset); a normal scale change never calls this
     for (const def of REG.values()) releaseDef(def);
     for (const e of missing.values()) { e.cv.width = 1; e.cv.height = 1; }
     missing.clear();
     state.px = 0;
+    fonts.forEach((fo) => { for (const t of fo.tiles.values()) { t.cv.width = 1; t.cv.height = 1; } });
     fonts.clear(); state.tilePx = 0; dropStrings();
-    partCache.clear();
+    partDrop();
     dropWorld();
-    ovCache = null; ovLow = null;
+    dropBig();
+    ovCache = null; ovLow = null; ovJob = null;
     releaseBloom();
+    mig.on = false; mig.used = 0;
   }
   function setScale(k) {
     k = +k;
     if (!(k > 0)) k = 1;
     k = clamp(Math.round(k * 4) / 4, 1, 8);
     K = k;
-    const kb = bucketOf(k);
-    if (kb !== KB) { KB = kb; dropAll(); state.resets++; if (initDone) rebuildWarm(); }
-    else scheduleWarm();
+    if (k !== KB) {
+      const oldK = KB;
+      KB = k; state.resets++; staleClock = state.clock;
+      if (initDone) partMigrate(oldK); else partDrop();                     // particles are keyed by device size: re-baked on use, the old ones are drawn while the slice is spent
+      if (initDone) { mig.on = true; mig.used = 0; mig.t0 = now(); }                  // (without init() there is no background pump: stale bakes are simply re-baked on use)
+      rebuildWarm();
+    } else bgSchedule();
   }
   function init() {
     if (initDone) return;
@@ -382,10 +497,12 @@ const GFX = (() => {
     rebuildWarm();
   }
   function _reset() { dropAll(); warmQ = []; }
-  function _undefine(prefix) { let n = 0; for (const [name, def] of Array.from(REG.entries())) if (name.indexOf(prefix) === 0) { releaseDef(def); REG.delete(name); n++; } warmQ = warmQ.filter((q) => REG.get(q[0].name) === q[0]); return n; }
+  function _undefine(prefix) { let n = 0; for (const [name, def] of Array.from(REG.entries())) if (name.indexOf(prefix) === 0) { releaseDef(def); REG.delete(name); n++; } warmQ = warmQ.filter((q) => q[0] === PIPE_DEF || REG.get(q[0].name) === q[0]); return n; }
 
   /* ================================================================================================================
-   * 3. TEXT: the stroke font, 8 logical px advance per glyph, glyph tiles baked per (colour, scale, flags, bucket)
+   * 3. TEXT: the stroke font, 8 logical px advance per glyph, glyph tiles baked per (colour, scale, flags) at the exact scale K.
+   *    A tile / string carries the scale it was baked at (kb): after a scale change the old ones keep being drawn (re-sampled) until
+   *    they are re-baked inside the per-frame slice.
    * ============================================================================================================== */
   const fonts = new Map();            // "color|scale|flags" -> { s, col, tiles: Map(ch -> tile), ... }
   state.tilePx = 0;
@@ -406,12 +523,19 @@ const GFX = (() => {
     fonts.set(key, f);
     return f;
   }
+  function wipeTiles() {
+    for (const fo of fonts.values()) { for (const t of fo.tiles.values()) { t.cv.width = 1; t.cv.height = 1; } fo.tiles.clear(); }
+    state.tilePx = 0; dropStrings();
+  }
   function bakeTile(font, ch) {
+    const t0 = now();
     const s = font.s, kb = KB, cap = 6 * s, cell = 8 * s;
     const lw = Math.max(cap * 0.08, 1.1 / kb);
     const pad = Math.ceil((lw * 3 + 0.4) * kb);
     const cellPx = Math.ceil(cell * kb), cw = cellPx + 2 * pad;
-    if (state.tilePx > TILE_MAX_PX) { for (const fo of fonts.values()) { for (const t of fo.tiles.values()) { t.cv.width = 1; t.cv.height = 1; } fo.tiles.clear(); } state.tilePx = 0; dropStrings(); }
+    const old = font.tiles.get(ch);
+    if (old) { state.tilePx -= old.w * old.w; old.cv.width = 1; old.cv.height = 1; font.tiles.delete(ch); }
+    if (state.tilePx > TILE_MAX_PX) wipeTiles();
     const cv = makeCanvas(cw, cw), g = cv.getContext('2d');
     g.setTransform(kb, 0, 0, kb, pad, pad);
     const path = N.textPath(ch, 0, s * 1, cap, 0, false, cell / cap);
@@ -422,9 +546,17 @@ const GFX = (() => {
     }
     if (font.outline) { g.strokeStyle = rgba(font.outline, 0.92 * font.outline[3]); g.lineWidth = lw * 3.4; g.stroke(path); }
     neon(g, path, font.col, lw, { a: font.col[3], halo: font.glowOn ? 0.8 : 0, hot: font.glowOn ? 0.6 : 0.3 });
-    const t = { cv, pad, w: cw };
+    const t = { cv, pad, w: cw, kb };
     font.tiles.set(ch, t);
     state.tilePx += cw * cw;
+    migCharge(now() - t0);
+    return t;
+  }
+  /** the tile of a glyph: current scale when it can be had inside the slice, else the previous scale's tile (re-sampled), else baked now */
+  function tileFor(font, ch) {
+    const t = font.tiles.get(ch);
+    if (t === undefined) return bakeTile(font, ch);
+    if (t.kb !== KB && migOK()) return bakeTile(font, ch);
     return t;
   }
   const textWidth = (str, scale) => Array.from(String(str === undefined || str === null ? '' : str)).length * 8 * (scale > 0 ? scale : 1);
@@ -436,19 +568,25 @@ const GFX = (() => {
   let strPx = 0;
   function dropStrings() { for (const e of strCache.values()) { e.cv.width = 1; e.cv.height = 1; } strCache.clear(); strSeen.clear(); strPx = 0; }
   function buildString(font, key, chars) {
+    const t0 = now();
     const s = font.s, kb = KB, cellPx = 8 * s * kb;
-    const first = font.tiles.get('A') || bakeTile(font, 'A');            // gives the tile pad of this font
+    let first = font.tiles.get('A');
+    if (!first || first.kb !== kb) first = bakeTile(font, 'A');          // gives the tile pad of this font
     const pad = first.pad, w = Math.ceil(chars.length * cellPx) + 2 * pad, h = Math.ceil(cellPx) + 2 * pad;
+    const old = strCache.get(key);
+    if (old) { strPx -= old.w * old.h; old.cv.width = 1; old.cv.height = 1; strCache.delete(key); }
     while (strCache.size >= STR_MAX || strPx + w * h > STR_MAX_PX) { const k0 = strCache.keys().next().value; if (k0 === undefined) break; const o = strCache.get(k0); strPx -= o.w * o.h; o.cv.width = 1; o.cv.height = 1; strCache.delete(k0); }
     const cv = makeCanvas(w, h), g = cv.getContext('2d');
     for (let i = 0; i < chars.length; i++) {
       const ch = chars[i];
       if (ch === ' ') continue;
-      const t = font.tiles.get(ch) || bakeTile(font, ch);
+      let t = font.tiles.get(ch);
+      if (!t || t.kb !== kb) t = bakeTile(font, ch);
       g.drawImage(t.cv, Math.round(i * cellPx), 0);                     // the tile carries its own pad, so origin = cell origin - pad
     }
-    const e = { cv, w, h, pad };
+    const e = { cv, w, h, pad, kb };
     strCache.set(key, e); strPx += w * h;
+    migCharge(now() - t0);
     return e;
   }
 
@@ -461,29 +599,35 @@ const GFX = (() => {
     const font = fontFor(color === undefined ? '#fff' : color, s, o.shadow !== false, o.glow !== false, o.outline);
     const chars = Array.from(str), cell = 8 * s, w = chars.length * cell;
     const x0 = o.align === 'center' ? x - w / 2 : o.align === 'right' ? x - w : x;
-    const iK = 1 / (K || KB), kb = KB;
-    const sx = Math.round(x0 / iK) * iK, sy = Math.round(y / iK) * iK;
+    const kk = K || KB;
     const ga = ctx.globalAlpha, a = o.alpha === undefined ? 1 : o.alpha;
     if (a !== 1) ctx.globalAlpha = ga * a;
     let done = false;
     if (chars.length >= 3) {
       const key = font.key + '\u0001' + str;
       let e = strCache.get(key);
-      if (e) { strCache.delete(key); strCache.set(key, e); }
-      else {
+      if (e) {
+        strCache.delete(key); strCache.set(key, e);
+        if (e.kb !== KB && migOK()) e = buildString(font, key, chars);
+      } else {
         const n = (strSeen.get(key) || 0) + 1;
         if (strSeen.size > 600) strSeen.clear();
         strSeen.set(key, n);
         if (n >= 3) e = buildString(font, key, chars);
       }
-      if (e) { ctx.drawImage(e.cv, sx - e.pad / kb, sy - e.pad / kb, e.w / kb, e.h / kb); done = true; }
+      if (e) {
+        const sx = Math.round(x0 * kk) / kk, sy = Math.round(y * kk) / kk;
+        ctx.drawImage(e.cv, sx - e.pad / e.kb, sy - e.pad / e.kb, e.w / e.kb, e.h / e.kb); done = true;
+      }
     }
     if (!done) {
+      const sy = Math.round(y * kk), sx0 = Math.round(x0 * kk);
       for (let i = 0; i < chars.length; i++) {
         const ch = chars[i];
         if (ch === ' ') continue;
-        const t = font.tiles.get(ch) || bakeTile(font, ch);
-        ctx.drawImage(t.cv, sx + i * cell - t.pad / kb, sy - t.pad / kb, t.w / kb, t.w / kb);
+        const t = tileFor(font, ch), pd = Math.round(t.pad * kk / t.kb);
+        const dx = sx0 + Math.round(i * cell * kk) - pd;                                       // device px of the tile origin (an integer: the tile is drawn 1:1, same spacing as a composed string)
+        ctx.drawImage(t.cv, dx / kk, (sy - pd) / kk, t.w / t.kb, t.w / t.kb);
       }
     }
     if (a !== 1) ctx.globalAlpha = ga;
@@ -491,12 +635,32 @@ const GFX = (() => {
   }
 
   /* ================================================================================================================
-   * 4. PARTICLES: cached additive sprites, baked at a power-of-two pixel size so they stay crisp at every scale
+   * 4. PARTICLES: cached additive sprites baked at a DEVICE pixel size (quantised to ~9 % steps) and blitted 1:1 on the device grid
+   *    (X3: no scaled 'lighter' blits, 4.6x the cost). The drawn size is therefore the requested size rounded to the nearest step (<= ~4.5 %).
    * ============================================================================================================== */
-  const partCache = new Map();
-  const PART_MAX = 192;
+  let partCache = new Map(), partOld = null;          // partOld = { map, k }: the previous scale's sprites, drawn (re-sampled) while the new ones are re-baked in the per-frame slice
+  const PART_MAX = 480;
+  let partPx = 0;
+  const PART_MAX_PX = () => MAX_PX * 0.3;
   const PART_E = { dot: 4.4, ring: 1.75, spark: 2.6, streak: 0.62 };      // half extent of the sprite in size units
   const KINDS = { dot: 1, ring: 1, spark: 1, streak: 1 };
+  const PART_LADDER = (() => { const a = []; let p = 6; while (p <= 512) { a.push(p); p = Math.max(p + 2, Math.round(p * 1.09 / 2) * 2); } return a; })();
+  function ladderOf(need) {                                          // nearest rung of the ladder (binary search)
+    let lo = 0, hi = PART_LADDER.length - 1;
+    if (need <= PART_LADDER[0]) return PART_LADDER[0];
+    if (need >= PART_LADDER[hi]) return PART_LADDER[hi];
+    while (hi - lo > 1) { const m = (lo + hi) >> 1; if (PART_LADDER[m] <= need) lo = m; else hi = m; }
+    return need / PART_LADDER[lo] < PART_LADDER[hi] / need ? PART_LADDER[lo] : PART_LADDER[hi];
+  }
+  function partRelease(m) { for (const cv of m.values()) { cv.width = 1; cv.height = 1; } m.clear(); }
+  function partDrop() { partRelease(partCache); partPx = 0; if (partOld) { partRelease(partOld.map); partOld = null; } }
+  function partMigrate(oldK) {                        // scale change: keep the old sprites as the stale generation
+    if (partOld) partRelease(partOld.map);
+    partOld = partCache.size && oldK ? { map: partCache, k: oldK } : null;
+    if (!partOld) partRelease(partCache);
+    partCache = new Map(); partPx = 0;
+  }
+  function partOldDrop() { if (partOld) { partRelease(partOld.map); partOld = null; } }
   function bakeParticle(kind, col, P) {
     const e = PART_E[kind];
     const w = P, h = kind === 'streak' ? Math.max(8, P >> 1) : P;
@@ -528,58 +692,96 @@ const GFX = (() => {
     if (!(alpha > 0.003) || !(size > 0) || !KINDS[kind]) return;
     if (!K) autoScale(ctx);
     const c = colorOf(color === undefined ? '#fff' : color);
-    const e = PART_E[kind];
-    const need = size * 2 * e * K * 0.75;                           // device px of the sprite at this size
-    let P = 16; while (P < need && P < 256) P <<= 1;
+    const e = PART_E[kind], kk = K, want = size * 2 * e * kk;         // device px the sprite should cover
+    if (kind === 'ring' && want > 320) {                             // a big thin ring is cheaper (and exact) as live strokes than as a 400+ px blit
+      const gco = ctx.globalCompositeOperation;
+      neon(ctx, circlePath(x, y, size), c, Math.max(1.15 / kk, 0.075 * size), { a: alpha * c[3], halo: 1.1, hot: 0.55 });
+      ctx.globalCompositeOperation = gco;
+      return;
+    }
+    const P = ladderOf(want);                                        // device px of the sprite (width)
     const key = kind + '|' + ((c[0] >> 3) << 10 | (c[1] >> 3) << 5 | (c[2] >> 3)) + '|' + P;
     let cv = partCache.get(key);
     if (cv) { partCache.delete(key); partCache.set(key, cv); }
     else {
-      if (partCache.size >= PART_MAX) { const k0 = partCache.keys().next().value; const o = partCache.get(k0); o.width = 1; o.height = 1; partCache.delete(k0); }
+      if (partOld && !migOK()) {                      // re-bake budget of this frame is spent: draw the previous scale's sprite of the same size
+        const ok = kind + '|' + ((c[0] >> 3) << 10 | (c[1] >> 3) << 5 | (c[2] >> 3)) + '|' + ladderOf(size * 2 * e * partOld.k);
+        const old = partOld.map.get(ok);
+        if (old) { partBlit(ctx, old, x, y, old.width / partOld.k, old.height / partOld.k, c, alpha, rot, false); return; }
+      }
+      const t0 = now();
+      const need = P * (kind === 'streak' ? Math.max(8, P >> 1) : P);
+      while (partCache.size && (partCache.size >= PART_MAX || partPx + need > PART_MAX_PX())) { const k0 = partCache.keys().next().value; const o = partCache.get(k0); partPx -= o.width * o.height; o.width = 1; o.height = 1; partCache.delete(k0); }
       cv = bakeParticle(kind, [c[0] >> 3 << 3 | 4, c[1] >> 3 << 3 | 4, c[2] >> 3 << 3 | 4], P);
-      partCache.set(key, cv);
+      partCache.set(key, cv); partPx += cv.width * cv.height;
+      migCharge(now() - t0);
     }
-    const dw = size * 2 * e, dh = dw * cv.height / cv.width;
-    const gco = ctx.globalCompositeOperation, ga = ctx.globalAlpha;
+    if (want > P * 1.06) partBlit(ctx, cv, x, y, want / kk, want / kk * cv.height / cv.width, c, alpha, rot, false);          // beyond the ladder (512 px): scaled to the requested size
+    else partBlit(ctx, cv, x, y, cv.width / kk, cv.height / kk, c, alpha, rot, true);
+  }
+  function partBlit(ctx, cv, x, y, dw, dh, c, alpha, rot, exact) {
+    const gco = ctx.globalCompositeOperation, ga = ctx.globalAlpha, kk = K;
     ctx.globalCompositeOperation = 'lighter';
     ctx.globalAlpha = ga * alpha * c[3];
     if (rot) { ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.drawImage(cv, -dw / 2, -dh / 2, dw, dh); ctx.restore(); }
+    else if (exact) ctx.drawImage(cv, Math.round(x * kk - cv.width / 2) / kk, Math.round(y * kk - cv.height / 2) / kk, dw, dh);   // integer device origin, 1:1
     else ctx.drawImage(cv, x - dw / 2, y - dh / 2, dw, dh);
     ctx.globalCompositeOperation = gco; ctx.globalAlpha = ga;
   }
 
   /* ================================================================================================================
-   * 5. POST FX: bloom (1/4 or 1/8 res) + vignette + grain, one overlay blit
+   * 5. POST FX.  q0 = nothing | q1 = vignette only (sprite halos are baked) | q2 = bloom at 1/4 resolution + vignette + grain.
+   *    The bloom is PIPELINED over two frames (A: frame -> thresholded mip chain, B: blur + merge) so its cost is the same every frame;
+   *    the finished glow layer is added to the frame every frame (one nearest 2x blend).
    * ============================================================================================================== */
-  let ovCache = null, ovLow = null;
+  let ovCache = null, ovLow = null, ovJob = null;
   const VIG = 0.62, GRAIN = 0.011;
   function vignetteInto(g, W, H, a) {
     const gr = g.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.34, W / 2, H / 2, Math.hypot(W, H) * 0.54);
     gr.addColorStop(0, 'rgba(2,3,8,0)'); gr.addColorStop(1, 'rgba(2,3,8,' + a + ')');
     g.fillStyle = gr; g.fillRect(0, 0, W, H);
   }
-  function overlayFor(W, H, withGrain) {
-    if (withGrain) {
-      if (ovCache && ovCache.W === W && ovCache.H === H) return ovCache.cv;
-      if (ovCache) { ovCache.cv.width = 1; ovCache.cv.height = 1; }
-      if (ovLow) { ovLow.cv.width = 1; ovLow.cv.height = 1; ovLow = null; }              // only one overlay lives at a time
-      const cv = makeCanvas(W, H), g = cv.getContext('2d');
+  /* the full-frame overlay (vignette, + grain at q2) is baked once per canvas size, in ~0.4 Mpx bands over background slices; until it is ready
+   * postFX paints the vignette live (a gradient fill, no grain), so a resize / scale step never stalls on it. null = not ready. */
+  function* overlayGen(job) {
+    const { W, H, withGrain, cv } = job, g = cv.getContext('2d'), n = Math.max(1, Math.ceil(W * H / 4e5));
+    for (let i = 0; i < n; i++) {
+      const y0 = Math.floor(H * i / n), y1 = Math.floor(H * (i + 1) / n);
+      g.save(); g.beginPath(); g.rect(0, y0, W, y1 - y0); g.clip();
       vignetteInto(g, W, H, VIG);
-      N.drawGrain(g, W, H, GRAIN);
-      ovCache = { W, H, cv };
-      return cv;
+      if (withGrain) N.drawGrain(g, W, H, GRAIN);
+      g.restore();
+      yield;
     }
-    if (ovLow && ovLow.W === W && ovLow.H === H) return ovLow.cv;
-    if (ovLow) { ovLow.cv.width = 1; ovLow.cv.height = 1; }
-    if (ovCache) { ovCache.cv.width = 1; ovCache.cv.height = 1; ovCache = null; }
-    const cv = makeCanvas(W, H);
-    vignetteInto(cv.getContext('2d'), W, H, VIG);
-    ovLow = { W, H, cv };
-    return cv;
   }
-  /* bloom, tuned for the software rasteriser: ONE soft bright-pass at 1/4 (q2) or 1/8 (q1) res, a blurred mip chain merged at LOW
-   * resolution, then the result is smoothly lifted to 1/2 res and added to the frame with ONE nearest 2x blend (a bilinear 4x upscale
-   * of the whole frame alone costs ~7 ms on a CPU raster). Same energy / gains as NEON.bloom. */
+  function ovStep() {
+    const j = ovJob;
+    if (!j) return;
+    let r;
+    try { r = j.gen.next(); } catch (e) { warnOnce('overlay', 'overlay failed: ' + (e && e.message)); r = { done: true }; }
+    if (!r.done) return;
+    ovJob = null;
+    if (j.withGrain) { if (ovCache) { ovCache.cv.width = 1; ovCache.cv.height = 1; } ovCache = { W: j.W, H: j.H, cv: j.cv }; }
+    else { if (ovLow) { ovLow.cv.width = 1; ovLow.cv.height = 1; } ovLow = { W: j.W, H: j.H, cv: j.cv }; }
+  }
+  function overlayFor(W, H, withGrain) {
+    const slot = withGrain ? ovCache : ovLow;
+    if (slot && slot.W === W && slot.H === H) return slot.cv;
+    if (!ovJob || ovJob.W !== W || ovJob.H !== H || ovJob.withGrain !== withGrain) {
+      if (ovJob) { ovJob.cv.width = 1; ovJob.cv.height = 1; }
+      for (const o of [ovCache, ovLow]) if (o && (o.W !== W || o.H !== H)) { o.cv.width = 1; o.cv.height = 1; }       // only one size lives at a time
+      if (ovCache && (ovCache.W !== W || ovCache.H !== H)) ovCache = null;
+      if (ovLow && (ovLow.W !== W || ovLow.H !== H)) ovLow = null;
+      ovJob = { W, H, withGrain, cv: makeCanvas(W, H), gen: null };
+      ovJob.gen = overlayGen(ovJob);
+    }
+    if (bgOff || !initDone || typeof requestAnimationFrame !== 'function') { while (ovJob) ovStep(); return (withGrain ? ovCache : ovLow).cv; }      // no background pump: finish now
+    bgSchedule();
+    return null;
+  }
+  /* bloom, tuned for the software rasteriser: ONE soft bright-pass at 1/4 res, a blurred mip chain merged at LOW resolution, then the result
+   * is smoothly lifted to 1/2 res and added to the frame with ONE nearest 2x blend (a bilinear 4x upscale of the whole frame alone costs
+   * ~7 ms on a CPU raster). Same energy / gains as NEON.bloom. */
   let filterOK;
   function canFilter() {
     if (filterOK === undefined) {
@@ -599,7 +801,7 @@ const GFX = (() => {
   }
   const BLOOM_CFG = [[1.2, 0.6], [2.0, 0.6], [2.6, 0.36], [3.2, 0.2]];     // [blur px, gain] for the four mip levels
   const bpool = new Map();                 // own work canvases (not NEON's shared LRU: the cached bloom layer must survive between frames)
-  const bloomSt = { tick: 0, key: '' };
+  const bloomSt = { tick: 0, key: '', stage: 0, ready: false };
   function bwk(name, w, h) {
     let c = bpool.get(name);
     if (!c) { c = makeCanvas(w, h); bpool.set(name, c); }
@@ -608,43 +810,50 @@ const GFX = (() => {
     g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'low';
     return [c, g];
   }
-  function bloomFast(ctx, W, H, q) {
-    const cv = ctx.canvas, shift = q >= 2 ? 2 : 3, w2 = Math.max(4, W >> 1), h2 = Math.max(4, H >> 1);
-    const key = W + 'x' + H + 'q' + q;
-    const period = q >= 2 ? 2 : 3;                  // the soft glow layer is refreshed every 2nd (q2) / 3rd (q1) frame; the blend runs every frame
-    const fresh = bloomSt.key !== key || bloomSt.tick % period === 0 || !bpool.get('gb_m');
-    bloomSt.tick++; bloomSt.key = key;
-    if (fresh) {
-      let w = w2, h = h2;
-      let [from, g0] = bwk('gb_h', w, h); g0.globalCompositeOperation = 'copy'; g0.drawImage(cv, 0, 0, w, h);          // plain 2x2 box of the frame
-      if (shift > 2) { w = Math.max(4, w >> 1); h = Math.max(4, h >> 1); const [c8, g8] = bwk('gb_q', w, h); g8.globalCompositeOperation = 'copy'; g8.drawImage(from, 0, 0, w, h); from = c8; }
+  /* stage A: frame -> 1/4 res, soft threshold (v -> v^4 by self-multiply), mip chain */
+  function bloomStageA(ctx, W, H) {
+    const cv = ctx.canvas, w2 = Math.max(4, W >> 1), h2 = Math.max(4, H >> 1);
+    let w = w2, h = h2;
+    const [from, g0] = bwk('gb_h', w, h); g0.globalCompositeOperation = 'copy'; g0.drawImage(cv, 0, 0, w, h);          // plain 2x2 box of the frame
+    w = Math.max(4, w >> 1); h = Math.max(4, h >> 1);
+    const [src, g] = bwk('gb_0', w, h);
+    g.globalCompositeOperation = 'copy'; g.drawImage(from, 0, 0, w, h);
+    const [t2, tg] = bwk('gb_t', w, h);
+    tg.globalCompositeOperation = 'copy'; tg.drawImage(src, 0, 0);
+    g.globalCompositeOperation = 'multiply'; g.drawImage(t2, 0, 0);
+    tg.globalCompositeOperation = 'copy'; tg.drawImage(src, 0, 0); g.drawImage(t2, 0, 0);
+    g.globalCompositeOperation = 'lighter'; g.drawImage(src, 0, 0); g.drawImage(src, 0, 0);                          // restore the energy lost by the threshold
+    g.globalCompositeOperation = 'source-over';
+    let prev = src;
+    for (let i = 1; i < BLOOM_CFG.length; i++) {
       w = Math.max(4, w >> 1); h = Math.max(4, h >> 1);
-      const [src, g] = bwk('gb_0', w, h);
-      g.globalCompositeOperation = 'copy'; g.drawImage(from, 0, 0, w, h);
-      const [t2, tg] = bwk('gb_t', w, h);
-      tg.globalCompositeOperation = 'copy'; tg.drawImage(src, 0, 0);                                                    // soft threshold v -> v^4 by self-multiply
-      g.globalCompositeOperation = 'multiply'; g.drawImage(t2, 0, 0);
-      tg.globalCompositeOperation = 'copy'; tg.drawImage(src, 0, 0); g.drawImage(t2, 0, 0);
-      g.globalCompositeOperation = 'lighter'; g.drawImage(src, 0, 0); g.drawImage(src, 0, 0);                          // restore the energy lost by the threshold
-      g.globalCompositeOperation = 'source-over';
-      const levels = [src];
-      for (let i = 1; i < BLOOM_CFG.length; i++) {
-        w = Math.max(4, w >> 1); h = Math.max(4, h >> 1);
-        const [c, cg] = bwk('gb_' + i, w, h); cg.globalCompositeOperation = 'copy'; cg.drawImage(levels[i - 1], 0, 0, w, h); levels.push(c);
-      }
-      let acc = null;
-      for (let i = levels.length - 1; i >= 0; i--) {                                                                    // blur + merge coarse -> fine at low resolution
-        const lv = levels[i], [b, bg] = bwk('gb_b' + i, lv.width, lv.height);
-        blurTo(bg, lv, BLOOM_CFG[i][0]);
-        const [c, cg] = bwk('gb_a' + i, lv.width, lv.height);
-        cg.globalCompositeOperation = 'copy'; cg.globalAlpha = BLOOM_CFG[i][1]; cg.drawImage(b, 0, 0);
-        if (acc) { cg.globalCompositeOperation = 'lighter'; cg.globalAlpha = 1; cg.drawImage(acc, 0, 0, c.width, c.height); }
-        cg.globalAlpha = 1; cg.globalCompositeOperation = 'source-over';
-        acc = c;
-      }
-      const [, mg] = bwk('gb_m', w2, h2);
-      mg.globalCompositeOperation = 'copy'; mg.drawImage(acc, 0, 0, w2, h2);
+      const [c, cg] = bwk('gb_' + i, w, h); cg.globalCompositeOperation = 'copy'; cg.drawImage(prev, 0, 0, w, h); prev = c;
     }
+  }
+  /* stage B: blur + merge coarse -> fine at low resolution, lifted to 1/2 res */
+  function bloomStageB(W, H) {
+    const w2 = Math.max(4, W >> 1), h2 = Math.max(4, H >> 1);
+    let acc = null;
+    for (let i = BLOOM_CFG.length - 1; i >= 0; i--) {
+      const lv = bpool.get('gb_' + i), [b, bg] = bwk('gb_b' + i, lv.width, lv.height);
+      blurTo(bg, lv, BLOOM_CFG[i][0]);
+      const [c, cg] = bwk('gb_a' + i, lv.width, lv.height);
+      cg.globalCompositeOperation = 'copy'; cg.globalAlpha = BLOOM_CFG[i][1]; cg.drawImage(b, 0, 0);
+      if (acc) { cg.globalCompositeOperation = 'lighter'; cg.globalAlpha = 1; cg.drawImage(acc, 0, 0, c.width, c.height); }
+      cg.globalAlpha = 1; cg.globalCompositeOperation = 'source-over';
+      acc = c;
+    }
+    const [, mg] = bwk('gb_m', w2, h2);
+    mg.globalCompositeOperation = 'copy'; mg.drawImage(acc, 0, 0, w2, h2);
+  }
+  function bloomFast(ctx, W, H) {
+    const key = W + 'x' + H;
+    if (bloomSt.key !== key) { bloomSt.key = key; bloomSt.stage = 0; bloomSt.ready = false; }
+    if (!bloomSt.ready) { bloomStageA(ctx, W, H); bloomStageB(W, H); bloomSt.stage = 0; bloomSt.ready = true; }   // first frame at this size: both stages, so a single call already blooms
+    else if (bloomSt.stage === 0) { bloomStageA(ctx, W, H); bloomSt.stage = 1; }                    // afterwards the stages alternate: A (even frames), B (odd frames)
+    else { bloomStageB(W, H); bloomSt.stage = 0; }
+    bloomSt.tick++;
+    if (!bloomSt.ready) return;
     const mid = bpool.get('gb_m');
     ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 1;
     ctx.imageSmoothingEnabled = false;
@@ -652,7 +861,7 @@ const GFX = (() => {
     ctx.imageSmoothingEnabled = true;
     ctx.globalCompositeOperation = 'source-over';
   }
-  function releaseBloom() { for (const c of bpool.values()) { c.width = 1; c.height = 1; } bpool.clear(); bloomSt.key = ''; }
+  function releaseBloom() { for (const c of bpool.values()) { c.width = 1; c.height = 1; } bpool.clear(); bloomSt.key = ''; bloomSt.ready = false; bloomSt.stage = 0; }
   function postFX(ctx, quality) {
     const q = quality === undefined ? 2 : quality | 0;
     if (q <= 0) return;
@@ -661,9 +870,10 @@ const GFX = (() => {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.imageSmoothingEnabled = true;
-    try { if (postMode === 'neon') N.bloom(ctx, W, H, { shift: q >= 2 ? 2 : 3 }); else bloomFast(ctx, W, H, q); } catch (e) { warnOnce('bloom', 'bloom failed: ' + (e && e.message)); }
+    if (q >= 2) { try { if (postMode === 'neon') N.bloom(ctx, W, H, { shift: 2 }); else bloomFast(ctx, W, H); } catch (e) { warnOnce('bloom', 'bloom failed: ' + (e && e.message)); } }
     ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
-    ctx.drawImage(overlayFor(W, H, q >= 2), 0, 0, W, H);
+    const ov = overlayFor(W, H, q >= 2);
+    if (ov) ctx.drawImage(ov, 0, 0, W, H); else vignetteInto(ctx, W, H, VIG);
     ctx.restore();
   }
   let postMode = 'fast';
@@ -690,20 +900,22 @@ const GFX = (() => {
   function tone(c, dh, fs, fl) { const h = toHsl(c); return fromHsl(h[0] + dh, clamp(h[1] * (fs === undefined ? 1 : fs), 0, 1), clamp(h[2] * (fl === undefined ? 1 : fl), 0, 1)); }
 
   /* Per theme: base look; per variant: [edge, accent, accent2, params]. Platforms stay DIMMER than life (creatures carry white-hot
-   * cores and lit bodies); edges are pulled away from the cast's hues where the theme allows it (coral = coral-rose vs Fizz magenta,
-   * kelp = teal vs Springle lime, volcanic = deep orange vs Crabbit ember, temple = indigo vs Jellop violet). */
+   * cores and lit bodies); edges are pulled away from the cast's hues where the theme allows it (kelp = teal vs Springle lime, volcanic = deep
+   * orange vs Crabbit ember, temple = indigo vs Jellop violet).  v3 (L1): NO PLAYER HUE ON ANY PLATFORM: no edge / body within 35 deg of Fizz's
+   * magenta (328 deg) and none within 12 deg of Pop's cyan (186 deg) (the azure of the approved mockup, 199-215 deg, sits in the gap between Pop and
+   * Glimmer's cobalt); Coral Reef (rounds 1-5) is azure / lagoon crystal with ROSE sea-fan accents. */
   const THEME_DEFS = [
-    { name: 'Coral Reef', style: 'coral', bodyDh: -20, bgTint: '#0b0a22', haze: '#7a8cff', low: '#8a3cff', rows: [
-      ['#ff6f9c', '#ffb23e', '#3cf2ff', { step: 8.2, seed: 11 }],
-      ['#e66cd0', '#ffb23e', '#7affd0', { step: 7.4, seed: 12, dark: 0.3 }],
-      ['#d870f0', '#3cf2ff', '#ffb23e', { step: 9.0, seed: 13 }],
-      ['#ff9db8', '#7affd0', '#ff8a4a', { step: 8.6, seed: 14, dark: 0.22 }],
-      ['#ff5a8a', '#ffe27a', '#9a7cff', { step: 7.8, seed: 15 }],
+    { name: 'Coral Reef', style: 'coral', bodyDh: -10, bgTint: '#07122a', haze: '#5aaaff', low: '#4a5cff', rows: [          // v3 (L1): azure / lagoon-teal crystal with ROSE sea-fan accents (the approved mockup): Fizz (pink) never stands on pink
+      ['#3fb0e6', '#ff6f9c', '#7ad8ff', { step: 8.2, seed: 11 }],
+      ['#36c4b0', '#ff8fb0', '#8affd8', { step: 7.4, seed: 12, dark: 0.3 }],
+      ['#5aa8f0', '#ff6f9c', '#a8d4ff', { step: 9.0, seed: 13 }],
+      ['#7ab8ec', '#ffa0b8', '#c0ecff', { step: 8.6, seed: 14, dark: 0.22 }],
+      ['#3a8ee0', '#ff7aa8', '#8ac8ff', { step: 7.8, seed: 15 }],
     ] },
     { name: 'Kelp Forest', style: 'kelp', bodyDh: -10, bgTint: '#041418', haze: '#3cf2c0', low: '#1a8a6a', rows: [
       ['#2fe0a4', '#b6ff3b', '#3cf2ff', { step: 8.4, seed: 21 }],
       ['#7fb860', '#2fe0a4', '#ffe27a', { step: 7.6, seed: 22, dark: 0.3 }],
-      ['#35a8d0', '#8aff8a', '#ff8ad0', { step: 9.2, seed: 23 }],
+      ['#3a98d8', '#8aff8a', '#ff8ad0', { step: 9.2, seed: 23 }],
       ['#a0c070', '#3cf2ff', '#ffb23e', { step: 8.0, seed: 24, dark: 0.24 }],
       ['#3fe08a', '#d4ff5a', '#9a7cff', { step: 8.8, seed: 25 }],
     ] },
@@ -725,12 +937,12 @@ const GFX = (() => {
       ['#ffa868', '#ffb23e', '#ff3a3a', { step: 9.0, seed: 51, dark: 0.34 }],
       ['#ffcc66', '#ff5a3d', '#ffe27a', { step: 9.6, seed: 52, dark: 0.36 }],
       ['#ff8f7a', '#ffb23e', '#ff9a3a', { step: 8.8, seed: 53, dark: 0.32 }],
-      ['#f0a0c0', '#ffd23f', '#c04aff', { step: 9.4, seed: 54, dark: 0.34 }],
+      ['#d0a0e8', '#ffd23f', '#c04aff', { step: 9.4, seed: 54, dark: 0.34 }],
       ['#ffd890', '#ff4a2a', '#ffe27a', { step: 9.2, seed: 55, dark: 0.3 }],
     ] },
     { name: 'Abyss Temple', style: 'temple', bodyDh: 14, bgTint: '#0b0924', haze: '#7a7cff', low: '#ffb23e', rows: [
       ['#6c7cff', '#ffd25a', '#3cf2ff', { step: 9.6, seed: 61, dark: 0.34 }],
-      ['#4ab8d8', '#ffd25a', '#ff6a8a', { step: 10.0, seed: 62, dark: 0.36 }],
+      ['#5a98e0', '#ffd25a', '#ff6a8a', { step: 10.0, seed: 62, dark: 0.36 }],
       ['#4aa8e8', '#ffd25a', '#ff6a8a', { step: 9.2, seed: 63, dark: 0.32 }],
       ['#8a8cf0', '#ffe9a0', '#ff6a8a', { step: 9.8, seed: 64, dark: 0.34 }],
       ['#c89cf0', '#ffd25a', '#3cf2ff', { step: 9.4, seed: 65, dark: 0.3 }],
@@ -1177,56 +1389,88 @@ const GFX = (() => {
   }
 
   /* ------------------------------------------------------------------------------------------------------------
-   * levelCanvas / bgCanvas: bounded LRU caches + background jobs. A bake is a generator (see paintLevel / paintBg); the requested
-   * canvas is always drained synchronously, but the NEXT round's level + backgrounds are prefetched one stage per idle slice
-   * (LEVELS is read lazily), so a round transition normally finds everything cached and never hitches.
+   * levelCanvas / bgCanvas: bounded LRU caches + background jobs. A bake is a generator (see paintLevel / paintBg). A canvas that was never
+   * built is finished synchronously; a canvas of the PREVIOUS scale keeps being served (the caller draws it with an explicit 256 x 208
+   * destination, so any size works) while its replacement is produced in time-sliced steps (V10c: double buffered). The NEXT round's
+   * level + background are prefetched the same way, about 1.5 s after a real round was first requested (the title's custom ledge map and
+   * the story / how-to frames never trigger a prefetch), so a round transition finds everything cached and never hitches.
+   * World canvases are baked at the exact scale (V10b) and bounded by count AND pixels: current + next round (X5).
    * --------------------------------------------------------------------------------------------------------- */
   const levelCache = new Map();              // key "i|map signature" -> {cv, kb, ...}: the title's custom ledge map and a round's own map coexist
-  const LEVEL_MAX = 4;
+  const bgCache = new Map();                 // i -> {cv, kb, ...}
+  const LEVEL_MAX = 4, BG_MAX = 4;
+  const PREFETCH_DELAY_MS = 1500;
   const sigCache = new WeakMap();
   const sigOf = (map) => { let v = sigCache.get(map); if (v === undefined) { v = map.join(''); sigCache.set(map, v); } return v; };   // maps are read-only data
-  const levelScale = () => Math.min(KB, 6);
   const rowsOf = (map) => (Array.isArray(map) && map.length ? map : EMPTY_ROOM);
   const EMPTY_ROOM = Object.freeze(new Array(26).fill('#'.repeat(2) + '.'.repeat(28) + '##'));
   const lkey = (i, rows) => i + '|' + sigOf(rows);
+  const worldPxOf = (o) => (o.cv ? o.cv.width * o.cv.height : 0);
+  const worldPx = () => { let p = jobCur ? worldPxOf(jobCur) : 0; for (const o of levelCache.values()) p += worldPxOf(o); for (const o of bgCache.values()) p += worldPxOf(o); return p; };
+  const WORLD_BUDGET = () => MAX_PX * 0.9;
 
+  function freeWorld(o) { o.cv.width = 1; o.cv.height = 1; }
   function evictWorld(cache, max) {
-    while (cache.size > max) { const k0 = cache.keys().next().value; const o = cache.get(k0); o.cv.width = 1; o.cv.height = 1; cache.delete(k0); }
+    while (cache.size > max) { const k0 = cache.keys().next().value; freeWorld(cache.get(k0)); cache.delete(k0); }
   }
-  let jobCur = null, jobQ = [], jobHandle = 0, prefetchKey = '';
+  /** X5: besides the count caps, the world canvases are bounded in pixels (4K / iPad scales): previous-scale canvases go first, then the least
+   *  recently used one beyond the two newest of its kind (= current + next round). */
+  function trimWorld() {
+    evictWorld(levelCache, LEVEL_MAX); evictWorld(bgCache, BG_MAX);
+    for (let guard = 0; guard < 8 && worldPx() > WORLD_BUDGET(); guard++) {
+      let best = null;
+      for (const cache of [levelCache, bgCache]) {
+        if (cache.size <= 2) continue;
+        let i = 0;
+        for (const [k, o] of cache) { if (cache.size - i++ <= 2) break; const rank = o.last - (o.kb !== KB ? 1e12 : 0); if (!best || rank < best.rank) best = { cache, k, o, rank }; }
+      }
+      if (!best) break;
+      freeWorld(best.o); best.cache.delete(best.k);
+    }
+  }
+  let jobCur = null, jobQ = [], prefetchKey = '';
   function dropWorld() {
-    for (const o of levelCache.values()) { o.cv.width = 1; o.cv.height = 1; }
+    for (const o of levelCache.values()) freeWorld(o);
     levelCache.clear();
-    for (const o of bgCache.values()) { o.cv.width = 1; o.cv.height = 1; }
+    for (const o of bgCache.values()) freeWorld(o);
     bgCache.clear();
-    if (jobCur) { jobCur.cv.width = 1; jobCur.cv.height = 1; jobCur = null; }
+    if (jobCur) { freeWorld(jobCur); jobCur = null; }
     jobQ = []; prefetchKey = '';
-    logoCache.length = 0;
+    if (logoCache[0]) { logoCache[0].dark.width = 1; logoCache[0].lit.width = 1; }
+    logoCache.length = 0; logoJob = null;
   }
 
   function newJob(kind, i, rows) {
+    const kL = KB, cv = makeCanvas(Math.round(LW * kL), Math.round(MAP_H * kL)), g = cv.getContext('2d');
     if (kind === 'L') {
-      const kL = levelScale(), cv = makeCanvas(Math.round(LW * kL), Math.round(MAP_H * kL)), g = cv.getContext('2d');
       g.setTransform(kL, 0, 0, kL, 0, -MAP_Y * kL);
-      return { kind, i, key: lkey(i, rows), kb: kL, cv, gen: paintLevel(g, buildLevelGeo(rows), themeData(i), kL), ms: 0, done: false, stepMax: 0 };
+      return { kind, i, rows, key: lkey(i, rows), kb: kL, cv, gen: paintLevel(g, buildLevelGeo(rows), themeData(i), kL), ms: 0, done: false, stepMax: 0 };
     }
-    const kBg = bgScale(), cv = makeCanvas(Math.round(LW * kBg), Math.round(MAP_H * kBg)), g = cv.getContext('2d');
-    return { kind, i, key: i, kb: kBg, cv, gen: paintBg(g, themeData(i), kBg), ms: 0, done: false, stepMax: 0 };
+    return { kind, i, rows: null, key: i, kb: kL, cv, gen: paintBg(g, themeData(i), kL), ms: 0, done: false, stepMax: 0 };
   }
-  const scaleOf = (kind) => (kind === 'L' ? levelScale() : bgScale());
   function publishJob(job) {
     job.done = true;
     const cache = job.kind === 'L' ? levelCache : bgCache, old = cache.get(job.key);
-    if (old) { old.cv.width = 1; old.cv.height = 1; cache.delete(job.key); }
-    cache.set(job.key, { cv: job.cv, kb: job.kb, ms: job.ms });
+    if (old) { freeWorld(old); cache.delete(job.key); }
+    cache.set(job.key, { cv: job.cv, kb: job.kb, ms: job.ms, last: ++state.clock });
     timings[job.kind === 'L' ? 'level' : 'bg'] = (timings[job.kind === 'L' ? 'level' : 'bg'] || 0) + job.ms;
-    evictWorld(cache, job.kind === 'L' ? LEVEL_MAX : BG_MAX);
+    trimWorld();
+    if (!jobQ.length) purgeStaleWorld();
   }
+  /** once every queued rebuild is done, previous-scale canvases that nobody asked for since the scale change (title ledges, an old round) are freed */
+  let staleClock = 0;
+  function purgeStaleWorld() {
+    for (const cache of [levelCache, bgCache]) for (const [k, o] of Array.from(cache)) if (o.kb !== KB && o.last <= staleClock) { freeWorld(o); cache.delete(k); }
+  }
+  const stepLog = [];                        // test hook: world steps longer than 2.5 ms [kind, index, step no, ms]
   function stepJob(job) {
     const t0 = now();
     const r = job.gen.next();
     const dt = now() - t0;
     job.ms += dt; if (dt > job.stepMax) job.stepMax = dt;
+    state.worldSteps = (state.worldSteps || 0) + 1; if (dt > (state.worldStepMax || 0)) state.worldStepMax = dt;
+    job.n = (job.n || 0) + 1;
+    if (dt > 2.5) { stepLog.push([job.kind, job.i, job.n, +dt.toFixed(1)]); if (stepLog.length > 40) stepLog.shift(); }
     if (r.done) publishJob(job);
   }
   /* the requested canvas is always finished synchronously; a failing painter must never take the frame down (the partial canvas is published) */
@@ -1235,74 +1479,84 @@ const GFX = (() => {
     catch (e) { warnOnce('world:' + job.kind, 'bake of ' + job.kind + job.i + ' failed: ' + (e && e.message)); if (!job.done) publishJob(job); }
     return job.cv;
   }
-
-  function pump(deadline) {
-    jobHandle = 0;
-    if (typeof document !== 'undefined' && document.hidden) { schedulePump(); return; }
+  const cacheOf = (kind) => (kind === 'L' ? levelCache : bgCache);
+  const isCurrent = (kind, key) => { const e = cacheOf(kind).get(key); return !!e && e.kb === KB; };
+  /** one step of the background world job (picks the next queued one when none is running). Returns false when there was nothing to do now
+   *  (or, with canSkip, when the step would overrun the slice). */
+  function jobPumpOne(msLeft, canSkip) {
+    const t = now();
     while (!jobCur && jobQ.length) {
-      const q = jobQ.shift(), e = (q.kind === 'L' ? levelCache : bgCache).get(q.key);
-      if (e && e.kb === scaleOf(q.kind)) continue;                                           // already there
+      let at = -1;
+      for (let j = 0; j < jobQ.length; j++) { const q = jobQ[j]; if (isCurrent(q.kind, q.key)) { jobQ.splice(j, 1); j--; continue; } if (!(q.at > t)) { at = j; break; } }
+      if (at < 0) return false;                                           // only delayed prefetch jobs are left
+      const q = jobQ.splice(at, 1)[0];
       jobCur = newJob(q.kind, q.i, q.rows);
     }
-    if (!jobCur) return;
-    if (jobCur.kb !== scaleOf(jobCur.kind)) { jobCur.cv.width = 1; jobCur.cv.height = 1; jobCur = null; schedulePump(); return; }
-    const timedOut = !deadline || !deadline.timeRemaining || deadline.didTimeout;
-    const rem = timedOut ? 99 : deadline.timeRemaining();
-    if (rem >= Math.max(4, jobCur.stepMax * 1.15)) {
-      const t0 = now(), budget = timedOut ? 12 : rem * 0.8;            // a forced (timed-out) slice may spend up to 12 ms: a busy page must still finish its prefetch
-      try { do { stepJob(jobCur); if (jobCur.done) { jobCur = null; break; } } while (now() - t0 + jobCur.stepMax < budget); }
-      catch (e) { warnOnce('prefetch', 'prefetch failed: ' + (e && e.message)); jobCur = null; }
+    if (!jobCur) return false;
+    if (jobCur.kb !== KB) {                                                // the scale changed under a running job: start it again at the new scale
+      const q = { kind: jobCur.kind, i: jobCur.i, rows: jobCur.rows, key: jobCur.key, at: 0 };
+      freeWorld(jobCur); jobCur = null; jobQ.unshift(q);
+      return true;
     }
-    schedulePump();
+    if (canSkip && jobCur.stepMax > 0 && msLeft < jobCur.stepMax * 0.9) return false;
+    try { stepJob(jobCur); if (jobCur.done) jobCur = null; }
+    catch (e) { warnOnce('prefetch', 'prefetch failed: ' + (e && e.message)); if (jobCur) { freeWorld(jobCur); } jobCur = null; }
+    return true;
   }
-  function schedulePump() {
-    if (jobHandle || (!jobCur && !jobQ.length)) return;
-    try {
-      if (typeof requestIdleCallback === 'function') jobHandle = requestIdleCallback(pump, { timeout: 1500 });
-      else jobHandle = setTimeout(() => pump(null), 60);
-    } catch (e) { jobHandle = 0; }
+  /** queue a bake of (kind, i, rows); front = needed now (a stale canvas is being served), else a delayed prefetch */
+  function requestJob(kind, i, rows, key, front, delayMs) {
+    if (isCurrent(kind, key)) return;
+    if (jobCur && jobCur.kind === kind && jobCur.key === key && jobCur.kb === KB) return;
+    const hit = jobQ.findIndex((q) => q.kind === kind && q.key === key);
+    const q = { kind, i, rows, key, at: delayMs ? now() + delayMs : 0 };
+    if (hit >= 0) { if (front) { jobQ.splice(hit, 1); jobQ.unshift(q); } return; }
+    if (front) jobQ.unshift(q); else jobQ.push(q);
+    bgSchedule();
   }
-  /* after round i was built: queue its background and the next round's level + background (once per index and scale) */
-  function schedulePrefetch(i) {
+  /* after a REAL round i was requested: its background, the next round's level + background (once per index and scale), and the heavy
+   * sprite families that come later (Kraken / moon pearl before the boss) */
+  function schedulePrefetch(i, rows) {
+    let L = null;
+    try { L = typeof LEVELS !== 'undefined' && Array.isArray(LEVELS) ? LEVELS : null; } catch (e) { L = null; }
+    if (!L || !L[i] || !Array.isArray(L[i].map) || (L[i].map !== rows && sigOf(L[i].map) !== sigOf(rows))) return;      // not a round's own map (title ledges, empty room ...)
     const key = i + '|' + KB;
     if (prefetchKey === key) return;
     prefetchKey = key;
-    let L = null;
-    try { L = typeof LEVELS !== 'undefined' && Array.isArray(LEVELS) ? LEVELS : null; } catch (e) { L = null; }
-    const want = [['B', i, null]];
-    if (L && i + 1 < Math.min(30, L.length) && L[i + 1] && Array.isArray(L[i + 1].map)) { want.push(['L', i + 1, L[i + 1].map]); want.push(['B', i + 1, null]); }
-    for (const [kind, j, rows] of want) {
-      const k = kind === 'L' ? lkey(j, rows) : j, e = (kind === 'L' ? levelCache : bgCache).get(k);
-      if (e && e.kb === scaleOf(kind)) continue;
-      if (jobCur && jobCur.kind === kind && jobCur.key === k) continue;
-      if (jobQ.some((q) => q.kind === kind && q.key === k)) continue;
-      jobQ.push({ kind, i: j, key: k, rows });
+    requestJob('B', i, null, i, false, 0);
+    if (i + 1 < Math.min(30, L.length) && L[i + 1] && Array.isArray(L[i + 1].map)) {
+      requestJob('L', i + 1, L[i + 1].map, lkey(i + 1, L[i + 1].map), false, PREFETCH_DELAY_MS);
+      requestJob('B', i + 1, null, i + 1, false, PREFETCH_DELAY_MS);
     }
-    schedulePump();
+    warm('bonefin');
+    if (i >= 26) warm('kraken');
+    if (i >= 28) warm('moonpearl');
   }
 
   function levelCanvas(i, map) {
     i = clamp(i | 0, 0, 29);
-    const kL = levelScale(), rows = rowsOf(map), key = lkey(i, rows);
+    const rows = rowsOf(map), key = lkey(i, rows);
     const e = levelCache.get(key);
-    if (e && e.kb === kL) { levelCache.delete(key); levelCache.set(key, e); schedulePrefetch(i); return e.cv; }
-    if (e) { e.cv.width = 1; e.cv.height = 1; levelCache.delete(key); }
+    if (e) {
+      e.last = ++state.clock; levelCache.delete(key); levelCache.set(key, e);
+      if (e.kb === KB) { schedulePrefetch(i, rows); return e.cv; }
+      requestJob('L', i, rows, key, true, 0);                              // previous scale: serve it, re-bake in the background
+      return e.cv;
+    }
     let job;
-    if (jobCur && jobCur.kind === 'L' && jobCur.key === key && jobCur.kb === kL) { job = jobCur; jobCur = null; } else job = newJob('L', i, rows);
+    if (jobCur && jobCur.kind === 'L' && jobCur.key === key && jobCur.kb === KB) { job = jobCur; jobCur = null; } else job = newJob('L', i, rows);
     drain(job);
-    schedulePrefetch(i);
+    schedulePrefetch(i, rows);
     return job.cv;
   }
+
   /* ================================================================================================================
    * 8. BACKGROUNDS (bgCanvas): opaque 256k x 208k. Near-black gradient tinted per theme, soft god-rays, 1-3 huge distant
    *    silhouettes per theme (jellyfish / kelp / hull ribs / crystals / vents / pillars) drawn as faint luminous contours on ONE
    *    low-resolution light layer that is blurred once and added, fog, bokeh, a little dither against banding. Static: the Game
    *    layers the moving plankton on top (GFX.particle).
    * ============================================================================================================== */
-  const bgCache = new Map();
-  const BG_MAX = 4;
-  const bgScale = () => Math.min(KB, 4);
-  const logoCache = [];
+  const logoCache = [];                    // [ { kb, dark, lit, pad, Wc, Hc, G } ]: the current (or previous-scale) logo layers
+  let logoJob = null;                      // { kb, gen, box }: the logo of the new scale being built in the background
 
   /* faint luminous shape on the light layer: translucent fill + soft wide line + core line + thin hot ridge (all additive) */
   function lum(g, path, col, fillA, lineA, lw, closed) {
@@ -1468,14 +1722,31 @@ const GFX = (() => {
   const SIL_SHARP = { kelp: 0.5, ship: 0.5, caves: 0.38, volcanic: 0.4, temple: 0.5 };
   const SIL = { coral: silJellies, kelp: silKelp, ship: silRibs, caves: silCrystals, volcanic: silVents, temple: silPillars };
 
+  /* run fn once per horizontal band of the canvas (device-pixel aligned clip, so there are no seams), yielding after each band: the full-resolution
+   * operations of a background (gradient fill, additive light blit, grain, sharp silhouettes) cost ~1-3 ms per band even at k = 8 (V10c time slicing) */
+  function* bands(g, n, fn) {
+    const W = g.canvas.width, H = g.canvas.height;
+    for (let i = 0; i < n; i++) {
+      const y0 = Math.floor(H * i / n), y1 = Math.floor(H * (i + 1) / n);
+      g.save();
+      const m = g.getTransform();
+      g.setTransform(1, 0, 0, 1, 0, 0); g.beginPath(); g.rect(0, y0, W, y1 - y0); g.clip(); g.setTransform(m);
+      fn(i);
+      g.restore();
+      if (i + 1 < n) yield;
+    }
+  }
   function* paintBg(g, th, kBg) {
     const Rn = N.rng(th.seed * 2654435 + 9);
+    const nb = Math.max(1, Math.ceil(kBg / 1.6));
     g.setTransform(kBg, 0, 0, kBg, 0, 0);
     const gr = g.createLinearGradient(0, 0, 0, MAP_H);
     gr.addColorStop(0, rgba(th.bgTop, 1)); gr.addColorStop(0.35, rgba(mixc(th.bgTop, th.bgMid, 0.7), 1)); gr.addColorStop(0.75, rgba(th.bgMid, 1)); gr.addColorStop(1, rgba(th.bgBot, 1));
-    g.fillStyle = gr; g.fillRect(0, 0, LW, MAP_H);
+    g.fillStyle = gr;
+    yield* bands(g, nb, () => g.fillRect(0, 0, LW, MAP_H));
     // ONE low-resolution light layer: god-rays + silhouettes, blurred once, added with one blend
-    const kLay = kBg / 3, lw = Math.max(8, Math.ceil(LW * kLay)), lh = Math.max(8, Math.ceil(MAP_H * kLay));
+    const kLay = Math.min(kBg / 3, 1.6), lw = Math.max(8, Math.ceil(LW * kLay)), lh = Math.max(8, Math.ceil(MAP_H * kLay));       // a soft field: never more than 1.6 px per logical px (cheap at k = 8, same look at every k >= 4.8)
+    yield;
     const c1 = makeCanvas(lw, lh), g1 = c1.getContext('2d');
     g1.setTransform(1, 0, 0, 1, 0, 0); g1.globalCompositeOperation = 'source-over'; g1.globalAlpha = 1; g1.clearRect(0, 0, lw, lh);
     // the large soft light sources go onto the LOW-res layer too (big radial blits are the expensive part of a full-res bake): surface haze
@@ -1487,23 +1758,29 @@ const GFX = (() => {
     const mirror = th.variant % 2 === 1;                     // odd variants mirror the whole composition: 5 looks per theme without 5 layouts
     g1.setTransform(lw / LW, 0, 0, lh / MAP_H, 0, 0);
     shafts(g1, LW, MAP_H, 1.4, th, N.rng(th.seed * 31337 + 5));
+    yield;
     const silSeed = th.seed * 7717 + 1;
     if (mirror) g1.setTransform(-lw / LW, 0, 0, lh / MAP_H, lw, 0);
     SIL[th.style](g1, th, N.rng(silSeed));
     yield;
     const c2 = makeCanvas(lw, lh), g2 = c2.getContext('2d');
     g2.setTransform(1, 0, 0, 1, 0, 0); g2.globalCompositeOperation = 'copy';
-    try { g2.filter = 'blur(1.1px)'; } catch (e) { /* no filter support */ }
+    try { g2.filter = 'blur(' + (1.1 * Math.max(1, kLay / 1.333)).toFixed(2) + 'px)'; } catch (e) { /* no filter support */ }          // 1.1 layer px (the old look) up to k = 4; above, the layer stays 1.6 px/logical px and the blur grows so the look is the one of k = 4
     g2.drawImage(c1, 0, 0);
     try { g2.filter = 'none'; } catch (e) { /* ignore */ }
+    yield;
     g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
     g.globalCompositeOperation = 'lighter'; g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'low';
-    g.drawImage(c2, 0, 0, g.canvas.width, g.canvas.height);
+    yield* bands(g, nb, () => g.drawImage(c2, 0, 0, g.canvas.width, g.canvas.height));
     g.restore();
     c1.width = 1; c1.height = 1; c2.width = 1; c2.height = 1;
     yield;
     const sharp = SIL_SHARP[th.style];                       // structural silhouettes also get a crisp faint pass on top of their soft glow
-    if (sharp) { g.save(); if (mirror) g.setTransform(-kBg, 0, 0, kBg, g.canvas.width, 0); g.globalAlpha = sharp; SIL[th.style](g, th, N.rng(silSeed), true); g.restore(); }
+    if (sharp) {
+      g.save(); if (mirror) g.setTransform(-kBg, 0, 0, kBg, g.canvas.width, 0); g.globalAlpha = sharp;
+      yield* bands(g, Math.max(1, nb - 1), () => SIL[th.style](g, th, N.rng(silSeed), true));
+      g.restore();
+    }
     yield;
     // bokeh motes (very low alpha: depth, never clutter)
     g.save(); g.globalCompositeOperation = 'lighter';
@@ -1514,17 +1791,21 @@ const GFX = (() => {
     }
     g.restore();
     // dither: kills banding in the dark gradients (also when postFX is off)
-    g.save(); g.setTransform(1, 0, 0, 1, 0, 0); N.drawGrain(g, g.canvas.width, g.canvas.height, 0.016); g.restore();
+    g.save(); g.setTransform(1, 0, 0, 1, 0, 0);
+    yield* bands(g, nb, () => N.drawGrain(g, g.canvas.width, g.canvas.height, 0.016));
+    g.restore();
   }
 
   function bgCanvas(i) {
     i = clamp(i | 0, 0, 29);
-    const kBg = bgScale();
     const e = bgCache.get(i);
-    if (e && e.kb === kBg) { bgCache.delete(i); bgCache.set(i, e); return e.cv; }
-    if (e) { e.cv.width = 1; e.cv.height = 1; bgCache.delete(i); }
+    if (e) {
+      e.last = ++state.clock; bgCache.delete(i); bgCache.set(i, e);
+      if (e.kb !== KB) requestJob('B', i, null, i, true, 0);                // previous scale: serve it, re-bake in the background
+      return e.cv;
+    }
     let job;
-    if (jobCur && jobCur.kind === 'B' && jobCur.key === i && jobCur.kb === kBg) { job = jobCur; jobCur = null; } else job = newJob('B', i);
+    if (jobCur && jobCur.kind === 'B' && jobCur.key === i && jobCur.kb === KB) { job = jobCur; jobCur = null; } else job = newJob('B', i);
     return drain(job);
   }
 
@@ -1547,7 +1828,7 @@ const GFX = (() => {
     const wP = (gP + track + gO + track + gP) * cap, total = wF + gap + wA + gap + wP;
     return { cap, track, T, wF, wA, gap, gP, gO, wP, total };
   }
-  function buildLogo(kb) {
+  function* buildLogoGen(kb, box) {                        // one yield per tube group: the build is spread over background slices
     const G = logoGeometry(kb), { cap, track, T, wF, wA, gap, gP, gO, wP, total } = G;
     const pad = Math.ceil(T * 4.5), Wc = Math.ceil(total + 2 * pad), Hc = Math.ceil(cap + 2 * pad);
     const x = pad, y = pad, xa = x + wF + gap, xp = xa + wA + gap;
@@ -1585,8 +1866,32 @@ const GFX = (() => {
       halo(T * 0.65, 0.95); halo(T * 1.4, 0.55); halo(T * 0.22, 1);
       lg.drawImage(core, 0, 0); lg.drawImage(wall, 0, 0); lg.drawImage(hotc, 0, 0);
       for (const c of [wall, core, hotc]) { c.width = 1; c.height = 1; }
+      yield;
     }
-    return { kb, dark, lit, pad, Wc, Hc, G };
+    box.L = { kb, dark, lit, pad, Wc, Hc, G };
+  }
+  function logoStep() {
+    const j = logoJob;
+    if (!j) return;
+    if (j.kb !== KB) { logoJob = null; return; }                            // the scale moved on: drawLogo asks again
+    const t0 = now();
+    let r;
+    try { r = j.gen.next(); } catch (e) { warnOnce('logo', 'logo bake failed: ' + (e && e.message)); logoJob = null; return; }
+    timings.logo = (timings.logo || 0) + (now() - t0);
+    if (r.done) {
+      const old = logoCache[0];
+      logoCache[0] = j.box.L; logoJob = null;
+      if (old) { old.dark.width = 1; old.lit.width = 1; }
+    }
+  }
+  /** the logo layers: current scale; or (V10c) the previous scale's while the new one is built in the background; the very first one synchronously */
+  function logoFor() {
+    const L = logoCache[0];
+    if (L && L.kb === KB) return L;
+    if (!logoJob || logoJob.kb !== KB) { const box = {}; logoJob = { kb: KB, gen: buildLogoGen(KB, box), box }; }
+    if (L) { bgSchedule(); return L; }
+    while (logoJob && logoJob.kb === KB && !logoCache[0]) logoStep();
+    return logoCache[0] || L;
   }
 
   /* a soap bubble in logical units (rim, near-invisible body, thin-film cap, caustic, window highlight), a port of the mockup's drawBubble('empty') */
@@ -1645,12 +1950,9 @@ const GFX = (() => {
   function drawLogo(ctx, cx, y, t) {
     if (!K) autoScale(ctx);
     t = t || 0;
-    let L = logoCache[0];
-    if (!L || L.kb !== KB) {
-      if (L) { L.dark.width = 1; L.lit.width = 1; }
-      L = logoCache[0] = timed('logo', () => buildLogo(KB));
-    }
-    const kb = KB, cap = LOGO_CAP, track = LOGO_TRACK, G = L.G;
+    const L = logoFor();
+    if (!L) return { total: 0, uy: y };                              // (the build threw: already logged)
+    const kb = L.kb, cap = LOGO_CAP, track = LOGO_TRACK, G = L.G;
     const total = G.total / kb, wF = G.wF / kb, wA = G.wA / kb, gap = G.gap / kb, wP = G.wP / kb, gP = G.gP, gO = G.gO;
     const x = cx - total / 2, xa = x + wF + gap, xp = xa + wA + gap;
     const bx = xp + (gP + track) * cap + gO * cap / 2, by = y + cap * 0.5;
@@ -1678,6 +1980,88 @@ const GFX = (() => {
     dot(ctx, cx, uy, cap * 0.028, WHITE, 1, { halo: 5 });
     return { total, uy };
   }
+
+  /* ================================================================================================================
+   * 9c. BIG CAST (V11): GFX.drawHero(ctx, who, x, y, scale, t, opts) / GFX.drawBig(kind, ctx, x, y, scale, t, opts)
+   *     The registry sprites are baked for 1x; the title / ending twins (and a big Kraken) are drawn from the cast's own art at 2-3x. The art is
+   *     baked here per (kind, pose, frame, scale) at min(K, 5) device px per logical px (re-baked inside the per-frame slice after a scale change,
+   *     the previous bake keeps being drawn meanwhile) and blitted with one drawImage. Main / Game never touch GFX_CAST for this.
+   *       kind/who : 'fizz' | 'pop' (also 'p1' | 'p2') | 'kraken' | 'kraken_angry'
+   *       (x, y)   : bottom centre of the creature's registry box (16 x 16, Kraken 48 x 48) in logical px;  scale : size factor (1 = registry size)
+   *       t        : seconds; the frame is floor(t * fps) % frames (fps 3, frames 8 for the looping poses, 1 for jump / fall / die)
+   *       opts     : { pose: 'idle' | 'blink' | 'walk' | 'jump' | 'fall' | 'puff' | 'shoot' | 'die' | 'stun' (default 'idle'), frame, frames (override),
+   *                    fps, flip, alpha }
+   * ============================================================================================================== */
+  const BIG_PAD = { l: 7, r: 6, t: 7, b: 4 };
+  const BIG = {
+    fizz: { box: [16, 16], hs: 1.1, pad: BIG_PAD, art: 'hero', who: 'fizz', sprite: 'p1' },
+    pop: { box: [16, 16], hs: 1.1 * 0.97, pad: BIG_PAD, art: 'hero', who: 'pop', sprite: 'p2' },
+    kraken: { box: [48, 48], hs: 1, pad: { l: 8, r: 8, t: 8, b: 5 }, art: 'kraken', angry: false, sprite: 'kraken' },
+    kraken_angry: { box: [48, 48], hs: 1, pad: { l: 8, r: 8, t: 8, b: 5 }, art: 'kraken', angry: true, sprite: 'kraken_angry' },
+  };
+  const BIG_ALIAS = { p1: 'fizz', p2: 'pop' };
+  const BIG_FRAMES = { jump: 1, fall: 1, die: 1 };
+  const BIG_BAKE_MAX_K = 5;
+  const bigCache = new Map();
+  let bigPx = 0;
+  function dropBig() { for (const e of bigCache.values()) { e.cv.width = 1; e.cv.height = 1; } bigCache.clear(); bigPx = 0; }
+  function castArt() { try { return typeof GFX_CAST !== 'undefined' && GFX_CAST && GFX_CAST.art ? GFX_CAST.art : null; } catch (e) { return null; } }
+
+  function bigBake(kind, spec, art, pose, f, nf, Sb, key, kh) {
+    const t0 = now();
+    const bw = spec.box[0], bh = spec.box[1], pd = spec.pad;
+    const w = Math.ceil((bw + pd.l + pd.r) * Sb * kh), h = Math.ceil((bh + pd.t + pd.b) * Sb * kh);
+    const old = bigCache.get(key);
+    if (old) { bigPx -= old.cv.width * old.cv.height; old.cv.width = 1; old.cv.height = 1; bigCache.delete(key); }
+    const cv = makeCanvas(w, h), g = cv.getContext('2d');
+    const k = kh * Sb, hs = spec.hs;
+    g.setTransform(k, 0, 0, k, pd.l * Sb * kh, pd.t * Sb * kh);
+    g.translate(bw / 2, bh); g.scale(hs, hs); g.translate(-bw / 2, -bh);
+    const o = { pose, ph: TAU * f / nf, f, n: nf, u: f / nf, w: N.lwFor(k * hs), big: k * hs > 7.5, name: kind + '_' + pose, k, S: hs, box: { w: bw, h: bh } };
+    try { if (spec.art === 'hero') art.hero(g, spec.who, o); else art.kraken(g, o, !!spec.angry); }
+    catch (err) { warnOnce('big:' + kind, 'big ' + kind + ' ' + pose + ' threw: ' + (err && err.message)); }
+    const e = { cv, kh, Sb, last: ++state.clock };
+    bigCache.set(key, e); bigPx += w * h;
+    while (bigPx > MAX_PX * 0.5 && bigCache.size > 1) { const k0 = bigCache.keys().next().value; const o0 = bigCache.get(k0); if (o0 === e) break; bigPx -= o0.cv.width * o0.cv.height; o0.cv.width = 1; o0.cv.height = 1; bigCache.delete(k0); }
+    migCharge(now() - t0);
+    state.bakes++; state.bakeMs += now() - t0;
+    return e;
+  }
+  function drawBig(kind, ctx, x, y, scale, t, opts) {
+    kind = BIG_ALIAS[kind] || kind;
+    const spec = BIG[kind];
+    if (!spec) { warnOnce('big?:' + kind, 'drawBig: unknown kind ' + kind); return; }
+    if (!K) autoScale(ctx);
+    const o = opts || NOOPT;
+    const S = scale > 0 ? +scale : 1;
+    const pose = spec.art === 'hero' ? (o.pose || 'idle') : 'idle';
+    const nf = Math.max(1, Math.floor(o.frames > 0 ? o.frames : BIG_FRAMES[pose] || 8));
+    let f = o.frame !== undefined ? Math.floor(+o.frame) : Math.floor((+t || 0) * (o.fps > 0 ? o.fps : 3));
+    if (f !== f) f = 0;
+    f %= nf; if (f < 0) f += nf;
+    const art = castArt();
+    if (!art || (spec.art === 'hero' ? typeof art.hero !== 'function' : typeof art.kraken !== 'function')) {      // stub builds: the registry sprite at normal size
+      const name = spec.art === 'hero' ? spec.sprite + '_' + (pose === 'puff' ? 'shoot' : pose === 'blink' ? 'idle' : pose) : spec.sprite;
+      if (REG.has(name)) draw(ctx, name, pose === 'blink' ? 1 : f, x - spec.box[0] / 2, y - spec.box[1], { flip: o.flip, alpha: o.alpha });
+      return;
+    }
+    const Sb = Math.max(1, Math.ceil(S * 2 - 1e-6) / 2), kh = Math.min(K, BIG_BAKE_MAX_K);
+    const key = kind + '|' + pose + '|' + f + '/' + nf + '|' + Sb;
+    let e = bigCache.get(key);
+    if (!e) e = bigBake(kind, spec, art, pose, f, nf, Sb, key, kh);
+    else if (e.kh !== kh && migOK()) e = bigBake(kind, spec, art, pose, f, nf, Sb, key, kh);
+    e.last = ++state.clock; bigCache.delete(key); bigCache.set(key, e);
+    const pd = spec.pad, r = S / Sb;
+    const dw = e.cv.width / e.kh * r, dh = e.cv.height / e.kh * r;
+    const ox = x - spec.box[0] / 2 * S - pd.l * S, oy = y - spec.box[1] * S - pd.t * S;
+    const sx = Math.round(ox * K) / K, sy = Math.round(oy * K) / K;
+    const ga = ctx.globalAlpha;
+    if (o.alpha !== undefined && o.alpha !== 1) ctx.globalAlpha = ga * (o.alpha < 0 ? 0 : o.alpha);
+    if (o.flip) { ctx.save(); ctx.translate(x, 0); ctx.scale(-1, 1); ctx.translate(-x, 0); ctx.drawImage(e.cv, sx, sy, dw, dh); ctx.restore(); }
+    else ctx.drawImage(e.cv, sx, sy, dw, dh);
+    if (o.alpha !== undefined && o.alpha !== 1) ctx.globalAlpha = ga;
+  }
+  function drawHero(ctx, who, x, y, scale, t, opts) { drawBig(who, ctx, x, y, scale, t, opts); }
 
   /* ================================================================================================================
    * 9b. levelGlints (optional, additive): the baked levelCanvas is static, so this adds the mockup's travelling glints along the lit top faces
@@ -1709,21 +2093,27 @@ const GFX = (() => {
   /* ================================================================================================================
    * 10. SHEET: every defined sprite x frame, labelled, on a dark grid (debug)
    * ============================================================================================================== */
+  let sheetLayout = [];
   function sheet() {
     const defs = Array.from(REG.values()).sort((a, b) => a.order - b.order);
-    const s = 3, GAP = 10, LABEL = 20, MAXW = 1800;
-    const cells = defs.map((d) => ({ d, cw: Math.ceil((d.w + d.pad.l + d.pad.r) * s) + GAP, ch: Math.ceil((d.h + d.pad.t + d.pad.b) * s) + GAP + LABEL }));
+    const s = 3, GAP = 10, LABEL = 20, MAXW = 1800, LCAP = 7, LTRACK = 0.4;
+    // v3 (V9): a cell is as wide as its frames AND its label (the label of a narrow single-frame sprite used to run into the next cell)
+    const cells = defs.map((d) => {
+      const label = d.name + ' x' + d.frames, lw = Math.ceil(N.textWidth(label, LTRACK) * LCAP) + GAP;
+      const fw = Math.ceil((d.w + d.pad.l + d.pad.r) * s) + GAP;
+      return { d, label, fw, total: Math.max(fw * d.frames, lw), ch: Math.ceil((d.h + d.pad.t + d.pad.b) * s) + GAP + LABEL };
+    });
     let x = GAP, y = GAP, rowH = 0, W = 0;
     const pos = [];
     for (const c of cells) {
-      const cw = Math.max(c.cw * c.d.frames, c.cw);
-      if (x + c.cw > MAXW && x > GAP) { x = GAP; y += rowH; rowH = 0; }
+      if (x + c.total > MAXW && x > GAP) { x = GAP; y += rowH; rowH = 0; }
       pos.push([x, y]);
-      x += cw > MAXW - GAP ? MAXW : cw;
+      x += c.total;
       if (x > W) W = x;
       rowH = Math.max(rowH, c.ch);
     }
     const Wc = Math.max(320, Math.min(W + GAP, 4096)), Hc = Math.max(80, Math.min(y + rowH + GAP, 8192));
+    sheetLayout = cells.map((c, i) => ({ name: c.d.name, label: c.label, x: pos[i][0], y: pos[i][1], w: c.total, h: c.ch, labelW: Math.ceil(N.textWidth(c.label, LTRACK) * LCAP) }));
     const cv = makeCanvas(Wc, Hc), g = cv.getContext('2d');
     g.fillStyle = '#05070f'; g.fillRect(0, 0, Wc, Hc);
     g.strokeStyle = 'rgba(60,242,255,0.06)'; g.lineWidth = 1;
@@ -1733,10 +2123,10 @@ const GFX = (() => {
     cells.forEach((c, i) => {
       const d = c.d, [px, py] = pos[i];
       g.save();
-      N.drawText(g, d.name + ' x' + d.frames, px, py + 2, 7, { col: mixc(RGB.cyan, WHITE, 0.4), track: 0.4, lw: 0.9, halo: 0.3, hot: 0.4 });
+      N.drawText(g, c.label, px, py + 2, LCAP, { col: mixc(RGB.cyan, WHITE, 0.4), track: LTRACK, lw: 0.9, halo: 0.3, hot: 0.4 });
       g.restore();
       for (let f = 0; f < d.frames; f++) {
-        const ox = px + f * c.cw, oy = py + LABEL;
+        const ox = px + f * c.fw, oy = py + LABEL;
         g.save();
         g.strokeStyle = 'rgba(60,242,255,0.28)'; g.setLineDash([3, 3]);
         g.strokeRect(ox + d.pad.l * s + 0.5, oy + d.pad.t * s + 0.5, d.w * s, d.h * s);
@@ -1756,17 +2146,25 @@ const GFX = (() => {
   const _lint = () => lintLog.slice();
   const _timings = () => Object.assign({}, timings);
   function _stats() {
-    let entries = 0;
-    for (const d of REG.values()) for (const e of d.slots) if (e) entries++;
-    return { k: K, kb: KB, px: state.px, maxPx: MAX_PX, entries, bakes: state.bakes, bakeMs: state.bakeMs, evictions: state.evictions, peakPx: state.peakPx, resets: state.resets,
-      jobs: jobQ.length + (jobCur ? 1 : 0), tilePx: state.tilePx, fonts: fonts.size, strings: strCache.size, stringPx: strPx, particles: partCache.size, levels: levelCache.size, bgs: bgCache.size, missing: missing.size, defs: REG.size, warmQueue: warmQ.length,
-      worldPx: Array.from(levelCache.values()).concat(Array.from(bgCache.values())).reduce((a, o) => a + o.cv.width * o.cv.height, 0) };
+    let entries = 0, stale = 0;
+    for (const d of REG.values()) for (const e of d.slots) if (e) { entries++; if (e.kb !== KB) stale++; }
+    return { k: K, kb: KB, px: state.px, maxPx: MAX_PX, entries, stale, bakes: state.bakes, bakeMs: state.bakeMs, evictions: state.evictions, peakPx: state.peakPx, resets: state.resets,
+      jobs: jobQ.length + (jobCur ? 1 : 0), tilePx: state.tilePx, fonts: fonts.size, strings: strCache.size, stringPx: strPx, particles: partCache.size, particlePx: partPx, levels: levelCache.size, bgs: bgCache.size, missing: missing.size, defs: REG.size, warmQueue: warmQ.length,
+      pipes: pipesDone, migrating: mig.on, slices: state.slices, sliceMax: state.sliceMax, worldSteps: state.worldSteps || 0, worldStepMax: state.worldStepMax || 0, bigs: bigCache.size, bigPx,
+      worldPx: Array.from(levelCache.values()).concat(Array.from(bgCache.values())).reduce((a, o) => a + o.cv.width * o.cv.height, 0),
+      worldStale: Array.from(levelCache.values()).concat(Array.from(bgCache.values())).filter((o) => o.kb !== KB).length };
   }
   function _warmNow(ms) { if (!K) setScale(2); return warmStep(ms === undefined ? 50 : ms); }
+  /** test hook: bgOff(true) stops the background pumps (idle + rAF) so a test can step them by hand with _bgRun(ms) */
+  function _bgOff(on) { bgOff = !!on; }
+  function _bgRun(ms) { return bgRun(ms === undefined ? 3 : ms); }
+  const _sliceTop = () => sliceTop.slice();
+  const _stepLog = () => stepLog.slice();
+  const _sheetLayout = () => sheetLayout.slice();
 
   return {
-    init, setScale, define, draw, frames, size, has, warm,
-    text, textWidth, levelCanvas, bgCanvas, levelGlints, theme, drawLogo, postFX, particle, sheet,
-    _registry, _lint, _timings, _stats, _warmNow, _reset, _undefine, _postMode, _themeData: themeData, _softBubble: softBubble,
+    init, setScale, define, draw, frames, size, has, warm, warmStep: warmPublic,
+    text, textWidth, levelCanvas, bgCanvas, levelGlints, theme, drawLogo, postFX, particle, sheet, drawHero, drawBig,
+    _registry, _lint, _timings, _stats, _warmNow, _bgOff, _bgRun, _sliceTop, _stepLog, _sheetLayout, _reset, _undefine, _postMode, _themeData: themeData, _softBubble: softBubble,
   };
 })();

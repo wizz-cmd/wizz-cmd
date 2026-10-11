@@ -1,0 +1,14 @@
+import { launch, fp } from '../tools/harness.mjs';
+const t = await launch({ viewport: { width: 1024, height: 768 } });
+const g = fp(t.page);
+await g.wait(800);
+console.log(await g.evaluate(() => ({ k: fz._main.k(), q: fz._main.quality(), lay: fz._main.layout(), cv: [document.getElementById('screen').width, document.getElementById('screen').height], scene: fz.scene() })));
+await g.freeze(true);
+await g.start(2, 1, 5);
+await g.step(200);
+console.log(JSON.stringify(await g.state()).slice(0, 1500));
+console.log(await g.evaluate(() => Object.keys(fz.GFX)));
+console.log(await g.evaluate(() => fz.GFX.frames ? 'frames ok' : 'no'));
+console.log(await g.evaluate(() => { const names=[]; return typeof fz.GFX.sheet; }));
+console.log(t.errors);
+await t.close();

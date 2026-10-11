@@ -43,6 +43,12 @@ function check(ok, msg, detail) {
   if (!ok) report.failed.push(msg + (detail !== undefined ? ' -> ' + JSON.stringify(detail) : ''));
   return !!ok;
 }
+// release-gate policy (FIXPLAN_V3): wall-clock budgets (tcheck) are advisory in the blocking run (FP_TIMING=advisory: reported, never failed), strict otherwise / in the perf step
+function tcheck(ok, msg, detail) {
+  if (process.env.FP_TIMING !== 'advisory') return check(ok, msg, detail);
+  console.log((ok ? 'ADVISORY ok   ' : 'ADVISORY MISS ') + msg + (detail !== undefined && !ok ? '  -> ' + JSON.stringify(detail) : ''));
+  return !!ok;
+}
 const note = (m) => { console.log('      ' + m); report.notes.push(m); };
 const shotPath = (name) => path.join(OUT, name);
 async function shot(page, name, opts) {
@@ -101,10 +107,11 @@ const RECORDER = `(() => {
       });
       if (v.GFX.bgCanvas) {
         const ob = v.GFX.bgCanvas;
-        // v2: 256b x 208b (b = bake bucket), opaque canvases drawn by Game with an explicit 256x208 destination
-        v.GFX.bgCanvas = function (i) { const c = ob.apply(this, arguments); rec.bgCalls++; if (!c || !Number.isInteger(c.width) || c.height * 256 !== c.width * 208 || ![1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8].includes(c.width / 256)) rec.bgBad++; return c; };
+        // v3: 256k x 208k with the EXACT quantised k (0.25 steps, 1..8; no bucket table any more), opaque canvases drawn by Game with an explicit 256x208 destination.
+        // Right after a scale change the previous scale's canvas (other size, same aspect, still a 0.25 multiple) is returned until the new bake is ready (stale-while-revalidate).
+        v.GFX.bgCanvas = function (i) { const c = ob.apply(this, arguments); rec.bgCalls++; if (!c || !Number.isInteger(c.width) || c.height * 256 !== c.width * 208 || !(c.width / 256 >= 1 && c.width / 256 <= 8 && Number.isInteger(c.width / 64))) rec.bgBad++; return c; };
       }
-      { const ol = v.GFX.levelCanvas; v.GFX.levelCanvas = function () { const c = ol.apply(this, arguments); rec.levelCanvasCalls++; if (!c || !Number.isInteger(c.width) || c.height * 256 !== c.width * 208 || ![1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8].includes(c.width / 256)) rec.levelBad++; return c; }; }
+      { const ol = v.GFX.levelCanvas; v.GFX.levelCanvas = function () { const c = ol.apply(this, arguments); rec.levelCanvasCalls++; if (!c || !Number.isInteger(c.width) || c.height * 256 !== c.width * 208 || !(c.width / 256 >= 1 && c.width / 256 <= 8 && Number.isInteger(c.width / 64))) rec.levelBad++; return c; }; }
       if (v.GFX.particle) wrap(v.GFX, 'particle', (a) => { bump(rec.particleKinds, a[1]); if (!['dot', 'ring', 'spark', 'streak'].includes(a[1]) || !Number.isFinite(a[2]) || !Number.isFinite(a[3]) || !(a[4] > 0)) rec.particleBad++; });
       if (v.GFX.postFX) wrap(v.GFX, 'postFX', (a) => { bump(rec.postFX, String(a[1])); });
       if (v.GFX.setScale) wrap(v.GFX, 'setScale', (a) => { bump(rec.setScale, String(a[0])); if (!(a[0] >= 1 && a[0] <= 8) || (a[0] * 4) % 1 !== 0) rec.setScaleBad++; });
@@ -929,7 +936,7 @@ async function sectionSoak() {
   const secs = (Date.now() - t0) / 1000;
   const fps = (s.frame - f0) / secs;
   note(`soak: ${(s.frame - f0)} game frames in ${secs.toFixed(1)} s = ${fps.toFixed(1)} fps; level ${s.level}, phase ${s.phase}`);
-  check(fps > 45 && fps < 75, 'game runs at ~60 updates/s in real time', { fps });
+  tcheck(fps > 45 && fps < 75, 'game runs at ~60 updates/s in real time', { fps });
   check((await g.scene()) === 'play', 'still in the play scene after the soak', await g.scene());
   await shot(page, 'soak_end.png');
   await harvest(page);
@@ -1082,9 +1089,9 @@ async function sectionPerf() {
   // SPEC_V2 section 5: <= 4 ms average on a desktop with a GPU canvas. Headless Chromium here rasterises on the CPU (the deferred raster work of the frame lands in
   // the first drawImage of postFX), so the gate is the quality ladder itself: quality 0 (no postFX) holds 4 ms, and every level stays under the 12 ms auto-quality trigger
   // so the ladder can settle; the absolute 4 ms at quality 2 is measured by out/v2/integration/budgets.mjs and reported (ENV-LIMITED).
-  check(res[0].avg < 4, 'avg update+render at quality 0 < 4 ms (SPEC_V2 5, CPU raster)', res[0]);
-  check(res[1].avg < 12 && res[2].avg < 12, 'avg update+render+postFX stays below the 12 ms auto-quality trigger at quality 1 and 2', { q1: res[1], q2: res[2] });
-  check(res[0].max < 50 && res[1].max < 50 && res[2].max < 50, 'no single frame > 50 ms after warm-up (SPEC_V2 5)', { q0: res[0].max, q1: res[1].max, q2: res[2].max });
+  tcheck(res[0].avg < 4, 'avg update+render at quality 0 < 4 ms (SPEC_V2 5, CPU raster)', res[0]);
+  tcheck(res[1].avg < 12 && res[2].avg < 12, 'avg update+render+postFX stays below the 12 ms auto-quality trigger at quality 1 and 2', { q1: res[1], q2: res[2] });
+  tcheck(res[0].max < 50 && res[1].max < 50 && res[2].max < 50, 'no single frame > 50 ms after warm-up (SPEC_V2 5)', { q0: res[0].max, q1: res[1].max, q2: res[2].max });
   report.perf = res;
   await g.evaluate(() => fz._main.setQuality(2, false));
   takeErrors('perf', t);
@@ -1268,8 +1275,8 @@ function sectionNames() {
     check(badSfxOpts.length === 0, 'AUDIO.sfx is only called with pitch / vol options', badSfxOpts);
     check(Object.keys(recAll.killPitch).every((k) => +k >= 0 && +k <= 12 && +k % 2 === 0), 'kill sfx pitches are even semitones 0..12', recAll.killPitch);
     check(!Object.keys(recAll.sfxOptKeys).includes('land.vol'), "'land' is played without a volume override (M30)", recAll.sfxOptKeys);
-    check(recAll.n.bgCalls > 0 && recAll.n.bgBad === 0, 'GFX.bgCanvas is used by Game and always returns 256b x 208b (v2: b = bake bucket)', recAll.n);
-    check(recAll.n.levelBad === 0, 'GFX.levelCanvas always returns 256b x 208b', recAll.n);
+    check(recAll.n.bgCalls > 0 && recAll.n.bgBad === 0, 'GFX.bgCanvas is used by Game and always returns 256k x 208k (v3: exact 0.25-step k; the previous scale canvas while a re-bake is pending)', recAll.n);
+    check(recAll.n.levelBad === 0, 'GFX.levelCanvas always returns 256k x 208k (v3: exact k)', recAll.n);
     check(recAll.n.levelCanvasCalls > 0, 'GFX.levelCanvas is used', recAll.n);
     // ---- SPEC_V2 runtime contract (sections 1-2), instrumented over the whole e2e run
     const okDrawOpts = new Set(['flip', 'alpha', 'white', 'tint', 'glow']);

@@ -60,18 +60,19 @@
   T.metrics = (name, f, k, thr) => {
     thr = thr === undefined ? 0.45 : thr;
     const cv = T.bake(name, f, k), W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data;
-    let x0 = W, y0 = H, x1 = -1, y1 = -1, edge = 0, any = 0, sumA = 0, ax0 = W, ay0 = H, ax1 = -1, ay1 = -1, lum = 0, nlum = 0;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1, edge = 0, edge2 = 0, any = 0, sumA = 0, ax0 = W, ay0 = H, ax1 = -1, ay1 = -1, lum = 0, nlum = 0;
     const T8 = thr * 255;
     for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
       const a = d[(y * W + x) * 4 + 3];
       if (a > 0) { any++; sumA += a; if (x < ax0) ax0 = x; if (x > ax1) ax1 = x; if (y < ay0) ay0 = y; if (y > ay1) ay1 = y; }
       if (a >= T8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
       if (x === 0 || y === 0 || x === W - 1 || y === H - 1) { if (a > edge) edge = a; }
+      else if (x === 1 || y === 1 || x === W - 2 || y === H - 2) { if (a > edge2) edge2 = a; }          // second ring: light that comes within 1 px of the pad edge (QA X7)
       if (a > 30) { lum += Math.max(d[(y * W + x) * 4], d[(y * W + x) * 4 + 1], d[(y * W + x) * 4 + 2]); nlum++; }
     }
     const u = (px, off) => (px - off) / k;
     return {
-      name, f, k, W, H,
+      name, f, k, W, H, edge2,
       bbox: x1 < 0 ? null : { x0: u(x0, cv._pl), y0: u(y0, cv._pt), x1: u(x1 + 1, cv._pl), y1: u(y1 + 1, cv._pt) },
       any: any, edge, sumA: sumA / 255 / (k * k),
       anyBox: ax1 < 0 ? null : { x0: u(ax0, cv._pl), y0: u(ay0, cv._pt), x1: u(ax1 + 1, cv._pl), y1: u(ay1 + 1, cv._pt) },

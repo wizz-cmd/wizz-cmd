@@ -1,6 +1,6 @@
 /* FIZZ & POP v2.0 - 11_gfx_cast.js  ->  const GFX_CAST   (the sprite DEFINITIONS of "Abyss Glow")
  * Calls GFX.define(name, {w, h, frames, pad, draw(ctx, frame, opts)}) at load for EVERY registry sprite (SPEC sec. 3.1 + the wave-2/3
- * additions crabbit_throw_angry / springle_squash_angry / glimmer_fire_angry = 82 names). Ported from the approved mockup
+ * additions crabbit_throw_angry / springle_squash_angry / glimmer_fire_angry = 82 names, + the v3 <e>_frozen sprites = 87 names). Ported from the approved mockup
  * (concepts/c_abyss_glow/parts: 20_players, 30_enemies, 31_kraken, 40_objects) with NEON primitives (src/09_neon.js).
  *
  * CONTRACT (10_gfx.js)  draw(ctx, frame, opts) paints ONE frame in LOGICAL units, origin = top-left of the w x h registry box, facing
@@ -19,22 +19,34 @@
  *   bodies (inner light organ), so they are always the brightest shapes. One neon hue + one silhouette per enemy. ANGRY = crimson
  *   #ff2a2a contour + slanted brows + steam puffs + a pulsing heat halo, baked into the *_angry frames (Game draws no aura of its own).
  *
+ * V3 FIX WAVE (FIXPLAN_V3 'Cast')
+ *   V1  <e>_frozen (nibbler crabbit jellop springle glimmer; 16x16x4 like <e>_move): an ICE CAST of the creature (pale white-lilac FROST contour, milky frosted body with
+ *       straight ice facets, rime stroke, ice shards, crystalline twinkles). The body is the move frame 0 pose in EVERY frame; only the twinkles change, so Game may draw
+ *       frame 0 or step the frames for a living glitter. Draw it plain (no tint / white / glow options needed); flip works like <e>_move. Dimmer than the twins on purpose.
+ *   C1  ink: dark underlay disc + saturated red-orange #ff5a1f rim + white-hot core (never purple / pink, readable over the Kraken).
+ *   C2  trap_overlay stages differ by SHAPE: 1 = thicker rim broken into 8 dashes, 2 = the thickest / hottest rim + inner ring + 4 crack lines (static frames: Game may add a
+ *       smooth alpha pulse for the shimmer / pulse cues).
+ *   C3  Fizz and Pop are lit bodies with a strong light gain (HERO_LK): the brightest shapes of the cast, P2 ~1.35 x P1 in luminance (hue-independent tell).
+ *   C4  *_angry frames: thick white-hot core line on every contour, rage-lit body, doubled brows, rage core glow (ANG wrappers): at least as luminous as the calm twin.
+ *   C5  bubble_fire = a 3-tongue flame, bubble_water = a round drop on two wave lines.   V7  Kraken royal purple (violet + 30 % magenta), angry = crimson.
+ *   V8  pu_pink = four outward arrows (range), pu_blue = double chevron (rate), pu_gold = comet with motion lines (speed).   X7  pads raised where light was cut at k = 1.
+ *
  * SPRITES  p1_/p2_ idle(2: blink) walk(4) jump fall shoot(2: cheeks puffed -> mouth open) die(4: spinning 0/90/180/270, X eyes) stun(2: swirl eyes + stars) icon(8x8);
  *   bubble(2) bubble_shot(3: growing) bubble_warn(2: red flicker) bubble_pop(3) trap_overlay(3 stages: cyan / amber / crimson shell, drawn OVER <e>_trapped)
  *   bubble_thunder|fire|water(2, glowing icon) bubble_letter(2, dark centre for the printed glyph); <e>_move(4) <e>_angry(4) <e>_trapped(2, captive on a dark disc)
- *   <e>_die(4) for nibbler crabbit jellop springle glimmer; crabbit_throw springle_squash glimmer_fire (+ _angry twins); bonefin(2); kraken kraken_angry (48x48, 2)
+ *   <e>_die(4) + <e>_frozen(4, V3) for nibbler crabbit jellop springle glimmer; crabbit_throw springle_squash glimmer_fire (+ _angry twins); bonefin(2); kraken kraken_angry (48x48, 2)
  *   kraken_trapped (64x64); pebble spark ink (8x8, 2) bolt (16x8) fire_drop flame (8x16, 3) water_flow water_fall (seamless 8x8 stream tiles) sparkle(4) poof(3)
  *   food_0..7 (sea grapes, kelp roll, clam, shrimp tempura, sushi, pudding, sundae, golden crown) pu_shoes pu_pink pu_blue pu_gold pu_parasol pu_clock pu_bomb pu_heart
  *   (every power-up wears a cyan orbit ring with ticks) moonpearl (32x32, 2).
  *
- * EXPORT  GFX_CAST = { count (number of defined sprites), names (array, definition order), art (the raw draw helpers, tests only) }
+ * EXPORT  GFX_CAST = { count (number of defined sprites: 87), names (array, definition order), art (the raw draw helpers, tests only) }
  *   Loading is safe without a GFX that has define() (count = 0) and never touches the DOM. Deterministic: no Math.random / Date.
  */
 const GFX_CAST = (() => {
   'use strict';
   const N = NEON;
-  const { neon, body, glow, dot, sparkle, starPath, spline, poly, arcPts, quadPts, circlePath, ellipsePath, sampleSpline, taper, spinePath,
-    lwFor, rgba, mixc, hot, RGB, WHITE, TAU, clamp, lerp, eyeBall, brow, gearPath, rng } = N;
+  const { neon: neonN, body: bodyN, brow: browN, glow, dot, sparkle, starPath, spline, poly, arcPts, quadPts, circlePath, ellipsePath, sampleSpline, taper, spinePath,
+    lwFor, rgba, mixc, hot, hex, RGB, WHITE, TAU, clamp, lerp, eyeBall, gearPath, rng } = N;
   const HAVE_GFX = typeof GFX !== 'undefined' && !!GFX && typeof GFX.define === 'function';
   const PI = Math.PI, sin = Math.sin, cos = Math.cos, abs = Math.abs, max = Math.max, min = Math.min;
   const names = [];
@@ -59,6 +71,62 @@ const GFX_CAST = (() => {
     return ok;
   }
 
+  /* C4: while an *_angry frame is drawn (ANG = 1, set by creatureFrame) every neon contour gets a THICK white-hot inner core line, every lit body is filled with a
+   * hot red-orange rage light and the brows are doubled: angry creatures end up at least as luminous as their calm twin (the crimson hue alone is the darkest hue of
+   * the palette) while the hue stays crimson. Everything else (heroes, items, bubbles ...) is untouched: ANG is 0 there. */
+  let ANG = 0;
+  const RAGE0 = mixc(RGB.crimson, RGB.amber, 0.26);                                                       // the rage light: crimson with a little amber
+  let RAGE = RAGE0, ANG_BW = 0.18, ANG_CW = 0.5;                                                         // RAGE + how much white the body fill / the contour core get
+  /* V1: while a <e>_frozen frame is drawn (FRZ = 1) the contour gets a rime stroke (wide, pale) and a thick white-hot core, and every body is filled with a milky
+   * frosted-glass light with a few straight ice facets, so a frozen creature reads as an ICE CAST of itself: pale white-lilac (FROST), desaturated, never cyan. */
+  let FRZ = 0;
+  const FROST = [200, 190, 255], FROST_BODY = [158, 150, 232];     // icy pale white-lilac (hue ~252 deg, saturation 0.28) for the contour; a mid lilac for everything that STACKS (halo, rim glow, milky fill):
+                                                                    // stacked pale layers clip to pure white under the additive blend + post bloom, mid lilac layers stay lilac (Pop is cyan 190 / 0.6; no enemy is this pale)
+  function neon(ctx, path, col, w, o) {
+    if (FRZ) o = Object.assign({}, o, { hot: Math.min(o && o.hot !== undefined ? o.hot : 0.75, 0.3), a: (o && o.a !== undefined ? o.a : 1) * FROZEN_A, halo: (o && o.halo !== undefined ? o.halo : 1) * 0.7 });        // the white-hot centre line would white the ice out under the post bloom; the ice is dimmer than the twins
+    neonN(ctx, path, col, w, o);
+    if (FRZ && !(o && (o.halo === 0 || o.a < 0.5))) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      const a = o && o.a !== undefined ? o.a : 1;
+      ctx.lineWidth = Math.min(w * 2.0, 0.9); ctx.strokeStyle = rgba(FROST_BODY, 0.14 * a); ctx.stroke(path);          // (clamped: at small k the 1 px stroke floor would otherwise white out the detail)
+      ctx.lineWidth = Math.min(w * 0.5, 0.3); ctx.strokeStyle = rgba(WHITE, 0.36 * a); ctx.stroke(path);
+      ctx.restore();
+    }
+    if (ANG && !(o && (o.halo === 0 || o.a < 0.5))) {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+      ctx.lineWidth = w * ANG_CORE_W; ctx.strokeStyle = rgba(mixc(RAGE, WHITE, ANG_CW), ANG_CORE_A * (o && o.a !== undefined ? o.a : 1)); ctx.stroke(path);
+      ctx.restore();
+    }
+  }
+  const FROZEN_A = 0.8;
+  const ICE_FACETS = [[[1.5, 5.5], [8.5, 10.5], [15, 8.5]], [[4.5, 1.5], [7, 9.5], [5.5, 15.5]], [[11, 2.5], [9, 8], [12.5, 14]]];
+  function body(ctx, path, col, w, o) {
+    bodyN(ctx, path, FRZ ? FROST_BODY : col, w, o);
+    if (FRZ && !(o && o.noBack)) {
+      const y0 = o && o.y0 !== undefined ? o.y0 : 0, y1 = o && o.y1 !== undefined ? o.y1 : 16;
+      ctx.save(); ctx.clip(path); ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, rgba(FROST_BODY, 0.24)); g.addColorStop(1, rgba(FROST_BODY, 0.1));
+      ctx.fillStyle = g; ctx.fill(path);
+      ctx.lineCap = 'round'; ctx.lineJoin = 'round'; ctx.lineWidth = w * 0.3; ctx.strokeStyle = rgba(WHITE, 0.24);
+      for (const f of ICE_FACETS) { ctx.beginPath(); ctx.moveTo(f[0][0], f[0][1]); for (let i = 1; i < f.length; i++) ctx.lineTo(f[i][0], f[i][1]); ctx.stroke(); }
+      ctx.restore();
+    }
+    if (ANG && !(o && o.noBack)) {
+      const y0 = o && o.y0 !== undefined ? o.y0 : 0, y1 = o && o.y1 !== undefined ? o.y1 : 16;
+      ctx.save(); ctx.clip(path); ctx.globalCompositeOperation = 'lighter';
+      const g = ctx.createLinearGradient(0, y0, 0, y1); g.addColorStop(0, rgba(mixc(RAGE, WHITE, ANG_BW), ANG_BODY_A * ANG)); g.addColorStop(1, rgba(RAGE, ANG_BODY_A * 0.55 * ANG));
+      ctx.fillStyle = g; ctx.fill(path); ctx.restore();
+    }
+  }
+  function brow(ctx, x, y, r, dir, w, col) {
+    browN(ctx, x, y, r, dir, w, col);
+    if (ANG) {
+      const p = new Path2D(); p.moveTo(x - r * 1.15 * dir, y - r * 1.55); p.lineTo(x + r * 1.1 * dir, y - r * 0.55);
+      neonN(ctx, p, mixc(RAGE, WHITE, 0.3), w * 1.6, { a: 1, halo: 0.9, hot: 0.9 });
+    }
+  }
+  const ANG_CORE_W = 0.8, ANG_CORE_A = 0.9, ANG_BODY_A = 0.62;
+
   const dark = (a) => 'rgba(4,6,14,' + (a === undefined ? 0.9 : a).toFixed(3) + ')';
   const fillAdd = (ctx, path, col, a) => { ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = rgba(col, a); ctx.fill(path); ctx.restore(); };
   const fillDark = (ctx, path, a) => { ctx.save(); ctx.fillStyle = dark(a); ctx.fill(path); ctx.restore(); };
@@ -81,9 +149,9 @@ const GFX_CAST = (() => {
     }
   }
   /* pulsing heat halo of an angry creature (one pulse per loop) */
-  function heatLoop(ctx, u, col, cx, cy, r) {
-    const s = sin(TAU * u);
-    glow(ctx, cx, cy, r * (1 + s * 0.07), col, 0.4 + s * 0.08);
+  function heatLoop(ctx, u, col, cx, cy, r, gain) {
+    const s = sin(TAU * u), g = gain || 1;
+    glow(ctx, cx, cy, r * (1 + s * 0.07), col, (0.4 + s * 0.08) * g);
   }
   /* an X eye (dead / knocked out) */
   function xEye(ctx, x, y, r, col, w) {
@@ -120,6 +188,7 @@ const GFX_CAST = (() => {
    * HEROES  Fizz (magenta, 3 broad plumes, short curled tail) and Pop (cyan, 4 slender upright plumes, finned tail + dorsal sail).
    * pose: idle | blink | walk | jump | fall | puff (cheeks full) | shoot (mouth open) | die | stun | icon
    * ============================================================================================================== */
+  const HERO_LK = { fizz: 3.1, pop: 2.7 };
   const HERO_S = 1.1;              // art scale about the bottom centre (8, 16): contour <= 1.35 x the 16 px box
 
   /* a gill plume: rounded leaf with a bright vein, light-filled petal hotter toward the tip, soft glowing tip */
@@ -234,6 +303,9 @@ const GFX_CAST = (() => {
     if (stun) { ctx.translate(8, 16); ctx.rotate(sin(ph) * 0.045); ctx.translate(-8, -16); }
     ctx.translate(8, 16 + (walk ? -abs(sin(ph)) * 0.3 : 0)); ctx.scale(sx, sy); ctx.translate(-8, -16);
     const A = 1;
+    // C3: light gain of the lit body. The twins must be the brightest shapes: Fizz's magenta carries only 0.27 relative luminance (Pop's cyan 0.72), so she gets the
+    // larger gain; P2 stays about 1.3 x brighter than P1 in luminance so the pair also differs hue-independently (protan / deutan / grayscale).
+    const LK = pop ? HERO_LK.pop : HERO_LK.fizz;
     // soft aura: the twins glow as a whole
     glow(ctx, 3.8, 3.4 + headDy, 6.6, gcol, 0.25, 0.95);
     glow(ctx, 9, 9.5, 10, col, 0.1 * breathe, 0.95);
@@ -263,7 +335,7 @@ const GFX_CAST = (() => {
       ctx.save(); ctx.fillStyle = 'rgba(4,6,14,0.55)'; ctx.fill(fin); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = rgba(gcol, 0.2 * A); ctx.fill(fin); ctx.restore();
       neon(ctx, fin, gcol, w * 0.7, { a: 0.85 * A, halo: 0.6, hot: 0.35 });
     }
-    body(ctx, tail, col, w, { a: A, y0: 9, y1: 15, tint: 0.85, rim: 0.95 });
+    body(ctx, tail, col, w, { a: A, y0: 9, y1: 15, tint: 0.85 * LK, rim: 0.95 });
     neon(ctx, tail, col, w * 0.95, { a: A, halo: 0.8, grad: [0, 9, 6, 15] });
     neon(ctx, spinePath(tsp.slice(3, tsp.length - 5)), hot(col, 0.2), w * 0.4, { a: 0.55 * A, halo: 0, hot: 0.2 });
 
@@ -291,11 +363,11 @@ const GFX_CAST = (() => {
 
     // ---- body (lit from within: inner light organ in the chest) ----
     const bodyP = new Path2D('M 5.5 9.4 C 4.3 11.8 4.4 14.7 7.1 15.4 L 11.7 15.4 C 13.5 14.7 13.5 11.8 12.2 9.4 Z');
-    body(ctx, bodyP, col, w, { a: A, y0: 9, y1: 16, hl: [7.6, 11.2, 5.2, 0.3], tint: 0.8, core: [9, 12.9, 4.4, 0.34 * breathe], rim: 0.95 });
+    body(ctx, bodyP, col, w, { a: A, y0: 9, y1: 16, hl: [7.6, 11.2, 5.2, 0.3 * LK], tint: 0.8 * LK, core: [9, 12.9, 4.4, 0.34 * LK * breathe], rim: 0.95 });
     neon(ctx, bodyP, col, w, { a: A, grad: [4, 9, 13, 16] });
     const belly = ellipsePath(9.0, 12.6, 2.4, 2.8);
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
-    const bgd = ctx.createRadialGradient(9, 12.6, 0, 9, 12.6, 3.0); bgd.addColorStop(0, rgba(mixc(WHITE, col, 0.2), 0.34 * breathe)); bgd.addColorStop(1, rgba(mixc(WHITE, col, 0.4), 0.06));
+    const bgd = ctx.createRadialGradient(9, 12.6, 0, 9, 12.6, 3.0); bgd.addColorStop(0, rgba(mixc(WHITE, col, 0.2), 0.34 * LK * breathe)); bgd.addColorStop(1, rgba(mixc(WHITE, col, 0.4), 0.06 * LK));
     ctx.fillStyle = bgd; ctx.fill(belly);
     ctx.restore();
     neon(ctx, new Path2D('M 7 11.2 Q 9 10.6 11 11.2'), WHITE, w * 0.4, { a: 0.4, halo: 0, hot: 0 });
@@ -321,7 +393,7 @@ const GFX_CAST = (() => {
     ctx.save();
     ctx.translate(headDx, headDy);
     const head = headPath(pose === 'puff' ? 1 : 0);
-    body(ctx, head, col, w, { a: A, y0: 1.5, y1: 10.5, x0: 4, x1: 12, hl: [7.6, 4.2, 6.6, 0.34], tint: 0.8, core: [10.4, 6.6, 5.6, 0.16 * breathe], rim: 0.95 });
+    body(ctx, head, col, w, { a: A, y0: 1.5, y1: 10.5, x0: 4, x1: 12, hl: [7.6, 4.2, 6.6, 0.34 * LK], tint: 0.8 * LK, core: [10.4, 6.6, 5.6, 0.16 * LK * breathe], rim: 0.95 });
     neon(ctx, head, col, w * 1.1, { a: A, grad: [4, 1.5, 14, 10.5], halo: 1.1 });
     heroFace(ctx, who, col, gcol, w, o);
     ctx.restore();
@@ -504,7 +576,7 @@ const GFX_CAST = (() => {
       const pts = []; for (let j = 0; j <= 4; j++) pts.push([8 + s * (0.9 + sin(ph + j + s) * 0.45), 8 + j * 1.55]);
       const rb = taper(sampleSpline(pts, 5), (u) => 0.5 * sin(PI * Math.pow(u, 0.7)) + 0.05);
       fillAdd(ctx, rb, col, 0.18);
-      neon(ctx, rb, mixc(col, RGB.magenta, 0.35), w * 0.5, { a: 0.7, halo: 0.4, hot: 0.2 });
+      neon(ctx, rb, o.frost ? col : mixc(col, RGB.magenta, 0.35), w * 0.5, { a: 0.7, halo: 0.4, hot: 0.2 });
     }
     // bell with scalloped rim
     const n = 5, x1 = 14.1, x0 = 1.9, dx = (x1 - x0) / n;
@@ -518,7 +590,7 @@ const GFX_CAST = (() => {
     neon(ctx, cn, col, w * 0.38, { a: 0.45, halo: 0, hot: 0.2 });
     const cl = new Path2D();       // clover (the four gonads), a magenta-violet signature, rotates a quarter turn per loop
     for (let i = 0; i < 4; i++) { const a = i * TAU / 4 + PI / 4 + ph * 0.25; cl.moveTo(8 + cos(a) * 1.7 + 0.8, 4.0 + sin(a) * 1.15); cl.ellipse(8 + cos(a) * 1.7, 4.0 + sin(a) * 1.15, 0.8, 0.55, a, 0, TAU); }
-    neon(ctx, cl, mixc(col, RGB.magenta, 0.5), w * 0.55, { a: 0.9, halo: 0.6, hot: 0.4 });
+    neon(ctx, cl, o.frost ? mixc(col, RGB.violet, 0.2) : mixc(col, RGB.magenta, 0.5), w * 0.55, { a: 0.9, halo: 0.6, hot: 0.4 });
     const look = trapped ? [sin(ph) * 0.9, 0.2] : [0.5, 0.2];
     for (const ex of [5.4, 10.6]) eyeOf(ctx, o, ex, 6.2, 0.95, col, look, { w: w * 0.45, pupil: 0.58 });
     if (o.angry) { brow(ctx, 5.4, 6.2, 0.95, 1, w, col); brow(ctx, 10.6, 6.2, 0.95, -1, w, col); steamLoop(ctx, 8, 0.5, o.u, w, col, 3, 2.0); }
@@ -562,14 +634,14 @@ const GFX_CAST = (() => {
     if (squash) {      // impact ticks on both sides of the compressed coil
       neon(ctx, new Path2D('M 3.2 15.2 L 1.6 14.4 M 12.0 15.2 L 13.6 14.4 M 3.6 14.2 L 2.4 12.8 M 11.6 14.2 L 12.8 12.8'), hot(col, 0.4), w * 0.5, { a: 0.8, halo: 0.4, hot: 0.4 });
     }
-    if (o.angry) steamLoop(ctx, 5.6, 3.6, o.u, w, col, 2, 2.4);
+    if (o.angry) steamLoop(ctx, 5.6, 3.4, o.u, w, col, 3, 2.9);
   }
 
   /* ---------------------------------------------------------------- Glimmer: anglerfish with a lantern */
   function glimmer(ctx, o, col, w) {
     const ph = o.ph, fire = o.state === 'fire', trapped = o.state === 'trapped', die = o.state === 'die';
     const wag = sin(ph) * 0.5;
-    const lant = RGB.amber;
+    const lant = o.frost ? mixc(FROST, WHITE, 0.25) : RGB.amber, bio = o.frost ? mixc(FROST, WHITE, 0.2) : RGB.cyan;      // frozen: the lantern is a cold pale light, no amber / cyan
     const pulse = 0.85 + sin(ph + 1) * 0.15 + (fire ? 0.5 : 0);
     ctx.translate(0, sin(ph + 0.5) * 0.25);        // hover bob
     const tf = new Path2D('M 2.5 9.6 L 0 ' + (6.1 + wag) + ' Q 1.1 9.6 0 ' + (13 - wag) + ' Z');
@@ -580,7 +652,7 @@ const GFX_CAST = (() => {
     body(ctx, bp, col, w, { y0: 4, y1: 14.5, tint: 1.25, hl: [6, 7, 6.4, 0.3] });
     neon(ctx, bp, col, w * 1.1, { grad: [2, 4, 14, 14.5] });
     // lateral bio-dots (they flare when the spark is charged)
-    for (const [bx, by, r] of [[4.4, 8.6, 0.28], [5.9, 7.7, 0.24], [7.5, 7.2, 0.24], [3.9, 10.8, 0.22], [5.6, 11.4, 0.22]]) dot(ctx, bx, by, r * (fire ? 1.5 : 1), RGB.cyan, fire ? 1 : 0.8, { halo: 2.6 });
+    for (const [bx, by, r] of [[4.4, 8.6, 0.28], [5.9, 7.7, 0.24], [7.5, 7.2, 0.24], [3.9, 10.8, 0.22], [5.6, 11.4, 0.22]]) dot(ctx, bx, by, r * (fire ? 1.5 : 1), bio, fire ? 1 : 0.8, { halo: 2.6 });
     neon(ctx, new Path2D('M 7.6 10.5 L 4.7 12.9 L 8.9 12.3 Z'), col, w * 0.6, { a: 0.85, halo: 0.4 });
     const open = fire ? 1.4 : 0.8 + sin(ph) * 0.1;
     neon(ctx, new Path2D('M 13.9 8.2 Q 11.4 ' + (10.4 + open) + ' 8.6 ' + (9.9 + open * 0.4)), hot(col, 0.4), w * 0.7, { halo: 0.5, hot: 0.5 });
@@ -658,33 +730,42 @@ const GFX_CAST = (() => {
 
   const CREATURE = { nibbler, crabbit, jellop, springle, glimmer };
   const ENEMY_S = { nibbler: 1.08, crabbit: 1.02, jellop: 1.06, springle: 1.04, glimmer: 1.06, bonefin: 1.1 };
-  const EPAD = { l: 4, r: 4, t: 4, b: 4 }, SPAD = { l: 4, r: 4, t: 5, b: 4 };
-  const EPAD_ANGRY = { l: 5, r: 5, t: 6, b: 4 };
-  const GPAD = { l: 4, r: 7, t: 5, b: 4 }, GPAD_ANGRY = { l: 5, r: 7, t: 6, b: 4 };
-  const EPAD_TRAP = { l: 2, r: 2, t: 2, b: 2 };
+  /* pads (X7: the claws / arcs / sparks used to be cut by the pad at k = 1; GFX core adds its own small-k boost on top of these) */
+  const EPAD = { l: 4, r: 4, t: 4, b: 4 }, SPAD = { l: 4, r: 4, t: 5, b: 4 }, CPAD = { l: 5, r: 5, t: 4, b: 4 };      // calm: default | springle | crabbit (claws)
+  const EPAD_ANGRY = { l: 5, r: 5, t: 7, b: 4 };                                                                       // angry: steam + heat reach higher
+  const GPAD = { l: 4, r: 7, t: 5, b: 4 }, GPAD_ANGRY = { l: 5, r: 7, t: 7, b: 4 };
+  const EPAD_TRAP = { l: 3, r: 3, t: 3, b: 3 }, CPAD_TRAP = { l: 4, r: 4, t: 3, b: 3 };
+  const PAD_BY = { crabbit: CPAD, springle: SPAD, glimmer: GPAD };
+
+  const ANG_GAIN = { nibbler: 1.15, springle: 1.35 }, HEAT_GAIN = { springle: 1.5, nibbler: 1.1 };   // springle = the brightest calm body (lime): more heat / steam instead of a brighter fill (the post bloom turns a hot fill yellow-white in game)
+  const RAGE_CORE = { nibbler: [8, 8.6, 5.6, 0.34], crabbit: [8, 10.2, 5.6, 0.32], jellop: [8, 4.6, 5.6, 0.36], springle: [8.6, 7.4, 5.4, 0.4], glimmer: [8, 9.2, 5.6, 0.32] };   // [x, y, r, alpha] per body plan
 
   /* one creature frame: state + angry -> colour, heat halo, then the creature */
   function creatureFrame(ctx, type, o, state, angry) {
-    o.state = state; o.angry = !!angry;
-    let col = angry ? RGB.crimson : HUE[type];
+    o.state = state; o.angry = !!angry; o.frost = state === 'frozen';
+    let col = o.frost ? FROST : angry ? RGB.crimson : HUE[type];
     if (state === 'die') col = hot(col, 0.3);
-    if (angry) heatLoop(ctx, o.u, RGB.crimson, 8, 9, 10.5);
-    CREATURE[type](ctx, o, col, o.w);
+    if (angry) heatLoop(ctx, o.u, RGB.crimson, 8, 9, 10.5, HEAT_GAIN[type] || 1);
+    ANG = angry ? (ANG_GAIN[type] || 1) : 0;                                     // 1 = the standard rage light; springle (lime = the brightest calm body) needs more
+    RAGE = RAGE0; ANG_BW = 0.18; ANG_CW = 0.5;
+    FRZ = o.frost ? 1 : 0;
+    try { CREATURE[type](ctx, o, col, o.w); } finally { ANG = 0; FRZ = 0; }
+    if (angry) { const rc = RAGE_CORE[type]; glow(ctx, rc[0], rc[1], rc[2], mixc(RAGE, WHITE, 0.35), rc[3] * 0.85 + 0.05 * sin(TAU * o.u)); }          // the rage core: a hot light in the chest, over the body
   }
 
   for (const type of ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer']) {
     const S = ENEMY_S[type];
-    def(type + '_move', 16, 16, 4, type === 'glimmer' ? GPAD : type === 'springle' ? SPAD : EPAD, S, [8, 16], (ctx, o) => creatureFrame(ctx, type, o, 'move', false));
+    def(type + '_move', 16, 16, 4, PAD_BY[type] || EPAD, S, [8, 16], (ctx, o) => creatureFrame(ctx, type, o, 'move', false));
     def(type + '_angry', 16, 16, 4, type === 'glimmer' ? GPAD_ANGRY : EPAD_ANGRY, S, [8, 16], (ctx, o) => creatureFrame(ctx, type, o, 'move', true));
     // trapped: a small struggling captive on a dark backing disc, drawn INSIDE the bubble (trap_overlay is drawn over it)
-    def(type + '_trapped', 16, 16, 2, EPAD_TRAP, 0.76, [8, 8.2], (ctx, o) => {
+    def(type + '_trapped', 16, 16, 2, type === 'crabbit' ? CPAD_TRAP : EPAD_TRAP, 0.76, [8, 8.2], (ctx, o) => {
       ctx.save(); ctx.fillStyle = 'rgba(4,6,14,0.5)'; ctx.beginPath(); ctx.arc(8, 8.2, 7.2 / 0.76, 0, TAU); ctx.fill(); ctx.restore();
       o.ph = PI / 2 + o.f * PI;
       ctx.translate(8 + (o.f ? 0.5 : -0.5) / 0.76, 8.4); ctx.rotate(o.f ? 0.1 : -0.1); ctx.translate(-8, -8.4);
       creatureFrame(ctx, type, o, 'trapped', false);
     });
     // die: flung: a hot, spinning 0/90/180/270 deg pose with X eyes and a few sparks
-    def(type + '_die', 16, 16, 4, { l: 4, r: 4, t: 4, b: 4 }, S * 0.82, [8, 9], (ctx, o) => {
+    def(type + '_die', 16, 16, 4, type === 'springle' ? { l: 4, r: 4, t: 4, b: 6 } : { l: 4, r: 4, t: 4, b: 4 }, S * 0.82, [8, 9], (ctx, o) => {
       ctx.save();
       ctx.translate(8, 9); ctx.rotate(-o.f * PI / 2); ctx.translate(-8, -9);
       creatureFrame(ctx, type, o, 'die', false);
@@ -693,7 +774,7 @@ const GFX_CAST = (() => {
     });
   }
   // action poses (+ angry twins, so the angry cue never drops out in an action pose)
-  def('crabbit_throw', 16, 16, 1, EPAD, ENEMY_S.crabbit, [8, 16], (ctx, o) => creatureFrame(ctx, 'crabbit', o, 'throw', false));
+  def('crabbit_throw', 16, 16, 1, CPAD, ENEMY_S.crabbit, [8, 16], (ctx, o) => creatureFrame(ctx, 'crabbit', o, 'throw', false));
   def('crabbit_throw_angry', 16, 16, 1, EPAD_ANGRY, ENEMY_S.crabbit, [8, 16], (ctx, o) => creatureFrame(ctx, 'crabbit', o, 'throw', true));
   def('springle_squash', 16, 16, 1, SPAD, ENEMY_S.springle, [8, 16], (ctx, o) => creatureFrame(ctx, 'springle', o, 'squash', false));
   def('springle_squash_angry', 16, 16, 1, EPAD_ANGRY, ENEMY_S.springle, [8, 16], (ctx, o) => creatureFrame(ctx, 'springle', o, 'squash', true));
@@ -747,15 +828,16 @@ const GFX_CAST = (() => {
   /* rim + window highlight + secondary reflection (origin = bubble centre) */
   function shellRim(ctx, r, ph, o) {
     const A = o.a === undefined ? 1 : o.a, k = o.k, w = clampN(r * 0.042, 1.2 / k, 3.3 / k), stops = o.stops || FILM;
+    const rk = o.rimK || 1, wr = rk === 1 ? w : clampN(r * 0.042 * rk, 1.2 / k * (1 + (rk - 1) * 0.5), 3.3 / k * rk);     // wr: the ring strokes themselves (trap stages 1 / 2 draw a thicker rim: a non-hue cue); highlights keep w
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
     const rot = ph * 1 + (o.rot || 0);
     ctx.lineWidth = w * 3.2; ctx.strokeStyle = filmG(ctx, rot, 0.10 * A, stops); ctx.beginPath(); ctx.arc(0, 0, r, 0, TAU); ctx.stroke();
-    ctx.lineWidth = w * 1.5; ctx.strokeStyle = filmG(ctx, rot, 0.34 * A, stops); ctx.stroke();
-    ctx.lineWidth = w * 0.8; ctx.strokeStyle = filmG(ctx, rot, 0.62 * A, stops); ctx.stroke();
+    ctx.lineWidth = wr * 1.5; ctx.strokeStyle = filmG(ctx, rot, 0.34 * A, stops); ctx.stroke();
+    ctx.lineWidth = wr * 0.8; ctx.strokeStyle = filmG(ctx, rot, 0.62 * A, stops); ctx.stroke();
     ctx.lineCap = 'round';
     const seg = (a0, a1, lw, al) => { ctx.lineWidth = lw; ctx.strokeStyle = filmG(ctx, rot, al * A, stops); ctx.beginPath(); ctx.arc(0, 0, r, a0 * PI / 180, a1 * PI / 180); ctx.stroke(); };
-    seg(175, 292, w * 1.25, 0.95);       // lit side (key light, top-left): thicker and hotter
-    seg(5, 95, w * 1.05, 0.7);           // second lit side (bounce, bottom-right)
+    seg(175, 292, wr * 1.25, 0.95);       // lit side (key light, top-left): thicker and hotter
+    seg(5, 95, wr * 1.05, 0.7);           // second lit side (bounce, bottom-right)
     ctx.lineWidth = w * 0.5; ctx.strokeStyle = rgba(WHITE, 0.10 * A); ctx.beginPath(); ctx.arc(0, 0, r * 0.89, 0, TAU); ctx.stroke();      // inner wall
     const hl = (rr, a0, a1, lw, al) => { ctx.lineWidth = lw; ctx.strokeStyle = rgba(WHITE, al * A); ctx.lineCap = 'round'; ctx.beginPath(); ctx.arc(0, 0, rr, a0 * PI / 180, a1 * PI / 180); ctx.stroke(); };
     hl(r * 0.7, 200, 252, w * 2.1, 0.30);
@@ -772,9 +854,22 @@ const GFX_CAST = (() => {
   const filmG = (ctx, rot, a, stops) => N.filmGradient(ctx, 0, 0, rot, a, stops);
 
   const boltPath = (r) => poly([[0.2, -0.66], [-0.3, 0.06], [0.02, 0.06], [-0.2, 0.68], [0.36, -0.14], [0.05, -0.14], [0.3, -0.66]].map((p) => [p[0] * r, p[1] * r]), true);
-  function flamePath(r, ph) {
-    const f = sin(ph + 0.9) * 0.05, g = sin(ph * 1 + 2.4) * 0.06, s = (v) => v * r;
-    return new Path2D('M ' + s(0) + ' ' + s(-0.66 - f) + ' C ' + s(0.1 + f) + ' ' + s(-0.4) + ' ' + s(0.46) + ' ' + s(-0.2) + ' ' + s(0.42) + ' ' + s(0.2) + ' C ' + s(0.4) + ' ' + s(0.5) + ' ' + s(0.2) + ' ' + s(0.66) + ' ' + s(0) + ' ' + s(0.66) + ' C ' + s(-0.24) + ' ' + s(0.66) + ' ' + s(-0.42) + ' ' + s(0.48) + ' ' + s(-0.4) + ' ' + s(0.2) + ' C ' + s(-0.38) + ' ' + s(-0.02 + g) + ' ' + s(-0.16) + ' ' + s(-0.1) + ' ' + s(-0.12) + ' ' + s(-0.3) + ' C ' + s(-0.1) + ' ' + s(-0.42) + ' ' + s(-0.02) + ' ' + s(-0.52) + ' ' + s(0) + ' ' + s(-0.66 - f) + ' Z');
+  /* fire icon (C5): a FLAME, not a drop: a tall main tongue leaning right (asymmetric sharp tip) between two shorter pointed side tongues, valleys
+   * between them and a round bulb at the base. d = tongue flicker (ph), s = size (units). core = the small inner flame (one tongue). */
+  function flamePath(r, ph, core) {
+    const s = (v) => v * r, f = sin(ph + 0.9) * 0.06, g = sin(ph * 1 + 2.4) * 0.07, h = sin(ph + 4.0) * 0.05;
+    if (core) {
+      return new Path2D('M ' + s(0) + ' ' + s(0.62) + ' C ' + s(-0.3) + ' ' + s(0.6) + ' ' + s(-0.38) + ' ' + s(0.3) + ' ' + s(-0.22) + ' ' + s(0.02) + ' C ' + s(-0.14) + ' ' + s(-0.2) + ' ' + s(0.0) + ' ' + s(-0.3) + ' ' + s(0.1 + f * 0.5) + ' ' + s(-0.5 - f) + ' C ' + s(0.16) + ' ' + s(-0.28) + ' ' + s(0.3) + ' ' + s(-0.04) + ' ' + s(0.26) + ' ' + s(0.26) + ' C ' + s(0.22) + ' ' + s(0.52) + ' ' + s(0.12) + ' ' + s(0.62) + ' ' + s(0) + ' ' + s(0.62) + ' Z');
+    }
+    return new Path2D('M ' + s(0) + ' ' + s(0.7)
+      + ' C ' + s(-0.34) + ' ' + s(0.7) + ' ' + s(-0.52) + ' ' + s(0.44) + ' ' + s(-0.5) + ' ' + s(0.14)        // bulb, left side
+      + ' C ' + s(-0.49) + ' ' + s(-0.06) + ' ' + s(-0.4) + ' ' + s(-0.2 + g) + ' ' + s(-0.44) + ' ' + s(-0.42 - g)   // up to the left tongue tip (sharp)
+      + ' C ' + s(-0.3) + ' ' + s(-0.34) + ' ' + s(-0.2) + ' ' + s(-0.26) + ' ' + s(-0.17) + ' ' + s(-0.14)    // left valley
+      + ' C ' + s(-0.14) + ' ' + s(-0.42) + ' ' + s(-0.04) + ' ' + s(-0.58) + ' ' + s(0.14 + f) + ' ' + s(-0.8 - f)      // main tongue tip (leans right)
+      + ' C ' + s(0.1) + ' ' + s(-0.5) + ' ' + s(0.2) + ' ' + s(-0.34) + ' ' + s(0.2) + ' ' + s(-0.16)          // right valley
+      + ' C ' + s(0.3) + ' ' + s(-0.26) + ' ' + s(0.38) + ' ' + s(-0.3) + ' ' + s(0.46 + h) + ' ' + s(-0.42 - h)        // right tongue tip
+      + ' C ' + s(0.44) + ' ' + s(-0.2) + ' ' + s(0.52) + ' ' + s(-0.04) + ' ' + s(0.5) + ' ' + s(0.16)
+      + ' C ' + s(0.48) + ' ' + s(0.44) + ' ' + s(0.34) + ' ' + s(0.7) + ' ' + s(0) + ' ' + s(0.7) + ' Z');
   }
   const dropPath = (r) => { const s = (v) => v * r; return new Path2D('M ' + s(0) + ' ' + s(-0.68) + ' C ' + s(0.1) + ' ' + s(-0.4) + ' ' + s(0.44) + ' ' + s(-0.1) + ' ' + s(0.44) + ' ' + s(0.24) + ' C ' + s(0.44) + ' ' + s(0.52) + ' ' + s(0.24) + ' ' + s(0.68) + ' ' + s(0) + ' ' + s(0.68) + ' C ' + s(-0.24) + ' ' + s(0.68) + ' ' + s(-0.44) + ' ' + s(0.52) + ' ' + s(-0.44) + ' ' + s(0.24) + ' C ' + s(-0.44) + ' ' + s(-0.1) + ' ' + s(-0.1) + ' ' + s(-0.4) + ' ' + s(0) + ' ' + s(-0.68) + ' Z'); };
 
@@ -783,8 +878,10 @@ const GFX_CAST = (() => {
     empty: { tint: RGB.cyan, stops: FILM, halo: 1, film: 1 },
     shot: { tint: RGB.cyan, stops: FILM, halo: 1.5, film: 1.9 },
     stage0: { tint: RGB.cyan, stops: FILM, halo: 1, film: 1 },
-    stage1: { tint: RGB.amber, fill: RGB.amber, stops: [RGB.amber, hot(RGB.amber, 0.5), RGB.ember, RGB.amber, RGB.amber], halo: 1.3, film: 1 },
-    stage2: { tint: RGB.crimson, fill: RGB.crimson, stops: [RGB.crimson, RGB.magenta, RGB.ember, RGB.crimson, RGB.crimson], halo: 1.45, film: 1 },
+    /* C2: the trap stages differ by SHAPE as well as hue (colour-blind safe): stage 1 = thicker rim broken into 8 dashes (gaps cut through the rim),
+     * stage 2 = the thickest, hottest rim + a second inner ring + four glowing crack lines running in from the rim (the shell is about to burst). */
+    stage1: { tint: RGB.amber, fill: RGB.amber, stops: [hot(RGB.amber, 0.12), hot(RGB.amber, 0.5), hot(RGB.ember, 0.2), hot(RGB.amber, 0.12), hot(RGB.amber, 0.12)], halo: 1.45, film: 1, rimK: 1.5, dash: 8 },
+    stage2: { tint: RGB.crimson, fill: RGB.crimson, stops: [hot(RGB.crimson, 0.4), hot(RGB.ember, 0.55), hot(RGB.crimson, 0.55), hot(RGB.ember, 0.4), hot(RGB.crimson, 0.4)], halo: 1.9, film: 1, rimK: 2.0, crack: true },
     warn: { tint: RGB.crimson, stops: [RGB.crimson, RGB.magenta, RGB.amber, RGB.crimson, RGB.crimson], halo: 1.2, film: 1 },
     thunder: { tint: RGB.amber, fill: RGB.amber, stops: [RGB.amber, hot(RGB.amber, 0.6), RGB.cyan, RGB.amber, RGB.amber], halo: 1, film: 1 },
     fire: { tint: RGB.ember, fill: RGB.ember, stops: [RGB.ember, RGB.amber, RGB.crimson, RGB.ember, RGB.ember], halo: 1, film: 1 },
@@ -796,14 +893,49 @@ const GFX_CAST = (() => {
     const st = BUBBLE_STYLE[kind] || BUBBLE_STYLE.empty, k = o.k, ph = o.ph + (extra && extra.ph0 !== undefined ? extra.ph0 : 0.9);
     const r = (extra && extra.r) || 7.6, cx = (extra && extra.cx) || 8, cy = (extra && extra.cy) || 8;
     const wob = kind === 'shot' ? 2 : 1;
-    const so = { tint: st.tint, fill: st.fill, stops: st.stops, halo: st.halo * ((extra && extra.halo) || 1), film: st.film, a: (extra && extra.a) || 1, k, rot: extra && extra.rot || 0 };
+    const so = { tint: st.tint, fill: st.fill, stops: st.stops, halo: st.halo * ((extra && extra.halo) || 1), film: st.film, a: (extra && extra.a) || 1, k, rot: extra && extra.rot || 0, rimK: st.rimK };
     ctx.save();
     ctx.translate(cx, cy); ctx.scale(1 + sin(ph) * 0.028 * wob, 1 - sin(ph) * 0.028 * wob);
     shellBody(ctx, r, ph, so);
     const w = clampN(r * 0.055, 1.3 / k, 4.2 / k);
     if (extra && extra.contents) extra.contents(ctx, r, w);
     shellRim(ctx, r, ph, so);
+    const rk = st.rimK || 1, rw = rk === 1 ? clampN(r * 0.042, 1.2 / k, 3.3 / k) : clampN(r * 0.042 * rk, 1.2 / k * (1 + (rk - 1) * 0.5), 3.3 / k * rk);       // the rim's own stroke unit (= shellRim's wr)
+    if (st.dash) trapDashes(ctx, r, rw, st, so);
+    if (st.crack) trapCracks(ctx, r, rw, st, so);
     ctx.restore();
+  }
+  /* trap stage 1: n dashes. The gaps are cut OUT of the finished rim (destination-out: the overlay is baked on its own transparent canvas), then bright
+   * thick dash caps are laid over the remaining segments, so the ring reads as "dashed" at every k even in grayscale. */
+  function trapDashes(ctx, r, w, st, so) {
+    const n = st.dash, seg = TAU / n, gap = seg * 0.36, a0 = -PI / 2 + 0.3;
+    ctx.save();
+    ctx.globalCompositeOperation = 'destination-out'; ctx.lineCap = 'butt'; ctx.lineWidth = Math.max(w * 1.5, 1.7 / so.k);
+    for (let i = 0; i < n; i++) { ctx.beginPath(); ctx.arc(0, 0, r * 1.0, a0 + i * seg - gap / 2, a0 + i * seg + gap / 2); ctx.stroke(); }
+    ctx.globalCompositeOperation = 'lighter'; ctx.lineCap = 'round';
+    for (let i = 0; i < n; i++) {
+      ctx.lineWidth = w * 1.0; ctx.strokeStyle = rgba(hot(st.tint, 0.4), 0.9); ctx.beginPath(); ctx.arc(0, 0, r, a0 + i * seg + gap * 0.62, a0 + (i + 1) * seg - gap * 0.62); ctx.stroke();
+      ctx.lineWidth = w * 0.4; ctx.strokeStyle = rgba(WHITE, 0.8); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  /* trap stage 2: a second inner ring + four crack lines from the rim inwards (a zigzag with a short branch each), white-hot over a crimson halo */
+  function trapCracks(ctx, r, w, st, so) {
+    w = Math.min(w / (st.rimK || 1), 0.9);                                              // crack / inner-ring strokes use the plain rim unit (their halos must not whiten the disc)
+    neon(ctx, circlePath(0, 0, r * 0.88), hot(st.tint, 0.35), w * 0.6, { a: 0.7, halo: 0.4, hot: 0.5 });
+    const P = new Path2D(), B = new Path2D();
+    const base = [-0.55, 0.62, 2.25, 3.95];
+    for (let i = 0; i < 4; i++) {
+      const a = base[i], L = r * (0.5 + 0.1 * (i % 2)), dirx = -cos(a), diry = -sin(a), px = -diry, py = dirx;
+      const pts = [[cos(a) * r, sin(a) * r]];
+      const jit = [0.5, -0.45, 0.4, -0.3];
+      for (let j = 1; j <= 4; j++) { const t = j / 4; pts.push([cos(a) * r + dirx * L * t + px * r * 0.13 * jit[j - 1] * (i % 2 ? -1 : 1), sin(a) * r + diry * L * t + py * r * 0.13 * jit[j - 1] * (i % 2 ? -1 : 1)]); }
+      P.moveTo(pts[0][0], pts[0][1]); for (let j = 1; j < pts.length; j++) P.lineTo(pts[j][0], pts[j][1]);
+      const m = pts[2];
+      B.moveTo(m[0], m[1]); B.lineTo(m[0] + (dirx * 0.5 + px * (i % 2 ? -0.7 : 0.7)) * r * 0.22, m[1] + (diry * 0.5 + py * (i % 2 ? -0.7 : 0.7)) * r * 0.22);
+    }
+    neon(ctx, P, hot(RGB.crimson, 0.5), w * 1.1, { a: 1, halo: 0.9, hot: 0.9 });
+    neon(ctx, B, hot(RGB.crimson, 0.4), w * 0.8, { a: 0.85, halo: 0.5, hot: 0.8 });
   }
 
   const BPAD = { l: 4, r: 4, t: 4, b: 4 };
@@ -819,7 +951,7 @@ const GFX_CAST = (() => {
       for (let i = 0; i < 3; i++) { const a = o.ph * 1 + i * TAU / 3 + 0.4; dot(g, cos(a) * r * 0.8, sin(a) * r * 0.8, 0.28, hot(RGB.magenta, 0.4), 0.9, { halo: 3 }); }
     },
   }));
-  def('bubble_thunder', 16, 16, 2, BPAD, 1, (ctx, o) => bubble(ctx, 'thunder', o, {
+  def('bubble_thunder', 16, 16, 2, { l: 6, r: 6, t: 6, b: 6 }, 1, (ctx, o) => bubble(ctx, 'thunder', o, {
     contents(g, r, w) {
       const flick = o.f ? 0.82 : 1;
       const bp = boltPath(r * 0.82);
@@ -836,27 +968,31 @@ const GFX_CAST = (() => {
   }));
   def('bubble_fire', 16, 16, 2, BPAD, 1, (ctx, o) => bubble(ctx, 'fire', o, {
     contents(g, r, w) {
-      const fp = flamePath(r * 0.9, o.ph), fi = flamePath(r * 0.5, o.ph + 1.7);
-      glow(g, 0, r * 0.1, r * 1.0, RGB.ember, 0.4);
-      g.save(); g.translate(0, r * 0.06); g.globalCompositeOperation = 'lighter'; g.fillStyle = rgba(RGB.ember, 0.4); g.fill(fp); g.restore();
-      g.save(); g.translate(0, r * 0.06); neon(g, fp, RGB.ember, w * 0.85, { halo: 1.1, hot: 0.55 }); g.restore();
-      g.save(); g.translate(0, r * 0.2); g.globalCompositeOperation = 'lighter'; g.fillStyle = rgba(hot(RGB.amber, 0.6), 0.95); g.fill(fi); g.restore();
+      const fp = flamePath(r * 0.9, o.ph), fi = flamePath(r * 0.56, o.ph + 1.7, true);
+      glow(g, 0, r * 0.05, r * 1.0, RGB.ember, 0.42);
+      g.save(); g.translate(0, r * 0.02); g.globalCompositeOperation = 'lighter'; g.fillStyle = rgba(hot(RGB.ember, 0.18), 0.6); g.fill(fp); g.restore();
+      g.save(); g.translate(0, r * 0.02); neon(g, fp, RGB.ember, w * 0.85, { halo: 1.1, hot: 0.55 }); g.restore();
+      g.save(); g.translate(0, r * 0.2); g.globalCompositeOperation = 'lighter'; g.fillStyle = rgba(hot(RGB.amber, 0.62), 0.96); g.fill(fi); g.restore();
     },
   }));
+  /* water icon (C5): a smooth ROUND drop sitting on two travelling wave lines (a drop + ripples, nothing pointed besides the drop's own tip) */
   def('bubble_water', 16, 16, 2, BPAD, 1, (ctx, o) => bubble(ctx, 'water', o, {
     contents(g, r, w) {
-      const dp = dropPath(r * 0.82), dy = o.f ? 0.04 * r : 0;
+      const dp = dropPath(r * 0.7), dy = (o.f ? 0.03 : -0.02) * r - r * 0.2;
       glow(g, 0, 0, r * 0.9, RGB.cobalt, 0.4);
       g.save(); g.translate(0, dy); g.globalCompositeOperation = 'lighter';
-      const dg = g.createLinearGradient(0, -r * 0.6, 0, r * 0.6); dg.addColorStop(0, rgba(RGB.cyan, 0.5)); dg.addColorStop(1, rgba(RGB.cobalt, 0.5));
+      const dg = g.createLinearGradient(0, -r * 0.45, 0, r * 0.45); dg.addColorStop(0, rgba(RGB.cyan, 0.55)); dg.addColorStop(1, rgba(RGB.cobalt, 0.55));
       g.fillStyle = dg; g.fill(dp); g.restore();
       g.save(); g.translate(0, dy);
       neon(g, dp, hot(RGB.cyan, 0.15), w * 0.85, { halo: 1.1, hot: 0.6 });
-      neon(g, new Path2D('M ' + (-r * 0.2) + ' ' + (r * 0.05) + ' Q ' + (-r * 0.26) + ' ' + (r * 0.34) + ' ' + (-r * 0.06) + ' ' + (r * 0.44)), WHITE, w * 0.6, { a: 0.9, halo: 0, hot: 0.3 });
-      // a ripple line across the drop (shifts between the two frames)
-      const ry = r * (0.12 + (o.f ? 0.06 : -0.02));
-      neon(g, new Path2D('M ' + (-r * 0.3) + ' ' + ry + ' Q ' + (-r * 0.15) + ' ' + (ry - r * 0.06) + ' 0 ' + ry + ' T ' + (r * 0.3) + ' ' + ry), hot(RGB.cyan, 0.4), w * 0.4, { a: 0.55, halo: 0, hot: 0.2 });
+      neon(g, new Path2D('M ' + (-r * 0.16) + ' ' + (r * 0.02) + ' Q ' + (-r * 0.2) + ' ' + (r * 0.24) + ' ' + (-r * 0.05) + ' ' + (r * 0.32)), WHITE, w * 0.6, { a: 0.9, halo: 0, hot: 0.3 });
       g.restore();
+      // two wave lines under the drop (the crests travel between the frames)
+      for (let i = 0; i < 2; i++) {
+        const y0 = r * (0.5 + i * 0.2), amp = r * 0.065, sh = (o.f ? 0.5 : 0) + i * 0.25, wave = new Path2D(), x0 = -r * (0.62 - i * 0.12), x1 = -x0;
+        for (let q = 0; q <= 16; q++) { const x = x0 + (x1 - x0) * q / 16, y = y0 + amp * sin((q / 16) * TAU * 1.5 + sh * TAU); q ? wave.lineTo(x, y) : wave.moveTo(x, y); }
+        neon(g, wave, hot(RGB.cyan, 0.3 - i * 0.1), w * (0.6 - i * 0.1), { a: 0.95 - i * 0.2, halo: 0.7, hot: 0.4 });
+      }
     },
   }));
 
@@ -891,13 +1027,16 @@ const GFX_CAST = (() => {
    * KRAKEN KING (48 x 48): crowned royal-purple octopus, heavy-browed amber eyes, curling tentacles on animated splines.
    * Angry = crimson-shifted purple, crimson eyes, steeper brows, steam from both sides of the mantle and a pulsing red heat halo.
    * ============================================================================================================== */
+  /* V7: royal purple (violet + 30 % magenta = #ad53e4, hue ~277 deg), kept 40+ degrees of hue away from Fizz's magenta (~320) and 15+ from Jellop's violet (261):
+   * no magenta in the tentacle gradient / tips / studs any more (those pulled the sprite's mean hue to ~307 and read as pink). */
+  const KRAKEN_C = mixc(RGB.violet, RGB.magenta, 0.3);
   function kraken(ctx, o, ang) {
     const ph = o.ph, w = o.w, A = 1;
-    const hue = ang ? mixc(RGB.purple, RGB.crimson, 0.55) : RGB.purple;
+    const hue = ang ? mixc(KRAKEN_C, RGB.crimson, 0.72) : KRAKEN_C;
     const gold = RGB.amber, eyeC = ang ? RGB.crimson : RGB.amber;
     const sw = (i, a, p2) => sin(ph + i * 1.3 + (p2 || 0)) * a;
     glow(ctx, 24, 22, 30, hue, 0.2);
-    glow(ctx, 24, 38, 24, RGB.magenta, 0.07, 0.7);
+    glow(ctx, 24, 38, 24, mixc(hue, RGB.cobalt, 0.35), 0.07, 0.7);
     if (ang) heatLoop(ctx, o.u, RGB.crimson, 24, 24, 29);
 
     // tentacles: outer pair curl outward into spirals, inner six sway and fan (no crossings)
@@ -916,7 +1055,7 @@ const GFX_CAST = (() => {
       const rb = taper(sp, (u) => 1.8 * Math.pow(1 - u, 0.85) + 0.26);
       fillDark(ctx, rb, 0.92);
       const g = ctx.createLinearGradient(0, 27, 0, 47);
-      g.addColorStop(0, rgba(mixc(hue, RGB.void, 0.1), 0.5)); g.addColorStop(1, rgba(mixc(hue, RGB.magenta, 0.55), 0.38));
+      g.addColorStop(0, rgba(mixc(hue, RGB.void, 0.1), 0.5)); g.addColorStop(1, rgba(mixc(hue, RGB.cobalt, 0.3), 0.38));
       ctx.save(); ctx.fillStyle = g; ctx.fill(rb); ctx.restore();
       neon(ctx, rb, hue, w * 0.95, { a: A, grad: [0, 28, 0, 47], gradHot: 0.28, halo: 1.0, hot: 0.45 });
       const dots = new Path2D();
@@ -924,9 +1063,9 @@ const GFX_CAST = (() => {
         const hw = 1.8 * Math.pow(1 - i / (sp.length - 1), 0.85) + 0.26;
         dots.moveTo(sp[i][0] + hw * 0.32, sp[i][1]); dots.arc(sp[i][0], sp[i][1], max(0.3, hw * 0.32), 0, TAU);
       }
-      neon(ctx, dots, mixc(hue, RGB.magenta, 0.5), w * 0.4, { a: 0.85 * A, halo: 0.2, hot: 0.3 });
+      neon(ctx, dots, mixc(hue, WHITE, 0.3), w * 0.4, { a: 0.85 * A, halo: 0.2, hot: 0.3 });
       const tip = sp[sp.length - 1];
-      dot(ctx, tip[0], tip[1], 0.55, mixc(RGB.magenta, WHITE, 0.3), A * 0.9, { halo: 3.5 });
+      dot(ctx, tip[0], tip[1], 0.55, mixc(hue, WHITE, 0.45), A * 0.9, { halo: 3.5 });
     }
 
     // mantle (hooded dome)
@@ -966,9 +1105,9 @@ const GFX_CAST = (() => {
     ctx.save(); ctx.globalCompositeOperation = 'lighter';
     const cg = ctx.createLinearGradient(0, -1, 0, 9); cg.addColorStop(0, rgba(hot(gold, 0.4), 0.45)); cg.addColorStop(1, rgba(gold, 0.15)); ctx.fillStyle = cg; ctx.fill(crown); ctx.restore();
     neon(ctx, crown, gold, w * 1.0, { a: A, halo: 1.4, hot: 0.6, gradHot: 0.4 });
-    for (const [gx, gy, c2] of [[16.6, 1.2, RGB.cyan], [24, -1.0, RGB.magenta], [31.4, 1.2, RGB.cyan]]) dot(ctx, gx, gy, 0.8, c2, A, { halo: 4 });
+    for (const [gx, gy, c2] of [[16.6, 1.2, RGB.cyan], [24, -1.0, RGB.crimson], [31.4, 1.2, RGB.cyan]]) dot(ctx, gx, gy, 0.8, c2, A, { halo: 4 });
     neon(ctx, new Path2D('M 17.4 6.8 C 21 8 27 8 30.6 6.8'), hot(gold, 0.5), w * 0.4, { a: 0.8 * A, halo: 0, hot: 0.2 });
-    dot(ctx, 24, 6.6, 0.55, RGB.magenta, A, { halo: 4 });
+    dot(ctx, 24, 6.6, 0.55, RGB.crimson, A, { halo: 4 });
     sparkle(ctx, 24, -1.0, 2.2 + sin(ph) * 0.5, hot(gold, 0.5), 0.8 * A, 0);
     if (ang) { steamLoop(ctx, 9.6, 12.5, o.u, w, hue, 2, 4.6); steamLoop(ctx, 38.4, 12.5, (o.u + 0.5) % 1, w, hue, 2, 4.6); }
   }
@@ -1023,20 +1162,33 @@ const GFX_CAST = (() => {
     dot(ctx, 4, 4, 0.9, hot(col, 0.7), 1, { halo: 3.4 });
   });
 
-  def('ink', 8, 8, 2, FXPAD, 1, (ctx, o) => {
-    const w = o.w, f = o.f, col = mixc(RGB.purple, RGB.magenta, 0.45);
-    const pts = [];
-    for (let i = 0; i < 9; i++) { const a = i * TAU / 9, r = 2.7 + 0.45 * sin(a * 3 + f * PI) + 0.2 * sin(a * 2 + 1 + f * 2); pts.push([4 + cos(a) * r, 4 + sin(a) * r]); }
-    const blob = spline(pts, true, 0.5);
-    glow(ctx, 4, 4, 6.2, col, 0.5);
-    fillDark(ctx, blob, 0.97);
-    body(ctx, blob, col, w, { y0: 1, y1: 7, tint: 1.3, noBack: true, hl: [3.2, 3.0, 3, 0.4] });
-    neon(ctx, blob, col, w * 1.0, { grad: [1, 1, 7, 7], halo: 1.2, hot: 0.55 });
-    neon(ctx, new Path2D('M 2.6 3.0 Q 3.0 2.3 3.9 2.2'), WHITE, w * 0.5, { a: 0.8, halo: 0, hot: 0.3 });
-    dot(ctx, 5.0 + f * 0.3, 5.2 - f * 0.3, 0.3, hot(col, 0.5), 0.8, { halo: 2.6 });
+  /* ink (Kraken): the only lethal projectile of the final fight. It must never look like the Kraken (purple) or Fizz (pink): a dark disc
+   * underlay (so it detaches from the lit tentacle contours it spawns inside), a saturated red-orange #ff5a1f rim and a large white-hot core.
+   * Two frames: the blob wobbles and its core breathes (the game alternates them every 4 frames). */
+  const INK_RIM = hex('#ff5a1f');
+  def('ink', 8, 8, 2, { l: 3, r: 3, t: 3, b: 3 }, 1, (ctx, o) => {
+    const w = o.w, f = o.f, col = INK_RIM;
+    const mkBlob = (r0, wob) => {
+      const pts = [];
+      for (let i = 0; i < 9; i++) { const a = i * TAU / 9, r = r0 + wob * (0.45 * sin(a * 3 + f * PI) + 0.2 * sin(a * 2 + 1 + f * 2)); pts.push([4 + cos(a) * r, 4 + sin(a) * r]); }
+      return spline(pts, true, 0.5);
+    };
+    const blob = mkBlob(2.55, 1);
+    glow(ctx, 4, 4, 5.6, col, 0.5);
+    // dark underlay: a disc just larger than the rim, so the bullet keeps a black outline wherever it overlaps lit art
+    ctx.save(); ctx.fillStyle = 'rgba(3,2,6,0.93)'; ctx.beginPath(); ctx.arc(4, 4, 3.55, 0, TAU); ctx.fill(); ctx.restore();
+    fillAdd(ctx, blob, col, 0.62);
+    neon(ctx, blob, col, w * 1.25, { halo: 1.0, hot: 0.22 });
+    // white-hot core (breathes between the frames)
+    const cr = f ? 1.35 : 1.15;
+    glow(ctx, 4, 4, 3.2, hot(col, 0.7), 0.6);
+    fillAdd(ctx, circlePath(4, 4, cr), hot(col, 0.9), 0.98);
+    dot(ctx, 4 + (f ? 0.15 : -0.1), 4, cr * 0.62, WHITE, 1, { halo: 2.2 });
+    // two tiny ember flecks orbiting the blob (they swap sides between the frames)
+    for (let i = 0; i < 2; i++) { const a = f * 1.2 + i * PI + 0.6; dot(ctx, 4 + cos(a) * 3.0, 4 + sin(a) * 3.0, 0.26, hot(col, 0.45), 0.95, { halo: 2.4 }); }
   });
 
-  def('bolt', 16, 8, 2, { l: 2, r: 2, t: 3, b: 3 }, 1, (ctx, o) => {
+  def('bolt', 16, 8, 2, { l: 4, r: 4, t: 3, b: 3 }, 1, (ctx, o) => {
     const w = o.w, f = o.f, col = RGB.amber;
     const ys = f ? [4, 2.4, 5.8, 2.9, 5.3, 2.6, 4.6, 4] : [4, 5.7, 2.3, 5.2, 2.7, 5.5, 3.2, 4];
     const xs = [0, 2.4, 4.6, 7, 9.4, 11.8, 14, 16];
@@ -1359,30 +1511,70 @@ const GFX_CAST = (() => {
     flipper(4.4, 8.3, 0.12); flipper(11.6, 8.3, -0.12);
     glint(ctx, 13.0, 2.8, 1.3, WHITE, 0.85);
   });
+  /* V8: the three pearls (pink / blue / gold) carry a white-hot GLYPH on a lit glass pearl, so they differ by SHAPE as well as hue (colour-blind safe):
+   *   pu_pink = RANGE: four arrows pointing outward from the centre | pu_blue = RATE: a double chevron >> | pu_gold = SPEED: a comet with motion lines.
+   * The pearl keeps a dark translucent core (so the glyph pops), a coloured lit rim, the pearl highlight and a thin-film band. */
+  function glyphPearl(ctx, w, col, x, y, r, dim) {
+    const c = circlePath(x, y, r), dm = dim || 1;                // dim < 1: a darker interior for the bright gold pearl (the comet must not melt into it)
+    glow(ctx, x, y, r * 2.5, col, 0.4);
+    body(ctx, c, col, w, { y0: y - r, y1: y + r, tint: 2.0 * dm, hl: [x - r * 0.4, y - r * 0.5, r * 1.5, 0.55 * dm] });
+    neon(ctx, c, col, w * 1.15, { grad: [x - r, y - r, x + r, y + r], halo: 1.3, hot: 0.55 });
+    neon(ctx, new Path2D('M ' + (x - r * 0.74) + ' ' + (y - r * 0.2) + ' A ' + (r * 0.78) + ' ' + (r * 0.78) + ' 0 0 1 ' + (x - r * 0.14) + ' ' + (y - r * 0.76)), WHITE, w * 0.5, { a: 0.8, halo: 0.2, hot: 0.4 });
+    ctx.save(); ctx.beginPath(); ctx.arc(x, y, r * 0.97, 0, TAU); ctx.clip(); ctx.globalCompositeOperation = 'lighter';
+    if (ctx.createConicGradient) {
+      const cg = ctx.createConicGradient(2.4, x, y);
+      [RGB.cyan, RGB.violet, RGB.magenta, RGB.amber, RGB.cyan].forEach((c2, i) => cg.addColorStop(i / 4, rgba(hot(c2, 0.2), 0.2)));
+      ctx.lineWidth = r * 0.34; ctx.strokeStyle = cg; ctx.beginPath(); ctx.arc(x, y, r * 0.86, 0, TAU); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  const glyphNeon = (ctx, path, w, col, wk, a) => neon(ctx, path, hot(col, 0.5), w * wk, { a: a === undefined ? 1 : a, halo: 1.0, hot: 1 });
+  const arrowHead = (p, x, y, dx, dy, len, hw) => { p.moveTo(x - dx * len - dy * hw, y - dy * len + dx * hw); p.lineTo(x, y); p.lineTo(x - dx * len + dy * hw, y - dy * len - dx * hw); };
+
   def('pu_pink', 16, 16, 1, IPAD, 1.0, [8, 8], (ctx, o) => {
-    const w = o.w, col = PEARL_C.pink;
+    const w = o.w, col = PEARL_C.pink, cx = 8, cy = 8.2;
     puRing(ctx, w, col);
-    pearl(ctx, w, col, 8, 8.2, 4.1);
-    glint(ctx, 12.4, 3.2, 1.3, WHITE, 0.85);
+    glyphPearl(ctx, w, col, cx, cy, 4.7);
+    // RANGE: four arrows pointing outward (shaft from the hub, a bold open head at the pearl's inner edge)
+    const sh = new Path2D(), hd = new Path2D();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const tip = 3.55, hub = 0.85;
+      sh.moveTo(cx + dx * hub, cy + dy * hub); sh.lineTo(cx + dx * (tip - 0.5), cy + dy * (tip - 0.5));
+      arrowHead(hd, cx + dx * tip, cy + dy * tip, dx, dy, 1.25, 1.05);
+    }
+    glyphNeon(ctx, sh, w, col, 0.85); glyphNeon(ctx, hd, w, col, 1.0);
+    dot(ctx, cx, cy, 0.5, WHITE, 1, { halo: 2.6 });
+    glint(ctx, 12.8, 3.0, 1.2, WHITE, 0.85);
   });
   def('pu_blue', 16, 16, 1, IPAD, 1.0, [8, 8], (ctx, o) => {
-    const w = o.w, col = PEARL_C.blue;
+    const w = o.w, col = PEARL_C.blue, cx = 8, cy = 8.2;
     puRing(ctx, w, col);
-    // a tilted orbit band around the pearl (rapid fire): back half behind, front half over the pearl
-    const band = (a0, a1, a) => neon(ctx, poly(arcPts(8, 8.2, 5.8, 1.7, a0, a1, 18).map((p) => { const dx = p[0] - 8, dy = p[1] - 8.2, c = cos(-0.35), s = sin(-0.35); return [8 + dx * c - dy * s, 8.2 + dx * s + dy * c]; }), false), hot(col, 0.3), w * 0.65, { a, halo: 0.7, hot: 0.5 });
-    band(180, 360, 0.6);
-    pearl(ctx, w, col, 8, 8.2, 3.9);
-    band(0, 180, 1);
-    glint(ctx, 12.6, 3.4, 1.2, WHITE, 0.85);
+    glyphPearl(ctx, w, col, cx, cy, 4.7);
+    // RATE: a double chevron >> (rapid fire): two bold chevrons, the front one brighter
+    const ch = (x0, a) => { const p = new Path2D(); p.moveTo(x0 - 1.5, cy - 2.2); p.lineTo(x0 + 0.5, cy); p.lineTo(x0 - 1.5, cy + 2.2); glyphNeon(ctx, p, w, col, 1.25, a); };
+    ch(cx - 0.55, 0.62); ch(cx + 1.65, 1);
+    glint(ctx, 12.6, 3.2, 1.2, WHITE, 0.85);
   });
   def('pu_gold', 16, 16, 1, IPAD, 1.0, [8, 8], (ctx, o) => {
-    const w = o.w, col = PEARL_C.gold;
+    const w = o.w, col = PEARL_C.gold, cx = 8, cy = 8.2;
     puRing(ctx, w, col);
-    const rays = new Path2D();                          // a radiant pearl (speed): eight rays
-    for (let i = 0; i < 8; i++) { const a = i * TAU / 8 + 0.2, r0 = 5.0, r1 = i % 2 ? 5.8 : 6.3; rays.moveTo(8 + cos(a) * r0, 8.2 + sin(a) * r0); rays.lineTo(8 + cos(a) * r1, 8.2 + sin(a) * r1); }
-    neon(ctx, rays, hot(col, 0.3), w * 0.65, { a: 0.95, halo: 0.8, hot: 0.5 });
-    pearl(ctx, w, col, 8, 8.2, 3.9);
-    glint(ctx, 12.8, 3.0, 1.3, WHITE, 0.85);
+    glyphPearl(ctx, w, col, cx, cy, 4.7, 0.4);
+    // SPEED: a comet flying to the upper right: a big bright head, a tapered tail and two clean motion lines streaming behind it
+    ctx.save(); ctx.translate(cx + 0.3, cy + 0.1); ctx.rotate(-0.62);
+    const tail = new Path2D('M 1.0 -1.5 L -3.4 0 L 1.0 1.5 Z');
+    ctx.save(); ctx.globalCompositeOperation = 'lighter';
+    const tg = ctx.createLinearGradient(1.0, 0, -3.4, 0); tg.addColorStop(0, rgba(hot(col, 0.4), 0.95)); tg.addColorStop(1, rgba(col, 0.05));
+    ctx.fillStyle = tg; ctx.fill(tail); ctx.restore();
+    const ml = new Path2D();
+    ml.moveTo(-0.6, -3.1); ml.lineTo(-3.8, -3.1); ml.moveTo(-0.9, 3.1); ml.lineTo(-4.4, 3.1);
+    glyphNeon(ctx, ml, w, col, 0.9, 0.95);
+    ctx.save(); ctx.fillStyle = 'rgba(4,3,8,0.9)'; ctx.beginPath(); ctx.arc(2.25, 0, 2.15, 0, TAU); ctx.fill(); ctx.restore();      // dark ring: the head never melts into the tail
+    const head = circlePath(2.25, 0, 1.6);
+    ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = rgba(hot(col, 0.5), 0.98); ctx.fill(head); ctx.restore();
+    neon(ctx, head, hot(col, 0.3), w * 0.85, { halo: 0.7, hot: 0.8 });
+    fillAdd(ctx, circlePath(2.1, -0.2, 0.7), WHITE, 0.92);
+    ctx.restore();
+    glint(ctx, 12.8, 2.8, 1.2, WHITE, 0.85);
   });
   def('pu_parasol', 16, 16, 1, IPAD, 1.0, [8, 8], (ctx, o) => {
     const w = o.w, col = mixc(RGB.violet, RGB.magenta, 0.4);
@@ -1474,6 +1666,41 @@ const GFX_CAST = (() => {
     // orbiting sparkles
     for (let i = 0; i < 3; i++) { const a = ph + i * TAU / 3 + 0.5, rr = r + 4.2; sparkle(ctx, cx + cos(a) * rr, cy + sin(a) * rr * 0.9, 1.5 + 0.6 * sin(a * 2 + f), i === 1 ? hot(RGB.amber, 0.4) : WHITE, 0.95, a); }
   });
+
+  /* ---- V1 frozen: <e>_frozen, defined LAST so that GFX's warm-up (definition order) bakes the sprites a round needs first (same w / h / frames as <e>_move; Game draws it instead of the move frame while an enemy is frozen) --------------------------------
+   * The creature is cast in ice: its own silhouette in FROST (pale white-lilac), a milky frosted-glass body with straight ice facets, a rime contour with a thick
+   * white-hot core, a handful of ice shards growing out of it and crystalline twinkles. The BODY is the move frame 0 pose in every frame (frozen solid, it does not
+   * walk); only the twinkles change from frame to frame, so Game may step through the frames for a living glitter or just draw frame 0. */
+  const SHARDS = {            // per body plan: x, y (a point ON the silhouette), outward angle, length
+    nibbler: [[5.2, 4.7, -2.0, 2.3], [10.4, 4.5, -1.1, 2.1], [14.3, 10.2, -0.5, 2.0], [3.0, 12.0, 2.5, 1.9]],
+    crabbit: [[1.9, 10.4, 3.5, 2.3], [14.1, 10.4, -0.35, 2.3], [5.8, 6.7, -1.95, 1.9], [10.2, 6.7, -1.2, 1.9]],
+    jellop: [[2.1, 3.6, -2.7, 2.4], [13.9, 3.6, -0.45, 2.4], [8.0, 0.9, -1.57, 2.4], [4.6, 1.8, -2.1, 1.8]],
+    springle: [[5.2, 6.4, 2.9, 2.1], [10.9, 9.8, -0.3, 2.1], [8.4, 0.3, -1.4, 2.0], [12.6, 13.8, -0.2, 1.8]],
+    glimmer: [[4.2, 4.9, -2.0, 2.3], [8.6, 4.3, -1.35, 2.1], [12.2, 14.2, 0.9, 1.9], [2.4, 12.6, 2.6, 1.9]],
+  };
+  const TWINKLE = [[2.2, 2.4], [13.8, 1.8], [15.0, 8.2], [0.8, 8.6], [8.0, -0.2], [11.6, 14.8]];
+  function iceShard(ctx, x, y, ang, len, w) {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(ang);
+    const sh = poly([[0, 0], [len * 0.38, -len * 0.2], [len, 0], [len * 0.38, len * 0.2]], true);
+    fillDark(ctx, sh, 0.5); fillAdd(ctx, sh, FROST, 0.4);
+    neonN(ctx, sh, FROST, w * 0.55, { a: 0.95, halo: 0.6, hot: 0.9 });
+    neonN(ctx, poly([[len * 0.1, 0], [len * 0.9, 0]], false), WHITE, w * 0.3, { a: 0.8, halo: 0, hot: 0.5 });
+    ctx.restore();
+  }
+  function frozenFrame(ctx, type, o) {
+    const f = o.f, w = o.w;
+    glow(ctx, 8, 9, 10.5, FROST_BODY, 0.16);
+    o.ph = 0; o.u = 0;
+    creatureFrame(ctx, type, o, 'frozen', false);
+    for (const [x, y, a, l] of SHARDS[type]) iceShard(ctx, x, y, a, l, w);
+    TWINKLE.forEach(([x, y], i) => {
+      const t = ((f / 4) + i * 0.37) % 1, s = Math.pow(Math.max(0, sin(PI * t)), 1.6);
+      if (s < 0.04) return;
+      sparkle(ctx, x, y, 0.5 + 1.2 * s, i % 2 ? mixc(FROST, WHITE, 0.4) : WHITE, 0.45 + 0.55 * s, 0.35 * i + f * 0.3);
+    });
+  }
+  const FPAD = { l: 6, r: 6, t: 6, b: 5 }, FPAD_G = { l: 6, r: 8, t: 6, b: 5 };
+  for (const type of ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer']) def(type + '_frozen', 16, 16, 4, type === 'glimmer' ? FPAD_G : FPAD, ENEMY_S[type], [8, 16], (ctx, o) => frozenFrame(ctx, type, o));
 
   /* ---------------------------------------------------------------- done */
   return { count: names.length, names: names.slice(), art: { hero, heroIcon, kraken, bubble, creatureFrame, steamLoop, heatLoop } };

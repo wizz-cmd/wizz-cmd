@@ -18,6 +18,8 @@ let t, page;
 // ---- tiny assertion helpers ---------------------------------------------------------------------
 class Fail extends Error {}
 const ok = (c, msg) => { if (!c) throw new Fail(msg || 'assertion failed'); };
+// release-gate policy (FIXPLAN_V3): wall-clock budgets (tok) are advisory in the blocking run (FP_TIMING=advisory) and strict otherwise / in the perf step
+const tok = (c, msg) => { if (!c) { if (process.env.FP_TIMING === 'advisory') console.log('        ADVISORY MISS ' + msg); else throw new Fail(msg || 'assertion failed'); } };
 const eq = (a, b, msg) => { if (a !== b) throw new Fail(`${msg || 'eq'}: got ${JSON.stringify(a)}, expected ${JSON.stringify(b)}`); };
 const near = (a, b, tol, msg) => { if (!(Math.abs(a - b) <= tol)) throw new Fail(`${msg || 'near'}: got ${a}, expected ${b} +/- ${tol}`); };
 const ev = (fn, arg) => page.evaluate(fn, arg);
@@ -1533,10 +1535,10 @@ await test('22c reduced motion: no flashes, no trails, half the ambient particle
       for (let i = 0; i < 30; i++) T.step(1); GFX.draw = o; return { n: seen.length, distinct: [...new Set(seen)].length, min: Math.min(...seen) };
     };
     out.invReduced = alphas(true); out.invNormal = alphas(false);
-    const hurry = (reduced) => {
-      Game.setOptions({ reducedMotion: reduced }); T.arena({ level: 3, empty: true }); const S = T.S(); let n = 0; const o = GFX.text; S.hurryBanner = 100;
-      GFX.text = (c, str, ...rest) => { if (str === 'HURRY UP!') n++; return o.call(GFX, c, str, ...rest); };
-      for (let i = 0; i < 60; i++) T.step(1); GFX.text = o; return n;
+    const hurry = (reduced) => {          // v3 (G3): the banner never blinks on / off: it is drawn every frame and its alpha swells and dims smoothly (steady under reduced motion)
+      Game.setOptions({ reducedMotion: reduced }); T.arena({ level: 3, empty: true }); const S = T.S(); const al = []; const o = GFX.text; S.hurryBanner = 100;
+      GFX.text = (c, str, ...rest) => { if (str === 'HURRY UP!') al.push(+c.globalAlpha.toFixed(4)); return o.call(GFX, c, str, ...rest); };
+      for (let i = 0; i < 60; i++) T.step(1); GFX.text = o; return { n: al.length, distinct: [...new Set(al)].length, min: Math.min(...al), max: Math.max(...al) };
     };
     out.hurryReduced = hurry(true); out.hurryNormal = hurry(false);
     Game.setOptions({ reducedMotion: false, quality: 2 });
@@ -1546,7 +1548,8 @@ await test('22c reduced motion: no flashes, no trails, half the ambient particle
   eq(r.ambientStatReduced, 40, 'ambient count halved (80 -> 40)'); eq(r.ambientReduced, 40, 'ambient drawn halved'); eq(r.ambientFull, 80, 'full ambient count is 80 at quality 2');
   eq(r.ghostsReduced, 0, 'no trails under reduced motion'); ok(r.ghostsFull > 0, 'trails exist at quality 2 (' + r.ghostsFull + ')'); eq(r.ghostsQ0, 0, 'no trails at quality 0');
   ok(r.invReduced.distinct === 1 && r.invReduced.min > 0.4, 'invulnerable player: steady alpha under reduced motion ' + JSON.stringify(r.invReduced)); ok(r.invNormal.distinct > 1, 'invulnerable player blinks normally ' + JSON.stringify(r.invNormal));
-  eq(r.hurryReduced, 60, 'HURRY UP! text is steady under reduced motion (every frame)'); ok(r.hurryNormal > 0 && r.hurryNormal < 60, 'HURRY UP! blinks normally (' + r.hurryNormal + ' of 60 frames)');
+  eq(r.hurryReduced.n, 60, 'HURRY UP! text is steady under reduced motion (every frame)'); eq(r.hurryReduced.distinct, 1, 'and its alpha does not change ' + JSON.stringify(r.hurryReduced));
+  ok(r.hurryNormal.n === 60 && r.hurryNormal.distinct > 5 && r.hurryNormal.min >= 0.55 && r.hurryNormal.max <= 1, 'HURRY UP! pulses smoothly (drawn every frame, alpha ' + JSON.stringify(r.hurryNormal) + ')');
 });
 
 await test('22d quality levels: ambient 40 / 56 / 80, trails and motes only at quality >= 1, particle cap per level, bounds hold under chain spam', async () => {
@@ -1598,18 +1601,21 @@ await test('22e cosmetic effects: every pop gets a shockwave ring, kills get spa
     T.render(); GFX.draw = o; out.angryCalls = calls;
     // frozen: GFX.draw gets a tint, sparkles come from GFX.particle('spark')
     T.arena({ level: 12, empty: true }); S = T.S(); Game.debug.spawn('jellop', 120, 100); const j = S.enemies[S.enemies.length - 1]; j.state = 'frozen'; j.freezeT = 200;
-    const tints = [], sparks = []; const o2 = GFX.draw, p2 = GFX.particle;
-    GFX.draw = (cx, n, f, x, y, opt) => { if (n.startsWith('jellop') && opt && opt.tint) tints.push(opt.tint); return o2.call(GFX, cx, n, f, x, y, opt); };
+    const tints = [], sparks = [], iceDraws = []; const o2 = GFX.draw, p2 = GFX.particle; out.hasIce = GFX.has('jellop_frozen');
+    GFX.draw = (cx, n, f, x, y, opt) => { if (n.startsWith('jellop') && opt && opt.tint) tints.push(opt.tint); if (n === 'jellop_frozen') iceDraws.push(1); return o2.call(GFX, cx, n, f, x, y, opt); };
     GFX.particle = (cx, kind, ...rest) => { if (kind === 'spark') sparks.push(1); return p2.call(GFX, cx, kind, ...rest); };
     for (let i = 0; i < 10; i++) T.step(1); GFX.draw = o2; GFX.particle = p2;
-    out.tints = tints.length; out.tintColour = tints[0]; out.sparks = sparks.length;
+    out.tints = tints.length; out.tintColour = tints[0]; out.sparks = sparks.length; out.iceDraws = iceDraws.length;
     return out;
   });
   ok(r.bubbleDead && r.ringsAfterPop >= 1, 'a popped bubble spawns a shockwave ring (' + r.ringsAfterPop + ')');
   ok(r.burstParts >= 8 && /dot/.test(r.kinds) && /ring/.test(r.kinds) && /spark/.test(r.kinds), 'a kill spawns a ring + spark / dot burst: ' + r.burstParts + ' parts (' + r.kinds + ')');
   eq(r.ghostsStill, 0, 'no trail ghosts while standing still'); ok(r.ghostsMoving > 0, 'trail ghosts while moving (' + r.ghostsMoving + ')');
   eq(r.angryCalls.length, 1, 'angry crabbit: one sprite draw, no aura copies: ' + JSON.stringify(r.angryCalls)); ok(!r.angryCalls[0].white, 'and no white silhouette');
-  ok(r.tints >= 8 && /^#[0-9a-f]{6}$/i.test(r.tintColour), 'frozen enemy drawn with a #rrggbb tint (' + r.tints + ' draws, ' + r.tintColour + ')'); ok(r.sparks >= 8, 'frozen sparkles via GFX.particle spark (' + r.sparks + ')');
+  // v3 (V1): with the cast's <e>_frozen ice sprite the frozen enemy is drawn with that (plain); without it (the stub registry) the tint recipe is used
+  if (r.hasIce) ok(r.iceDraws >= 8 && r.tints === 0, 'frozen enemy drawn as the <e>_frozen ice cast (' + r.iceDraws + ' draws)');
+  else ok(r.tints >= 8 && /^#[0-9a-f]{6}$/i.test(r.tintColour), 'frozen enemy drawn with a #rrggbb tint (' + r.tints + ' draws, ' + r.tintColour + ')');
+  ok(r.sparks >= (r.hasIce ? 6 : 8), 'frozen glints via GFX.particle spark (' + r.sparks + ')');
 });
 
 await test('22f item glow pulse: food / power-ups get a pulsing glow (alpha varies), the pearl too', async () => {
@@ -1644,11 +1650,13 @@ await test('22h chain light: a long chain of kills adds light pools and rate-lim
     const T = __t; Game.setOptions({ quality: 2, reducedMotion: false }); T.arena({ level: 3, empty: true }); Game.debug.god(true); const S = T.S();
     for (let i = 0; i < 8; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer'][i % 5], 40 + i * 20, 110); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; }
     Game.debug.give(0, 'bomb'); T.step(1);
-    const pools = S.parts.filter((q) => q.k === 'dot' && q.s0 >= 2.5 && q.vx === 0 && q.vy === 0).length;
+    const pools = S.parts.filter((q) => q.lt === 1), poolCols = [...new Set(pools.map((q) => q.col))];
     const f = Game.debug.flash();
-    return { pools, alpha: f.alpha, col: f.col, cool: f.cool };
+    return { pools: pools.length, poolCols, alpha: f.alpha, col: f.col, cool: f.cool, poolMax: Game.debug.fxStats().light.poolMax };
   });
-  ok(r.pools >= 1, 'chain kills spawn light pools (' + r.pools + ')'); ok(r.alpha > 0 && r.alpha <= 0.12 + 1e-9, 'a faint wash (' + r.alpha + ')'); ok(r.cool > 0 && r.cool <= 20, 'flash cooldown armed (' + r.cool + ')');
+  // v3 (V6): FEW small pools, all in the chain OWNER's colour (player 1 = magenta), and the wash is tinted the same
+  ok(r.pools >= 1 && r.pools <= r.poolMax, 'chain kills spawn a few light pools (' + r.pools + ', max ' + r.poolMax + ')'); eq(r.poolCols.join(), '#ff3ea5', 'pools are in the owner colour'); eq(r.col, '#ff3ea5', 'the wash is in the owner colour');
+  ok(r.alpha > 0 && r.alpha <= 0.12 + 1e-9, 'a faint wash (' + r.alpha + ')'); ok(r.cool > 0 && r.cool <= 20, 'flash cooldown armed (' + r.cool + ')');
 });
 
 await test('22i fallbacks: without GFX.particle / levelGlints / tint support the game still renders everything (no throw)', async () => {
@@ -1696,9 +1704,9 @@ await test('22j render + update cost in a busy scene (40 bubbles, 8 enemies, cha
     return out;
   });
   for (const k of ['busy q2', 'busy q1', 'busy q0', 'busy+chain q2']) console.log('        ' + k.padEnd(14) + 'update ' + r[k].upd + ' ms, render avg ' + r[k].rend + ' ms (median ' + r[k].rendMed + ', max ' + r[k].rendMax + ')  [k=' + (REAL_MODE ? 3 : 1) + ', software raster]');
-  ok(r['busy q2'].upd < 0.6, 'update avg ' + r['busy q2'].upd + ' ms (< 0.6)');
+  tok(r['busy q2'].upd < 0.6, 'update avg ' + r['busy q2'].upd + ' ms (< 0.6)');
   // the render gate only means something with the real art at k=3; the budget is for THIS container's CPU rasteriser (SPEC_V2 sec. 5 gates the full frame on real hardware)
-  if (REAL_MODE) { ok(r['busy q2'].rendMed <= 6, 'busy render median ' + r['busy q2'].rendMed + ' ms (<= 6 on the CPU raster)'); ok(r['busy+chain q2'].rendMed <= 14, 'busy + chain render median ' + r['busy+chain q2'].rendMed + ' ms (<= 14)'); ok(r['busy q1'].rendMed <= r['busy q2'].rendMed + 1 && r['busy q0'].rendMed <= r['busy q1'].rendMed + 1, 'lower quality is not slower'); }
+  if (REAL_MODE) { tok(r['busy q2'].rendMed <= 6, 'busy render median ' + r['busy q2'].rendMed + ' ms (<= 6 on the CPU raster)'); tok(r['busy+chain q2'].rendMed <= 14, 'busy + chain render median ' + r['busy+chain q2'].rendMed + ' ms (<= 14)'); tok(r['busy q1'].rendMed <= r['busy q2'].rendMed + 1 && r['busy q0'].rendMed <= r['busy q1'].rendMed + 1, 'lower quality is not slower'); }
 });
 
 await test('22k render fuzz: every phase (intro, play, clear, transition, extend, gameover, victory, boss fight / trapped / pearl) x quality 0-2 x reduced motion renders every frame without errors', async () => {
@@ -1764,8 +1772,8 @@ await test('11 soak: 20000 frames of random input over many rounds, god mode: no
   ok(r.max.bubbles <= 60, 'bubbles bounded ' + r.max.bubbles); ok(r.max.enemies <= 20, 'enemies bounded ' + r.max.enemies);
   ok(r.max.proj <= 80 && r.max.fx <= 160 && r.max.popups <= 60, 'proj/fx/popups bounded'); ok(r.max.parts <= r.partCap, 'cosmetic particles bounded ' + r.max.parts + ' <= ' + r.partCap);
   ok(r.flashMax <= 0.12 + 1e-9, 'flash cap held for 20000 frames');
-  ok(r.avg < 0.6, 'avg update time ' + r.avg);
-  if (REAL_MODE) ok(r.rend < 9, 'sampled render avg ' + r.rend + ' ms (CPU raster, k=3)'); else ok(r.rend < 3, 'sampled render avg ' + r.rend);
+  tok(r.avg < 0.6, 'avg update time ' + r.avg);
+  if (REAL_MODE) tok(r.rend < 9, 'sampled render avg ' + r.rend + ' ms (CPU raster, k=3)'); else tok(r.rend < 3, 'sampled render avg ' + r.rend);
   ok(!r.nan[0] && !r.nan[1], 'no NaN positions');
   const u = await ev(() => __t.unknown());
   ok(!u.sprites.length && !u.sfx.length && !u.music.length, 'only contract names used: ' + JSON.stringify(u));

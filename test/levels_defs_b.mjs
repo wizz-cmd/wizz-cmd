@@ -61,8 +61,8 @@ export const ROUNDS_B = [
   },
   // ------------------------------------------------------------------------------------------ 14
   {
-    name: 'Cargo Tetris',
-    concept: 'asymmetric cargo pile built from 2x-scaled tetrominoes; every piece is 2 or 4 rows tall, gaps of 2-4 columns',
+    name: 'Cargo Stack',
+    concept: 'asymmetric cargo pile built from 2x-scaled four-block pieces; every piece is 2 or 4 rows tall, gaps of 2-4 columns',
     gaps: [],
     build(m) {
       // floor layer
@@ -89,7 +89,7 @@ export const ROUNDS_B = [
   },
   // ------------------------------------------------------------------------------------------ 15
   {
-    name: 'Skull and Bones',
+    name: 'Bone Reef',
     concept: 'pictogram: a pirate skull over crossed bones - sockets, nose and teeth are cut out; end-of-ship challenge',
     gaps: [],
     build(m) {

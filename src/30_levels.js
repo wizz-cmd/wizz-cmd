@@ -53,8 +53,8 @@
  *   11  Anchor                 Springle debut: a ship anchor - ring, stock, shank and curved arms; two bowls for the bouncers
  *   12  Ship's Wheel           pictogram: a helm with rim, hub, eight spokes and handles; rim top and hub are the stages
  *   13  Galleon                pictogram: a sailing ship - hull, bow, two masts whose yards form a ladder of 4-row steps; docks and fenders on both sides
- *   14  Cargo Tetris           asymmetric cargo pile built from 2x-scaled tetrominoes; every piece is 2 or 4 rows tall, gaps of 2-4 columns
- *   15  Skull and Bones        pictogram: a pirate skull over crossed bones - sockets, nose and teeth are cut out; end-of-ship challenge
+ *   14  Cargo Stack            asymmetric cargo pile built from 2x-scaled four-block pieces; every piece is 2 or 4 rows tall, gaps of 2-4 columns
+ *   15  Bone Reef              pictogram: a pirate skull over crossed bones - sockets, nose and teeth are cut out; end-of-ship challenge
  *   16  Crystal Cavern         Glimmer debut: stalagmites, hanging stalactites that shield from sparks, flat-topped crystals floating between
  *   17  Great Diamond          pictogram: a cut diamond outline - table, girdle bar, V-shaped pavilion with facet shelves inside
  *   18  Sky Loop               wrap-around round: the top tiers sit 7 rows above the lower world - ride the floor gaps (or bubble-bounce) to get up, walk off the ledges to come down
@@ -655,10 +655,10 @@ const LEVELS = [
     boss: false,
   },
 
-  // ---- Round 14: Cargo Tetris (Sunken Ship) --------------------------------------------------
-  // asymmetric cargo pile built from 2x-scaled tetrominoes; every piece is 2 or 4 rows tall, gaps of 2-4 columns
+  // ---- Round 14: Cargo Stack (Sunken Ship) ---------------------------------------------------
+  // asymmetric cargo pile built from 2x-scaled four-block pieces; every piece is 2 or 4 rows tall, gaps of 2-4 columns
   {
-    name: 'Cargo Tetris',
+    name: 'Cargo Stack',
     map: [
       '################################',  // row 0
       '##............................##',
@@ -701,10 +701,10 @@ const LEVELS = [
     boss: false,
   },
 
-  // ---- Round 15: Skull and Bones (Sunken Ship) -----------------------------------------------
+  // ---- Round 15: Bone Reef (Sunken Ship) -----------------------------------------------------
   // pictogram: a pirate skull over crossed bones - sockets, nose and teeth are cut out; end-of-ship challenge
   {
-    name: 'Skull and Bones',
+    name: 'Bone Reef',
     map: [
       '################################',  // row 0
       '##............................##',

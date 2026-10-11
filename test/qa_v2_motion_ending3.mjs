@@ -1,0 +1,10 @@
+import { setup, OUT, save } from './qa_v2_motion_lib.mjs';
+const { t, g, page } = await setup();
+await g.goto('ending', { entries: [], res: { won: true, level: 30, scores: [123400, 0], players: 1 } });
+const grab = async (label) => { await page.evaluate((l) => QA.push(0, 0, 256, 224, l), label); };
+await page.evaluate(() => QA.reset());
+await g.step(537); await grab('f537'); await g.step(1); await grab('f538'); await g.step(1); await grab('f539 (cut)'); await g.step(2); await grab('f541');
+await g.step(533); await grab('f1074'); await g.step(1); await grab('f1075'); await g.step(1); await grab('f1076 (cut)'); await g.step(3); await grab('f1079');
+const url = await page.evaluate(() => QA.sheet({ cols: 4, scale: 0.5, smooth: true }));
+save(`${OUT}/ending/hard_cuts.png`, url);
+await t.close();

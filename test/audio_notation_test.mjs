@@ -148,6 +148,29 @@ const C4 = '| Em | C | G | D |';
   const c = AUDIO._define('demo_t_cfg', { kind: 'jingle', bpm: 120, lanes: { pad: { inst: 'pad', cut: 1500 } }, sections: { S: { chords: '| Em |', p: { pad: 'hold' }, cfg: { pad: { cut: 3000 } } } }, order: ['S'] });
   check('cfg: section cfg overrides instrument params', c.length === 0);
 }
+// ---------------------------------------------------------------------------------------------------------------- alt: second-pass versions of loop sections (FIXPLAN_V3 A8)
+{
+  const lanes = { lead: { inst: 'lead' }, bell: { inst: 'bell' }, twang: { inst: 'twang' }, pad: { inst: 'pad', duck: 0.5 } };
+  const sec = { chords: '| Em | C |', p: { pad: 'hold', lead: '| e5/4 g5/4 b5/8 | c6/8 e6/8 |', drums: 'K...s...K...s... K...s...K...s...' },
+    alt: { p: { bell: '| r/8 b5/4 e6/4 | r/16 |', drums2: 'h.h.h.h.h.h.h.h. ................' }, dbl: { lead: { semi: 12, to: 'twang', vel: 0.5, bars: [1, 1] } }, mix: { pad: 0.5 } } };
+  const r = song(lanes, sec, { kind: 'loop' });
+  const e0 = AUDIO._events(r.name, 0), e1 = AUDIO._events(r.name, 1), odd = e1.filter((e) => e.o === 1), even = e0.filter((e) => e.o === 0);      // _events(name, pass): the events that sound on that pass
+  check('alt: compiles clean in a loop, original events stay unflagged, the second-pass additions are flagged odd-only', r.issues.length === 0 && odd.length > 0 && e0.every((e) => e.o !== 1) && e1.every((e) => e.o !== 0), r.issues);
+  check('alt: new lane (bell) and a new drum grid (hats) sound only on odd passes', odd.some((e) => e.lane === 'bell') && odd.some((e) => e.lane === 'hats') && !e0.some((e) => e.lane === 'bell' || e.lane === 'hats') && e1.some((e) => e.lane === 'bell'), odd.map((e) => e.lane));
+  const dbl = odd.filter((e) => e.k === 'n' && e.lane === 'twang');
+  check('alt: dbl copies the lead notes of bar 1 an octave up onto another lane at half velocity (bars range respected)', dbl.length === 3 && dbl[0].m[0] === 76 + 12 && dbl[1].m[0] === 79 + 12 && dbl[2].m[0] === 83 + 12 && Math.abs(dbl[0].vel - 0.5) < 1e-9 && dbl.every((e) => e.step < 16), dbl.map((e) => [e.step, e.m, e.vel]));
+  check('alt: `mix` is merged over the section mix for the second version (pad 0.5 on odd passes, 1 on even passes)', Math.abs(e1.find((e) => e.k === 'n' && e.lane === 'pad').vel - 0.5) < 1e-9 && Math.abs(e0.find((e) => e.k === 'n' && e.lane === 'pad').vel - 1) < 1e-9 && even.some((e) => e.lane === 'pad') && odd.some((e) => e.lane === 'pad'), [e0.find((e) => e.lane === 'pad'), e1.find((e) => e.lane === 'pad')]);
+  check('alt: identical drum events of both versions are kept once, unflagged (kick + snare of the groove)', e0.filter((e) => e.lane === 'kick').length === 4 && e1.filter((e) => e.lane === 'kick').length === 4 && e1.filter((e) => e.lane === 'kick').every((e) => e.o === undefined));
+  check('alt: _dump exposes the second-pass notes and _info the altered sections', r.dump.altNotes.length >= 4 && AUDIO._info(r.name).altSections.length === 1 && AUDIO._info(r.name).altSections[0].name === 'S', r.dump.altNotes);
+  const jg = song(lanes, sec, { kind: 'jingle' });
+  check('alt: not allowed in a jingle (reported)', jg.issues.some((x) => /alt only makes sense/.test(x)), jg.issues);
+  const same = song(lanes, Object.assign({}, sec, { alt: { mix: { pad: 1 } } }), { kind: 'loop' });
+  check('alt: a version identical to the original is reported', same.issues.some((x) => /identical/.test(x)), same.issues);
+  const badk = song(lanes, Object.assign({}, sec, { alt: { p: { bell: '| r/16 | r/16 |' }, nope: 1 } }), { kind: 'loop' });
+  check('alt: an unknown key is reported', badk.issues.some((x) => /unknown key/.test(x)), badk.issues);
+  const badd = song(lanes, Object.assign({}, sec, { alt: { dbl: { lead: { semi: 12, to: 'ghost_lane' } } } }), { kind: 'loop' });
+  check('alt: dbl onto an undeclared lane is reported', badd.issues.some((x) => /dbl|undeclared/.test(x)), badd.issues);
+}
 // ---------------------------------------------------------------------------------------------------------------- render a feature song in the browser
 const feature = {
   kind: 'loop', bpm: 120, swing: 0.5, key: 4, mode: [0, 2, 3, 5, 7, 8, 10], echo: 3, fb: 0.4, gain: 1,

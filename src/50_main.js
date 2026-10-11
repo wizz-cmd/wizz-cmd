@@ -1,5 +1,24 @@
 /* FIZZ & POP v2.0 — 50_main.js  (Platform / UX layer, SPEC 2.5 + 3.5, SPEC_V2 sec. 1 + 3: "Abyss Glow")
  *
+ * v3 (FIXPLAN_V3 Main: U1..U16, V2..V5, V11) — what changed in this file:
+ *   LADDER (U1)   The auto quality ladder is driven by the interval the player sees (rAF to rAF: JS + canvas raster + commit), not by the callback's own cost. R = the calm
+ *                 frame period (the shortest recent interval, >= one fixed step; the display refresh is measured at boot so a 30 Hz power-saving display is not "late"); a frame
+ *                 later than 1.45 R counts as `dt - 0.25 R` (autoQ.feed), a window drops when its average is > 12 ms OR one frame in ten is late, and a raise needs cheap AND on-time
+ *                 frames (no frame > 50 ms, <= 2 % late) in a GAMEPLAY window (menus / pause never raise). A drop soon after a raise doubles the wait on every path (fast path too).
+ *                 The first 90 updates of a scene are ignored (its sprites bake then).
+ *   LOOP (U2, U3) At most one render per fixed update (a 120 / 144 Hz display costs what 60 Hz does); static scenes render rarely: the idle title (after its intro), how-to and scores
+ *                 at 20 fps, a paused game at 15 fps and not at all behind the click-to-resume overlay or while the page is not live; input / resize / toast / focus change /
+ *                 scene change mark the frame dirty and render at once (and the scene stays at full rate for 40 updates after an input). See renderEvery(), frameStats().
+ *   CALIBRATION (U4) finishBoot() runs a <= 400 ms micro-benchmark (full-frame additive blits of a 512 x 448 canvas, read-back to wait for the raster / GPU, best of 4) and starts at
+ *                 the quality / k that the prediction (CAL_RATIO x blit x (k/2)^2, fitted on the CPU-raster VM) says fits CAL_BUDGET_MS: phones at once, desktops only when far
+ *                 over budget. __fizzpop._main.calibration() reports it; the ladder fine-tunes from there.
+ *   ENDING (U5, U6, V5) section changes (tableau -> credits -> finale -> entry) dissolve through the abyss colour over ~30 frames (no hard cut, no one-frame luminance drop);
+ *                 light rays / the warm wash cost by quality (28 / 14 / 6 wedges; the wash fills only its visible 55 %); ambient and celebration bubbles keep out of the text zones.
+ *   UX (U8..U16, V3, V4) compact click-to-play overlay (the title draws no menu behind it; the attract run waits; the first click lands on the title; a key that wakes the overlay is
+ *                 spent on that), pre-script CSS that matches the final layout, every touch row >= 44 css px (secondary rows pair up when the list would not fit), pad labels that
+ *                 scale with the button, a 44 css px BACK plate (+ a dead band above it) on the touch how-to, text >= 7 css px caps on phones, one score format, a title without help
+ *                 lines (one footer line), a portrait phone with the picture + PAUSE strip centred above the pads. Fizz and Pop at 3x come from GFX.drawHero (V11).
+ *
  * Boot, canvas / DPR handling, post FX + auto quality, input (keyboard / gamepad / touch / virtual), the fixed-step loop,
  * every non-gameplay scene, hi-scores, pause, mute, focus overlay and the window.__fizzpop hooks.
  *
@@ -20,7 +39,7 @@
  *          half the ambient bubbles / plankton. Photosensitivity: no scene flashes the whole screen brighter than 12 % alpha (the story's single
  *          pearl-grab flash is capped at 12 % and absent with reduced motion); Main blinks nothing faster than 2 Hz.
  *   Cost    The backdrop of a scene (water, tower shaft, crystal ledges) is painted once per scale into a static layer and copied 1:1; the glass-tube
- *          logo is refreshed every 3rd frame; Fizz and Pop at 2.4x on the title / ending are baked by Main (bigHeroes) from the cast's own art.
+ *          logo is refreshed every 3rd frame; Fizz and Pop on the title / ending come from GFX.drawHero (GFX bakes and caches them).
  *          LOADING: the very first paint (at the final resolution) is a LOADING frame, before GFX.init and the first scene's bakes.
  *
  * SCENES   title -> (story ->) play -> [ending] -> entry -> scores -> title
@@ -89,7 +108,7 @@
  *          plus non-contract extras under `_main` (layout, fit, paused, setPaused, holds, scores, resetScores, session, toast,
  *          touchMode, touchOnly, sceneTime, entry, padSlots, rows, confirmQuit, ambient, ambientReset, endingBand, howtoPage,
  *          persistent) and the v2 ones: k(), scaleLog(), quality(), setQuality(q, lock), autoQuality(), autoQualityFeed(costMs, dtMs),
- *          autoQualityReset(), reducedMotion(), setReducedMotion(b | null), options(), perf(), renderNow(), bigHeroes(); __fizzpop.quality
+ *          autoQualityReset(), reducedMotion(), setReducedMotion(b | null), options(), perf(), renderNow(), bigHeroes(), frameStats(), calibration(), invalidate(), howtoNav(); __fizzpop.quality
  *          (getter), __fizzpop.bootMs (getter, -1 until the first title paint), __fizzpop.loadingMs (the LOADING frame) and __fizzpop.bootProfile
  *          (ms per boot phase). layout() additionally carries k, snapped, backW, backH.
  *          Every hook finishes the boot on first use. goto('pause') pauses a running game; input.set() additionally accepts
@@ -117,9 +136,20 @@ const Main = (() => {
   // after the same calm period + anti-flap wait as the quality levels. Severe overload (a 0.4 s window of >= 5 frames whose MEDIAN cost is > 24 ms: one hitch is not overload)
   // steps down immediately instead of waiting for a 2 s window, and the lever jumps straight to the k whose predicted cost (~ k^2) is back under 12 ms, so the ladder settles in ~2-3 s.
   const Q_SEVERE_MS = 24, Q_FAST_WINDOW_MS = 400, Q_FAST_MIN_FRAMES = 5, K_CAP_MIN = 1.5, K_CAP_STEP = 0.8, Q_SKIP_FRAMES = 3;
+  // v3 (FIXPLAN_V3 Main, U1 / U2 / U3 / U4): the ladder is driven by what the player SEES. The rAF callback's own cost (update + render + post FX) leaves out the canvas raster / commit
+  // that the browser does after it (up to 90 % of a frame on a software rasteriser), so every frame that arrives late counts with its real interval: `eff = dt - 0.25 R` when dt > 1.45 R
+  // (R = the calm frame period: the shortest recent interval, never below one fixed step and never above the display's refresh measured at boot).
+  const LATE_RATIO = 1.45, LATE_SHARE = 0.25, R_WIN = 120, R_MAX_DEFAULT = 17.5, Q_LATE_FRAC = 0.1;
+  const SCENE_SETTLE = 90;           // updates after a scene change that the ladder ignores: the first frames of a scene bake its sprites (a one-off hitch, not load)
+  const STATIC_EVERY = 3;            // updates per render in static scenes (how-to, scores, the idle title): 20 fps (U3)
+  const PAUSE_EVERY = 4;             // ... the paused game: 15 fps, and none at all while the click-to-resume overlay is up or the page is not live
+  const TITLE_SETTLE = 90, ACTIVE_GRACE = 40;   // the title runs at full rate for 1.5 s after its intro and for 40 updates after any input
+  // start-up calibration (U4): a micro-benchmark of full-frame additive blits on the real raster path (CPU raster or GPU) predicts the busy-frame cost of every ladder state
+  const CAL_REF_W = 512, CAL_REF_H = 448, CAL_BUDGET_MS = 11.5, CAL_FINE_SLACK = 4, CAL_MAX_MS = 400, CAL_RATIO = [5, 9.5, 15];   // ratio of a busy frame to one full-frame blit, per quality 0 / 1 / 2 (measured 2.5..4.9 / 5.7..8.8 / 10..15 on the CPU-raster VM, k 2..8, 1x..6x throttle)
   const STALL_MS = 700;              // no rAF for this long (iframe hidden / throttled) = the page is not live
   const TOUCH_ROW_CSS = 44;          // minimum tappable menu row height in css px
-  const PILL_H = 44, ROW_GAP = 10, CTRL_PAD = 8, BTN_GAP = 8, PAD_SPREAD = 16, BTN_MAX_W = 92, BTN_MAX_H = 150;
+  const PILL_H = 44, ROW_GAP = 10, CTRL_PAD = 8, BTN_GAP = 8, PAD_SPREAD = 16, BTN_MAX_W = 92, BTN_MAX_H = 220;   // (v3 V4: taller pads on tall phones: fewer empty pixels)
+  const GAP_TOP_SHARE = 0.5;         // portrait: this share of the free height above the controls goes over the picture, the rest between picture and controls
   const LAND_MIN_VW = 560;           // landscape side pads need at least this much width
   const IDLE_FRAMES = 10 * C.FPS;    // title idle time before the attract cycle
   const STORY_FRAMES = 6 * C.FPS;    // story intro before play (the last, gold rules line is typed by frame ~214: >= 2 s to read it)
@@ -137,6 +167,7 @@ const Main = (() => {
   const TOAST_FRAMES = 100;
   const FAIL_LIMIT = 90;
   const PAD_SOUND_HINT = 45;          // frames of "audio not running" before TAP FOR SOUND shows
+  const FADE_IN_FRAMES = 16;          // a scene entered from the ending fades in from the abyss colour over this many updates
 
   // Abyss palette (concepts/c_abyss_glow/palette.json): cyan = Pop / 2UP / text, magenta = Fizz / 1UP, amber = HI SCORE / highlights,
   // ember = warnings, lime = OK, white-hot = the brightest few percent. Text greys are cool cyan tints (never neutral grey).
@@ -183,9 +214,11 @@ const Main = (() => {
   let booted = false, bootDone = false, frozen = false, paused = false, pauseSel = 0, confirmQuit = false, autoPaused = false;
   let scene = 'title', sceneT = 0, sceneArgs = null;
   let acc = 0, last = 0, lastRaf = 0, failStreak = 0;
+  let dirty = true, sinceRender = 0, activeUntil = 0, pendingSpan = 0, lastRenderAt = 0, calib = null, refreshMs = 0;   // render gating (U2 / U3), boot measurements (U1 / U4)
+  const frameStats = { rafs: 0, renders: 0, updates: 0, skippedDup: 0, skippedStatic: 0 };
   let touchMode = false, touchSeen = false, coarse = false, keyboardSeen = false, padSeen = false;
   let audioSynced = false, focusDismissed = false, deadAudioT = 0;
-  let toastMsg = '', toastT = 0, toastColor = COL.gold;
+  let toastMsg = '', toastT = 0, toastColor = COL.gold, fadeIn = 0;
   let pointerEvt = null;
   let layout = { scale: 0, w: 0, h: 0, vw: 0, vh: 0, touch: false, land: false, mode: 'desk', sharp: false, m: 1, k: 1, dpr: 1 };
   const holds = new Set();                              // reasons the page is not live: blur, hidden, offscreen, stall
@@ -284,55 +317,20 @@ const Main = (() => {
   const rgba = (r, g, b, a) => 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(3) + ')';
 
   // ---------------------------------------------------------------------------------------------------
-  // Big heroes (title, ending): Fizz and Pop at 2-3x the game size. The registry sprites are baked for 1x and would blur when scaled up, so
-  // Main bakes these few frames itself, from the cast's own art (GFX_CAST.art.hero), at the current render scale. Falls back to the registry
-  // sprite (normal size) when that art is not there (stub builds). The cache is bounded (pixels) and dropped whenever the scale changes.
+  // Big heroes (title, ending): Fizz and Pop at 2-3x the game size. GFX bakes and caches them (GFX.drawHero, v3 V11: Main never reaches into the cast's art); on a GFX without
+  // drawHero (the stub modules of some tests) the registry sprite is drawn at its normal size instead.
   // ---------------------------------------------------------------------------------------------------
   const bigHeroes = (() => {
-    const cache = new Map();
-    const HS = { p1: 1.1, p2: 1.1 * 0.97 };                 // the art scale GFX_CAST gives each twin (about the bottom centre)
-    const PAD = { l: 7, r: 6, t: 7, b: 4 };                 // light margin around the 16 x 16 box, in box units
-    const MAX_PX = 5e6, BAKE_K = 5;
-    let px = 0;
-    const artFn = () => (typeof GFX_CAST !== 'undefined' && GFX_CAST && GFX_CAST.art && typeof GFX_CAST.art.hero === 'function' && typeof NEON !== 'undefined' ? GFX_CAST.art.hero : null);
-    function clear() { for (const e of cache.values()) { e.cv.width = 1; e.cv.height = 1; } cache.clear(); px = 0; }
-    function bake(who, pose, f, nf, S, kb) {
-      const art = artFn();
-      if (!art) return null;
-      const key = who + '|' + pose + '|' + f + '/' + nf + '|' + S + '|' + kb;
-      let e = cache.get(key);
-      if (e) { cache.delete(key); cache.set(key, e); return e; }
-      const w = Math.ceil((16 + PAD.l + PAD.r) * S * kb), h = Math.ceil((16 + PAD.t + PAD.b) * S * kb);
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      const g = cv.getContext('2d');
-      const k = kb * S, hs = HS[who === 'pop' ? 'p2' : 'p1'];
-      g.setTransform(k, 0, 0, k, PAD.l * S * kb, PAD.t * S * kb);
-      g.translate(8, 16); g.scale(hs, hs); g.translate(-8, -16);
-      const o = { pose, ph: Math.PI * 2 * f / nf, f, w: NEON.lwFor(k * hs), big: k * hs > 7.5, name: who + '_' + pose, k, S: hs, box: { w: 16, h: 16 } };
-      try { art(g, who, o); } catch (err) { reportError('bigHero ' + who + ' ' + pose, err); }
-      e = { cv, w, h, l: PAD.l * S, t: PAD.t * S, kb };
-      cache.set(key, e); px += w * h;
-      while (px > MAX_PX && cache.size > 1) { const k0 = cache.keys().next().value; const o0 = cache.get(k0); px -= o0.cv.width * o0.cv.height; o0.cv.width = 1; o0.cv.height = 1; cache.delete(k0); }
-      return e;
-    }
+    let calls = 0;
     /** who 'fizz' | 'pop'; (cx, by) = bottom centre of the 16 x 16 box in logical px; S = size factor; frame f of nf (loop phase). */
     function draw(who, pose, f, nf, cx, by, S, flip, alpha) {
-      const kb = Math.min(K, BAKE_K), e = bake(who, pose, f, nf, S, kb);
-      if (!e) {
-        const name = (who === 'pop' ? 'p2_' : 'p1_') + (pose === 'puff' ? 'shoot' : pose === 'blink' ? 'idle' : pose);
-        if (GFX.has(name)) { note(cx - 8, by - 16, cx + 8, by); GFX.draw(ctx, name, pose === 'blink' || pose === 'puff' ? (pose === 'blink' ? 1 : 0) : f % Math.max(1, GFX.frames(name)), cx - 8, by - 16, { flip, alpha }); }
-        return;
-      }
+      calls++;
       note(cx - 8 * S, by - 16 * S, cx + 8 * S, by);
-      const x = cx - 8 * S - e.l, y = by - 16 * S - e.t, w = e.w / e.kb, h = e.h / e.kb;
-      ctx.save();
-      if (alpha !== undefined && alpha !== 1) ctx.globalAlpha *= alpha;
-      if (flip) { ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0); }
-      ctx.drawImage(e.cv, x, y, w, h);
-      ctx.restore();
+      if (typeof GFX.drawHero === 'function') { GFX.drawHero(ctx, who, cx, by, S, 0, { pose, frame: f, frames: nf, flip: !!flip, alpha }); return; }
+      const name = (who === 'pop' ? 'p2_' : 'p1_') + (pose === 'puff' ? 'shoot' : pose === 'blink' ? 'idle' : pose);
+      if (GFX.has(name)) GFX.draw(ctx, name, pose === 'blink' || pose === 'puff' ? (pose === 'blink' ? 1 : 0) : f % Math.max(1, GFX.frames(name)), cx - 8, by - 16, { flip, alpha });
     }
-    return { draw, clear, px: () => px, count: () => cache.size };
+    return { draw, clear() {}, px: () => 0, count: () => calls };
   })();
 
   /** The Moon Pearl at any size: pastel sphere, pearl-white highlight, thin-film bands, a luminous rim, soft halo and a few orbiting sparks. */
@@ -469,6 +467,19 @@ const Main = (() => {
   // ===================================================================================================
   // Ambient bubbles + plankton (title, story, how-to, scores, entry, ending)
   // ===================================================================================================
+  const BUBBLE_SIZE = 16, BUBBLE_FADE = 10;
+  /** Alpha of a 16 px bubble whose box starts at (x, y): `alpha` far from every rectangle of `avoid`, fading to 0 as its box nears one (and 0 whenever it touches one). */
+  function bubbleAlpha(x, y, alpha, avoid) {
+    let a = alpha;
+    if (avoid) {
+      for (let i = 0; i < avoid.length && a > 0; i++) {
+        const q = avoid[i];
+        const dx = Math.max(q[0] - (x + BUBBLE_SIZE), 0, x - q[2]), dy = Math.max(q[1] - (y + BUBBLE_SIZE), 0, y - q[3]);
+        a = Math.min(a, alpha * clamp01((Math.sqrt(dx * dx + dy * dy) - 2) / BUBBLE_FADE));
+      }
+    }
+    return a;
+  }
   const ambient = (() => {
     const list = [], specks = [];
     let r = null;
@@ -482,7 +493,6 @@ const Main = (() => {
       for (let i = 0; i < 48; i++) specks.push({ x: r.float(0, C.W), y: r.float(0, C.H), vy: r.float(0.05, 0.2), vx: r.float(-0.04, 0.04), s: r.float(0.5, 1.1), a: r.float(0.1, 0.34), ph: r.float(0, 6.28), c: i % 5 === 0 ? '#ffb23e' : i % 3 === 0 ? '#ff3ea5' : '#3cf2ff' });
     }
     reset();
-    const SIZE = 16, FADE = 10;
     const shown = [];                                     // x, y, alpha of every bubble the last draw() really drew (debug / tests)
     return {
       update() {
@@ -513,15 +523,8 @@ const Main = (() => {
         for (let bi = 0; bi < n; bi++) {
           const b = list[bi];
           const x = b.x + Math.sin(t / 38 + b.ph) * 5, y = b.y;
-          let a = alpha;
-          if (avoid) {
-            for (let i = 0; i < avoid.length && a > 0; i++) {
-              const q = avoid[i];
-              const dx = Math.max(q[0] - (x + SIZE), 0, x - q[2]), dy = Math.max(q[1] - (y + SIZE), 0, y - q[3]);
-              a = Math.min(a, alpha * clamp01((Math.sqrt(dx * dx + dy * dy) - 2) / FADE));
-            }
-            if (a < 0.03) continue;
-          }
+          const a = bubbleAlpha(x, y, alpha, avoid);
+          if (avoid && a < 0.03) continue;
           shown.push(x, y, a);
           if (withEnemies && b.kind && a > alpha * 0.9 && GFX.has(b.kind + '_trapped')) {
             GFX.draw(ctx, b.kind + '_trapped', Math.floor(t / 12), x, y);
@@ -732,7 +735,7 @@ const Main = (() => {
     if (e.repeat) return;
     if (!down.has(e.code)) tapped.add(e.code);
     down.add(e.code);
-    if (focusEl && !focusEl.hidden) dismissFocus();      // any game key also wakes the overlay
+    if (focusUp()) dismissFocus();                       // any game key also wakes the overlay
   }
   function onKeyUp(e) { down.delete(e.code); }
 
@@ -870,7 +873,7 @@ const Main = (() => {
     const v = m ? '1' : '0';
     if (soundBtn.dataset.muted !== v) { soundBtn.dataset.muted = v; soundBtn.setAttribute('aria-pressed', m ? 'true' : 'false'); }
   }
-  function toast(msg, color) { toastMsg = msg; toastT = TOAST_FRAMES; toastColor = color || COL.gold; }
+  function toast(msg, color) { toastMsg = msg; toastT = TOAST_FRAMES; toastColor = color || COL.gold; dirty = true; }
 
   /** Small crossed-out speaker (thin crimson strokes + halo), drawn at the top-right corner while muted. */
   function drawMuteIcon(x, y) {
@@ -916,6 +919,7 @@ const Main = (() => {
   function setPaused(on, auto) {
     if (scene !== 'play' || paused === on) return;
     paused = on;
+    dirty = true;
     pauseSel = 0;
     confirmQuit = false;
     const wasAuto = autoPaused;
@@ -937,12 +941,15 @@ const Main = (() => {
   function hold(reason) {
     if (reason === 'blur' && !holds.has('blur')) blurAt = performance.now();
     holds.add(reason);
+    dirty = true;
     releaseAllInput();
     setPaused(true, true);
     try { AUDIO.pause(); } catch (e) { /* ignore */ }
   }
   function release(reason) {
-    if (!holds.delete(reason) || holds.size) return;
+    if (!holds.delete(reason)) return;
+    dirty = true;                                          // (the picture may have been left unrendered while the page was not live)
+    if (holds.size) return;
     try {
       if (scene === 'play' && paused) AUDIO.pause({ suspend: false });   // still on the pause menu: keep its sounds audible
       else AUDIO.resume();
@@ -990,14 +997,20 @@ const Main = (() => {
     }
     if (!focusEl.hidden === show) return;
     focusEl.hidden = !show;
+    dirty = true;                                          // the scenes draw differently while the overlay is up (title rows, the paused panel)
   }
+  /** An attract run (the title idling into story -> how-to -> scores) is on: nobody asked for it, so nothing waits behind a click-to-play overlay (U9). */
+  const attractRun = () => (scene === 'story' || scene === 'howto' || scene === 'scores') && !!(sceneArgs && sceneArgs.attract);
   function dismissFocus() {
+    const wasUp = focusUp();
     focusDismissed = true;
     try { window.focus(); } catch (e) { /* ignore */ }
     unlockAudio();
     release('blur');                                       // a click / key press is proof of life even if no focus event comes
     updateFocusOverlay();
     if (autoPaused && !isHeld() && scene === 'play' && paused) setPaused(false);   // only the blur paused it: carry on (U17)
+    if (wasUp && sceneReady && attractRun()) { gotoScene('title'); tapped.clear(); down.clear(); touchTap.clear(); }   // the first click / key lands on the title menu, not on a how-to page, and is spent on that (U9)
+    dirty = true;
   }
 
   // ===================================================================================================
@@ -1010,9 +1023,11 @@ const Main = (() => {
     if (!next) throw new Error('Main.goto: unknown scene ' + name);
     const prev = scenes[scene];
     if (prev && prev.leave) prev.leave(name);
+    fadeIn = scene === 'ending' ? FADE_IN_FRAMES : 0;      // the ending's last picture dissolves into the next scene instead of cutting (U5)
     scene = name;
     sceneT = 0;
     sceneArgs = args || null;
+    dirty = true; activeUntil = 0; sinceRender = 0;
     next.enter(sceneArgs);
   }
 
@@ -1123,7 +1138,7 @@ const Main = (() => {
 
   // ---- TITLE ----------------------------------------------------------------------------------------------
   scenes.title = (() => {
-    const MENU_X0 = 40, MENU_X1 = 216;
+    const MENU_X0 = 40, MENU_X1 = 216, TOUCH_ROWS_BOTTOM = 192;
     let sel = 0, idle = 0, items = [], stage = 0, warm = false;     // stage / warm: the progressive first paint (see render)
     let geo = { top: 84, pitch: 14, y0: 86, big: false };
     const LOGO_Y = 17, SHAFT = { x: 128, y: 80 };
@@ -1135,16 +1150,35 @@ const Main = (() => {
       if (!touchOnly()) items.push({ id: 'p2', label: '2 PLAYERS' });
       if (session.reached >= CONTINUE_MIN_ROUND) items.push({ id: 'cont', label: 'CONTINUE ROUND ' + continueRound() });
       items.push({ id: 'help', label: 'HOW TO PLAY' }, { id: 'table', label: 'HI-SCORES' });
-      if (!touchOnly()) items.push({ id: 'sound', label: 'SOUND ' + (AUDIO.isMuted() ? 'OFF' : 'ON') });
+      if (!touchMode) items.push({ id: 'sound', label: 'SOUND ' + (AUDIO.isMuted() ? 'OFF' : 'ON') });   // (touch has its own SOUND button)
       const k = items.findIndex((it) => it.id === keep);
       sel = k >= 0 ? k : U.clamp(sel, 0, items.length - 1);
       const n = items.length;
-      if (touchMode) {                                       // big tappable rows drawn as plates, no hint block
-        const y0 = 86, pitch = touchPitch(n, 188 - y0);          // integrator: rows end at 188 (was 202) so the HI SCORE / (c) lines (y 193 / 200) stay clear of the TAP FOR SOUND band (y 210+)
-        geo = { top: y0, pitch, y0, big: true };
+      if (touchMode) {                                       // big tappable rows drawn as plates, one footer line (U11, U14)
+        // Every row is >= 44 css px tall (TOUCH_ROW_CSS). When the plain list does not fit between the wordmark and the footer (CONTINUE ROUND, a keyboard seen on a touch
+        // device) the secondary rows share a line: HOW TO PLAY | HI-SCORES, then 1 PLAYER | 2 PLAYERS, instead of shrinking every row below the touch minimum.
+        const y0 = 86, room = TOUCH_ROWS_BOTTOM - y0, need = Math.min(40, Math.ceil(TOUCH_ROW_CSS / (layout.scale || 1)));
+        const pairs = [];
+        if (n * need > room) pairs.push(['help', 'table']);
+        if ((n - pairs.length) * need > room && items.some((it) => it.id === 'p2')) pairs.push(['p1', 'p2']);
+        let row = 0;
+        const rowOf = {}, half = {};
+        for (let i = 0; i < n; i++) {
+          const id = items[i].id, pr = pairs.find((q) => q[0] === id || q[1] === id);
+          if (pr && id === pr[1] && items.some((it) => it.id === pr[0])) { rowOf[id] = rowOf[pr[0]]; half[id] = 1; continue; }
+          rowOf[id] = row++;
+          if (pr && id === pr[0] && items.some((it) => it.id === pr[1])) half[id] = 0;
+        }
+        const pitch = Math.max(14, Math.min(need, 40, Math.floor(room / row)));
+        for (const it of items) {
+          const h = half[it.id], top = y0 + rowOf[it.id] * pitch;
+          it.cell = h === undefined ? { top, x0: MENU_X0, x1: MENU_X1, px: 52, pw: 152 } : h === 0 ? { top, x0: 24, x1: 128, px: 28, pw: 98 } : { top, x0: 128, x1: 232, px: 130, pw: 98 };
+        }
+        geo = { top: y0, pitch, y0, big: true, rows: row };
       } else {
         const pitch = n <= 5 ? 14 : 12;
-        geo = { top: 84, pitch, y0: 86, big: false };
+        geo = { top: 84, pitch, y0: 86, big: false, rows: n };
+        items.forEach((it, i) => { it.cell = { top: 84 + i * pitch, x0: MENU_X0, x1: MENU_X1 }; });
       }
     }
     function move(d) {
@@ -1182,7 +1216,7 @@ const Main = (() => {
         g.lineWidth = (1 + sc * 1.6) / 4 * 1.5;
         g.beginPath(); pts.forEach((p, q) => (q ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.closePath(); g.stroke();
         if (prev) {
-          g.strokeStyle = 'rgba(138,92,255,' + (a * 0.35).toFixed(3) + ')'; g.lineWidth = 0.3;
+          g.strokeStyle = 'rgba(70,170,255,' + (a * 0.32).toFixed(3) + ')'; g.lineWidth = 0.3;
           g.beginPath(); for (let q = 0; q < 8; q++) { g.moveTo(prev[q][0], prev[q][1]); g.lineTo(pts[q][0], pts[q][1]); } g.stroke();
         }
         if (i > 3) for (let q = 0; q < 8; q++) {
@@ -1231,7 +1265,7 @@ const Main = (() => {
       // the shot bubble: leaves Fizz's mouth at cyc 314, decelerates, drifts up and fades
       const u = cyc >= 314 ? cyc - 314 : cyc + 46;
       if (u < 230 && GFX.has('bubble')) {
-        const run = 30 * (1 - Math.pow(1 - Math.min(u, 40) / 40, 2)), bx = cxF + 6.6 * S * 0.9 + 4 + run, byy = by - 8.8 * S + 1 - Math.max(0, u - 40) * 0.42;
+        const run = 20 * (1 - Math.pow(1 - Math.min(u, 40) / 40, 2)), bx = cxF + 6.6 * S * 0.9 + 4 + run, byy = by - 8.8 * S + 1 - Math.max(0, u - 40) * 0.42;
         const ba = (u > 200 ? (230 - u) / 30 : 1) * a, sc = 1.15;
         note(bx - 9, byy - 9, bx + 9, byy + 9);
         ctx.save(); ctx.translate(bx, byy); ctx.scale(sc, sc);
@@ -1241,11 +1275,12 @@ const Main = (() => {
     }
     return {
       music: 'title',
+      settled: () => warm && sceneT > TITLE_SETTLE,                // the intro (progressive first paint) is over: the idle title may run at 20 fps
       enter() { idle = 0; sel = 0; items = []; padSlot.clear(); build(); refreshScores(); AUDIO.music('title'); },   // new session: pads claim P1 / P2 afresh
       update(ui) {
         ambient.update();
         build();
-        idle = ui.heldAny ? 0 : idle + 1;
+        idle = (ui.heldAny || focusUp()) ? 0 : idle + 1;               // (the attract run never starts behind the click-to-play overlay: U9)
         if (idle >= IDLE_FRAMES) { gotoScene('story', { attract: true }); return; }
         if (ui.p.up || ui.p.left) move(-1);
         else if (ui.p.down || ui.p.right) move(1);
@@ -1254,13 +1289,14 @@ const Main = (() => {
         else if (ui.p.ok || ui.p.alt) activate(sel);
       },
       pointer(x, y) {
-        const i = rowAt(x, y, geo.top, geo.pitch, items.length, MENU_X0, MENU_X1);
+        const i = items.findIndex((it) => it.cell && x >= it.cell.x0 && x <= it.cell.x1 && y >= it.cell.top && y < it.cell.top + geo.pitch);
         if (i >= 0) activate(i);
       },
-      rows: () => items.map((it, i) => ({ id: it.id, label: it.label, top: geo.top + i * geo.pitch, h: geo.pitch, x0: MENU_X0, x1: MENU_X1, sel: i === sel })),
+      rows: () => items.map((it, i) => ({ id: it.id, label: it.label, top: it.cell.top, h: geo.pitch, x0: it.cell.x0, x1: it.cell.x1, sel: i === sel })),
       render() {
-        const t = sceneT, n = items.length, S = touchMode ? 2.0 : 2.8;
-        const menuBottom = geo.top + n * geo.pitch + 4;
+        const t = sceneT, n = items.length, S = touchMode ? 2.0 : 3.0;                   // (multiples of 0.5 only: GFX.drawHero bakes at 0.5 steps and would resample any other size, +2 ms per twin on a software rasteriser)
+        const menuBottom = geo.top + (geo.rows || n) * geo.pitch + 4;
+        const over = focusUp();                                      // the click-to-play overlay is up: it is the one call to action, the menu waits behind it (U8)
         // Progressive first paint (SPEC_V2 sec. 5: boot to an interactive title <= 1.5 s at 4x CPU): the very first frames after the boot draw the
         // water + menu first, then the wordmark, the twins and the ambient life fade in over the next frames, so no single frame has to bake them all.
         if (!warm) { stage++; if (stage >= 24) warm = true; }
@@ -1268,8 +1304,8 @@ const Main = (() => {
         const aLogo = ramp(2), aTwins = ramp(3), aLife = ramp(5);
         layered(t, 0.5 * aLife, aLife >= 1, () => {
           staticBack('title', () => {
-            drawBg(BG_TITLE);
-            ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.32; drawBg(BG_TITLE); ctx.restore();    // the distant jellyfish glow a little stronger than in the rounds
+            drawBg(BG_TITLE);                                       // near-black water (V3): no second additive pass, the distant jellyfish stay faint like the mockup
+            dim(0.2);
             paintShaft();
             ledges();
           });
@@ -1287,30 +1323,21 @@ const Main = (() => {
             g.addColorStop(0, 'rgba(60,242,255,0.6)'); g.addColorStop(1, 'rgba(60,242,255,0)');
             ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), ty + 4, 40, 1.2 / K);
           }
+          if (over) return;
           items.forEach((it, i) => {
-            const y = geo.y0 + i * geo.pitch, on = i === sel;
+            const on = i === sel, c = it.cell;
             if (geo.big) {
-              plate(52, geo.top + i * geo.pitch + 2, 152, geo.pitch - 4, on);
-              ctext(it.label, geo.top + i * geo.pitch + Math.floor((geo.pitch - 8) / 2), on ? COL.hi : COL.text);
+              plate(c.px, c.top + 2, c.pw, geo.pitch - 4, on);
+              text(it.label, c.px + c.pw / 2, c.top + Math.floor((geo.pitch - 8) / 2), on ? COL.hi : COL.text, { align: 'center' });
               return;
             }
-            menuRow(it.label, 128, y, on, t);
+            menuRow(it.label, 128, geo.y0 + i * geo.pitch, on, t);
           });
-          // HI SCORE: amber label, near-white value
-          const hy = touchMode ? 193 : menuBottom - 1;
-          const hw = GFX.textWidth('HI SCORE ', 0.75) + GFX.textWidth('050000', 0.75);
-          text('HI SCORE', 128 - hw / 2, hy, COL.gold, { scale: 0.75 });
-          text(fmtScore(topScore()), 128 - hw / 2 + GFX.textWidth('HI SCORE ', 0.75), hy, COL.hi, { scale: 0.75 });
-          if (touchMode) {
-            ctext('© 2026 FIZZ & POP', 200, COL.dimmer, { scale: 0.75 });
-          } else {
-            const y0 = hy + 11;
-            ctext('UP/DOWN + ENTER', y0, COL.dim, { scale: 0.75 });
-            ctext('1P: ARROWS + Z BUBBLE', y0 + 7, COL.dimmer, { scale: 0.75 });          // says what Z / Q do (P3)
-            ctext('2P: WASD + Q BUBBLE', y0 + 14, COL.dimmer, { scale: 0.75 });
-            ctext('© 2026 FIZZ & POP', y0 + 24, COL.dim, { scale: 0.75 });
-            ctext('FREE SOFTWARE', y0 + 31, COL.dimmer, { scale: 0.75 });                 // ends at y 208: the sound / toast strip (y 211..) never covers it
-          }
+          // The one small footer line (V3: the controls live in HOW TO PLAY): HI SCORE, amber label + near-white value. Phones draw it at text scale 1 (U14: caps >= 7 css px).
+          const fs = touchMode ? 1 : 0.75, fy = touchMode ? 197 : 201;
+          const hw = GFX.textWidth('HI SCORE ', fs) + GFX.textWidth('050000', fs);
+          text('HI SCORE', 128 - hw / 2, fy, COL.gold, { scale: fs });
+          text(fmtScore(topScore()), 128 - hw / 2 + GFX.textWidth('HI SCORE ', fs), fy, COL.hi, { scale: fs });
         }, [[MENU_X0 - 6, 62, MENU_X1 + 6, menuBottom], [16, 8, 240, 68]]);   // the menu column and the logo are kept free of bubbles too
       },
     };
@@ -1319,12 +1346,14 @@ const Main = (() => {
   // ---- STORY (intro before play + attract) ----------------------------------------------------------------
   scenes.story = (() => {
     // Every line <= 26 characters (208 px): it never touches the tower walls, even in the fractional-scale layouts.
+    // (v3 U16: the copy breaks at phrase boundaries: "TO GET IT BACK." stays on one line)
     const LINES = [
-      { s: 'THE KRAKEN KING HAS STOLEN', at: 6, y: 100 },
-      { s: 'THE REEF\'S MOON PEARL!', at: 38, y: 111 },
-      { s: 'FIZZ & POP DIVE DOWN THE', at: 112, y: 126 },
-      { s: 'SUNKEN TOWER TO GET IT', at: 144, y: 137 },
-      { s: 'BACK. TRAP THEM. POP THEM!', at: 190, y: 152, c: COL.gold },
+      { s: 'THE KRAKEN KING HAS STOLEN', at: 6, y: 98 },
+      { s: 'THE REEF\'S MOON PEARL!', at: 36, y: 108 },
+      { s: 'FIZZ & POP DIVE DOWN', at: 110, y: 123 },
+      { s: 'THE SUNKEN TOWER', at: 130, y: 133 },
+      { s: 'TO GET IT BACK.', at: 150, y: 143 },
+      { s: 'TRAP THEM. POP THEM!', at: 176, y: 157, c: COL.gold },
     ];
     const KRAKEN_IN = 40, GRAB = 100, LEAVE = 118, GONE = 200;
     let args = {};
@@ -1384,8 +1413,8 @@ const Main = (() => {
           });
           // the controls, once the rules are told (round 1 has no hint of its own, P3)
           if (!args.attract && t >= 214) {
-            ctext(touchMode ? 'BUBBLE: TRAP FOES' : 'Z / SPACE: BUBBLE', 168, COL.dim);
-            ctext(touchMode ? 'JUMP: HOP UP' : 'UP / X: JUMP', 177, COL.dim);
+            ctext(touchMode ? 'BUBBLE: TRAP FOES' : 'Z / SPACE: BUBBLE', 176, COL.dim);     // (clear of the panel's bottom hairline at y 170)
+            ctext(touchMode ? 'JUMP: HOP UP' : 'UP / X: JUMP', 185, COL.dim);
           }
           // Fizz & Pop watch, then jump with excitement once the plan is made
           const excited = t > 170;
@@ -1393,8 +1422,8 @@ const Main = (() => {
           glowAt(48, 214, 22, '#ff3ea5', 0.3, 0.3); glowAt(208, 214, 22, '#3cf2ff', 0.3, 0.3);
           spr(excited ? 'p1_jump' : 'p1_idle', Math.floor(t / 30), 40, 200 - hop(0));
           spr(excited ? 'p2_jump' : 'p2_idle', Math.floor(t / 30), 200, 200 - hop(11), { flip: true });
-          if (!args.attract && blink(t, 24)) ctext(touchLabel() + ' TO SKIP', 188, COL.dimmer);
-        }, [[24, 90, 232, 198]]);                                   // the whole text block stays free of bubbles
+          if (!args.attract && blink(t, 24)) ctext(touchLabel() + ' TO SKIP', 195, COL.dimmer);
+        }, [[24, 90, 232, 204]]);                                   // the whole text block stays free of bubbles
       },
     };
   })();
@@ -1424,39 +1453,47 @@ const Main = (() => {
     let page = 0, pageT = 0, args = {};
 
     const header = (s, sub) => heading(s, 6, COL.hi, sub, 24);
+    // Touch layout (v3 U13 / U16): the pages are laid out above a navigation strip (a BACK plate and a NEXT plate, each >= 44 css px tall and clearly labelled) instead of running
+    // down to the canvas edge; the panel ends at y 184 and every page's content at y 181. Keyboards / mice keep the roomy desktop layout.
+    const PANEL_TOP = 32, TOUCH_PANEL_BOT = 184;
+    const navH = () => Math.min(34, Math.ceil(TOUCH_ROW_CSS / (layout.scale || 1)));
+    const navTop = () => 224 - 2 - navH();                       // the plates' top; taps from navTop - 2 down belong to them
+    const pauseWhere = () => (layout.land ? 'TOP RIGHT' : 'ABOVE THE PADS');
 
     function drawRules(t) {
       header('HOW TO PLAY');
+      const T = touchMode;
       const lines = ['TRAP FOES IN BUBBLES,', 'THEN TOUCH THE BUBBLE TO POP', 'THEM INTO TASTY TREATS!',
         'CLEAR EVERY FOE TO DIVE', 'DEEPER. 30 ROUNDS TO GO.', 'HOLD JUMP TO BOUNCE ON THEM.'];
-      lines.forEach((s, i) => ctext(s, 37 + i * 11, i < 3 ? COL.text : COL.dim));
+      lines.forEach((s, i) => ctext(s, T ? 38 + i * 10 : 37 + i * 11, i < 3 ? COL.text : COL.dim));
       // 1 bubble -> 2 trap -> 3 pop and eat
+      const ay = T ? 100 : 112;
       const steps = [['1 BUBBLE', 20], ['2 TRAP', 100], ['3 EAT!', 172]];
       const u = (t % 150) / 150;
-      spr(u < 0.18 ? 'p1_shoot' : 'p1_idle', u < 0.09 || u >= 0.18 ? 0 : 1, 30, 112);
-      if (u > 0.06 && u < 0.3) spr('bubble_shot', Math.floor((u - 0.06) * 14), 46 + (u - 0.06) * 60, 112, { alpha: 0.9 });
-      spr('nibbler_trapped', Math.floor(t / 12), 112, 112); spr('trap_overlay', Math.floor(u * 3), 112, 112);
+      spr(u < 0.18 ? 'p1_shoot' : 'p1_idle', u < 0.09 || u >= 0.18 ? 0 : 1, 30, ay);
+      if (u > 0.06 && u < 0.3) spr('bubble_shot', Math.floor((u - 0.06) * 14), 46 + (u - 0.06) * 60, ay, { alpha: 0.9 });
+      spr('nibbler_trapped', Math.floor(t / 12), 112, ay); spr('trap_overlay', Math.floor(u * 3), 112, ay);
       const eat = Math.floor(t / 8);
-      spr('food_4', 0, 180, 112 + Math.round(Math.sin(t / 9) * 2));
-      spr('sparkle', eat, 172, 108); spr('sparkle', eat + 2, 196, 124);
-      text('>', 82, 117, COL.gold); text('>', 150, 117, COL.gold);
-      steps.forEach(([s, x]) => text(s, x, 134, COL.text));
-      ctext('POP BUBBLES IN A CHAIN FOR', 160, COL.dim);
-      ctext('1000  2000  4000  8000 ...', 171, COL.gold);
-      ctext('LOSE A LIFE WHEN A FOE', 188, COL.dimmer);
-      ctext('TOUCHES YOU. 3 LIVES!', 198, COL.dimmer);
+      spr('food_4', 0, 180, ay + Math.round(Math.sin(t / 9) * 2));
+      spr('sparkle', eat, 172, ay - 4); spr('sparkle', eat + 2, 196, ay + 12);
+      text('>', 82, ay + 5, COL.gold); text('>', 150, ay + 5, COL.gold);
+      steps.forEach(([s, x]) => text(s, x, ay + 22, COL.text));
+      ctext('POP BUBBLES IN A CHAIN FOR', T ? 134 : 160, COL.dim);
+      ctext('1000  2000  4000  8000 ...', T ? 144 : 171, COL.gold);
+      ctext('LOSE A LIFE WHEN A FOE', T ? 158 : 188, COL.dimmer);
+      ctext('TOUCHES YOU. 3 LIVES!', T ? 168 : 198, COL.dimmer);
     }
 
     function drawControls(t, th) {
       const onlyTouch = touchOnly();
-      header('CONTROLS', onlyTouch ? 'ON-SCREEN BUTTONS' : 'KEYBOARD AND GAMEPAD');
+      header('CONTROLS', touchMode ? 'ON-SCREEN BUTTONS' : 'KEYBOARD AND GAMEPAD');
       let y = 38;
-      if (onlyTouch) {
+      if (touchMode) {
         spr('p1_walk', Math.floor(t / 8), 24, y);
-        [['← →', 'RUN'], ['JUMP', 'HOP UP'], ['BUBBLE', 'TRAP / OK'], ['PAUSE', 'ABOVE THE PADS']]
-          .forEach((r, i) => { text(r[0], 52, y + 1 + i * 11, COL.gold); text(r[1], 112, y + 1 + i * 11, COL.text); });
-        y += 54;
-        ctext('TAP A MENU ROW TO PICK IT', y, COL.dim); y += 14;
+        [['← →', 'RUN'], ['JUMP', 'HOP UP'], ['BUBBLE', 'TRAP / OK'], ['PAUSE', pauseWhere()], ['SOUND', 'ON / OFF']]
+          .forEach((r, i) => { text(r[0], 52, y + 1 + i * 12, COL.gold); text(r[1], 112, y + 1 + i * 12, COL.text); });
+        y += 68;
+        ctext('TAP A MENU ROW TO PICK IT', y, COL.dim); y += 20;
       } else {
         const colX = [20, 144], who = ['p1', 'p2'], names = ['FIZZ  P1', 'POP  P2'];
         const rows = [['← →  MOVE', 'A D  MOVE'], ['UP/X  JUMP', 'W  JUMP'], ['SPC/Z  BUBBLE', 'Q  BUBBLE']];
@@ -1469,60 +1506,79 @@ const Main = (() => {
         ctext('KEYS FOLLOW THE WASD BLOCK,', y, COL.dimmer); ctext('WHATEVER THE KEYCAPS SAY', y + 10, COL.dimmer);
         y += 26;
       }
+      const gp = touchMode ? [12, 24, 36] : [11, 21, 31];
       ctext('GAMEPAD', y, th.accent2);
-      ctext('STICK / D-PAD: MOVE', y + 11, COL.text);
-      ctext('A: JUMP   B / X: BUBBLE', y + 21, COL.text);
-      ctext('START: PAUSE', y + 31, COL.text);
-      if (!onlyTouch) { ctext('ENTER START  P PAUSE', y + 49, COL.dim); ctext('M SOUND  H HELP', y + 59, COL.dim); ctext('PUSH Q TO JOIN AS P2', y + 71, COL.dimmer); }
+      ctext('STICK / D-PAD: MOVE', y + gp[0], COL.text);
+      ctext('A: JUMP   B / X: BUBBLE', y + gp[1], COL.text);
+      ctext('START: PAUSE', y + gp[2], COL.text);
+      if (!onlyTouch) {
+        if (touchMode) { ctext('ENTER START  P PAUSE', y + 50, COL.dim); ctext('M SOUND  H HELP  Q JOINS P2', y + 60, COL.dim); }
+        else { ctext('ENTER START  P PAUSE', y + 49, COL.dim); ctext('M SOUND  H HELP', y + 59, COL.dim); ctext('PUSH Q TO JOIN AS P2', y + 71, COL.dimmer); }
+      }
     }
 
     function drawPage(t) {
-      const th = GFX.theme(page % 6);
+      const th = GFX.theme(page % 6), T = touchMode;
       if (page === 0) drawRules(t);
       else if (page === 1) drawControls(t, th);
       else if (page === 2) {
         header('THE CAST', 'WHO LIVES IN THE TOWER');
+        const pitch = T ? 19 : 20;
         CAST.forEach((c, i) => {
-          const y = 36 + i * 20;
+          const y = 36 + i * pitch;
           spr(castSprite(c[0]), Math.floor(t / 10) + i, 28, y);
           text(c[1], 52, y + 1, th.accent2);
           text(c[2], 52, y + 10, COL.dim);
         });
-        sprC('kraken', Math.floor(t / 14), 52, 158);
-        text('KRAKEN KING', 84, 168, COL.coral);
-        text('ROUND 30 BOSS. HIT', 84, 178, COL.dim);
-        text('HIM WITH BOLTS!', 84, 187, COL.dim);
+        if (T) {                                             // the king at half size, as the last row (the page ends above the navigation strip)
+          const ky = 36 + 6 * pitch;
+          ctx.save(); ctx.translate(40, ky + 12); ctx.scale(0.5, 0.5);
+          if (GFX.has('kraken')) GFX.draw(ctx, 'kraken', Math.floor(t / 14), -24, -24); ctx.restore();
+          note(28, ky, 52, ky + 24);
+          text('KRAKEN KING', 56, ky, COL.coral);
+          text('ROUND 30 BOSS. HIT', 56, ky + 9, COL.dim);
+          text('HIM WITH BOLTS!', 56, ky + 18, COL.dim);
+        } else {
+          sprC('kraken', Math.floor(t / 14), 52, 158);
+          text('KRAKEN KING', 84, 168, COL.coral);
+          text('ROUND 30 BOSS. HIT', 84, 178, COL.dim);
+          text('HIM WITH BOLTS!', 84, 187, COL.dim);
+        }
       } else if (page === 3) {
         header('TREATS', 'BIGGER CHAINS = BIGGER FOOD');
+        const pitch = T ? 17 : 20;
         FOODS.forEach((f, i) => {
-          const y = 36 + i * 20;
+          const y = 36 + i * pitch;
           spr(f[0], 0, 32, y);
           text(f[1], 56, y + 4, COL.text);
           text(String(f[2]), 224, y + 4, COL.gold, { align: 'right' });
         });
       } else if (page === 4) {
         header('POWER-UPS', 'ONE PER ROUND, 1000 PTS EACH');
+        const pitch = T ? 18 : 20;
         POWERS.forEach((f, i) => {
-          const y = 36 + i * 20;
+          const y = 36 + i * pitch;
           spr(f[0], 0, 32, y);
-          text(f[1], 56, y + 1, th.accent2);
-          text(f[2], 56, y + 10, COL.dim);
+          text(f[1], 56, y + (T ? 0 : 1), th.accent2);
+          text(f[2], 56, y + (T ? 9 : 10), COL.dim);
         });
       } else {
         header('BUBBLES', 'WATCH FOR SPECIAL BUBBLES');
+        const pitch = T ? 21 : 24, y0 = T ? 36 : 38;
         SPECIALS.forEach((f, i) => {
-          const y = 38 + i * 24;
+          const y = y0 + i * pitch;
           spr(f[0], Math.floor(t / 14), 28, y);
-          text(f[1], 52, y + 1, th.accent2);
-          text(f[2], 52, y + 10, COL.dim);
+          text(f[1], 48, y + 1, th.accent2);                 // (x 48: the longest line, BOLTS ZAP FOES BOTH WAYS, then ends at 240, clear of the panel's frame)
+          text(f[2], 48, y + 10, COL.dim);
         });
-        ctext('CHAIN POP SCORES', 144, COL.text);
+        const cy = T ? 124 : 144, by = T ? 134 : 156;
+        ctext('CHAIN POP SCORES', cy, COL.text);
         [1000, 2000, 4000, 8000].forEach((n, i) => {
           const x = 36 + i * 52;
-          spr('bubble', Math.floor(t / 14) + i, x + 4, 156);
-          text(String(n), x + 12, 176, COL.gold, { align: 'center' });
+          spr('bubble', Math.floor(t / 14) + i, x + 4, by);
+          text(String(n), x + 12, by + 20, COL.gold, { align: 'center' });
         });
-        ctext('... UP TO 64000 EACH!', 190, COL.dim);
+        ctext('... UP TO 64000 EACH!', T ? 168 : 190, COL.dim);
       }
     }
 
@@ -1537,13 +1593,22 @@ const Main = (() => {
       music: 'title',
       enter(a) { args = a || {}; page = U.clamp(args.page | 0, 0, PAGES - 1); pageT = 0; AUDIO.music('title'); },
       page: () => page,
+      /** Touch: a BACK plate at the bottom left (>= 44 css px tall, 96 wide) and a NEXT plate at the bottom right; a tap anywhere else is "next" too, except in a dead band just above
+       *  the strip, where an almost-miss of BACK does nothing instead of turning the page the wrong way (U13). A mouse: the bottom-left "ESC: BACK" label leaves like Esc. */
       pointer(x, y) {
         if (args.attract) { gotoScene('title'); return; }
+        if (touchMode) {
+          const nt = navTop() - 2;
+          if (y >= nt && x < 96) { AUDIO.sfx('menu_move'); if (page === 0) gotoScene('title'); else next(-1); return; }
+          if (y >= nt - 8 && y < nt && x < 96) return;
+          AUDIO.sfx('menu_move'); next(1);
+          return;
+        }
         AUDIO.sfx('menu_move');
-        if (y > 200 && x < (touchMode ? 64 : 80)) {            // bottom-left = the "BACK" label: touch steps one page back (the title from page 0), a mouse leaves like ESC
-          if (!touchMode || page === 0) gotoScene('title'); else next(-1);
-        } else next(1);
+        if (y > 200 && x < 80) gotoScene('title');
+        else next(1);
       },
+      navZone: () => ({ top: navTop() - 2, backX1: 96, h: navH() }),
       update(ui) {
         ambient.update();
         pageT++;
@@ -1559,18 +1624,22 @@ const Main = (() => {
       },
       render() {
         layered(sceneT, 0.28, false, () => staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); }), () => {
-          panel(12, 32, 232, 177, { a: 0.5, edge: 0.3 });
+          panel(12, PANEL_TOP, 232, touchMode ? TOUCH_PANEL_BOT - PANEL_TOP : 177, { a: 0.5, edge: 0.3 });
           drawPage(sceneT);
+          const dotY = touchMode ? 224 - 2 - navH() / 2 : 215;
           for (let i = 0; i < PAGES; i++) {            // page dots: the current one lit
             const cx = 128 - PAGES * 6 + i * 12 + 6, on = i === page;
-            if (on) glowAt(cx, 215, 7, '#3cf2ff', 0.5);
-            ctx.beginPath(); ctx.arc(cx, 215, on ? 1.7 : 1.4, 0, Math.PI * 2);
+            if (on) glowAt(cx, dotY, 7, '#3cf2ff', 0.5);
+            ctx.beginPath(); ctx.arc(cx, dotY, on ? 1.7 : 1.4, 0, Math.PI * 2);
             if (on) { ctx.fillStyle = COL.hi; ctx.fill(); } else { ctx.lineWidth = 1.1 / K; ctx.strokeStyle = 'rgba(90,162,192,0.8)'; ctx.stroke(); }
           }
-          note(128 - PAGES * 6, 212, 128 + PAGES * 6, 218);
+          note(128 - PAGES * 6, dotY - 3, 128 + PAGES * 6, dotY + 3);
           if (!args.attract) {                         // every label says what a tap / key on it does (R7)
-            if (touchMode) { text('< BACK', 4, 211, COL.dimmer); text('TAP: NEXT', 252, 211, COL.dimmer, { align: 'right' }); }
-            else { text('ESC: BACK', 4, 211, COL.dimmer); text('← → PAGE', 252, 211, COL.dimmer, { align: 'right' }); }
+            if (touchMode) {
+              const h = navH(), y = navTop();
+              plate(8, y, 80, h, false); text(page === 0 ? '< TITLE' : '< BACK', 48, y + Math.floor((h - 8) / 2), COL.text, { align: 'center' });
+              plate(168, y, 80, h, false); text(page === PAGES - 1 ? 'DONE >' : 'NEXT >', 208, y + Math.floor((h - 8) / 2), COL.text, { align: 'center' });
+            } else { text('ESC: BACK', 4, 211, COL.dimmer); text('← → PAGE', 252, 211, COL.dimmer, { align: 'right' }); }
           }
         });
       },
@@ -1612,7 +1681,7 @@ const Main = (() => {
             else if (i % 2 === 0) { ctx.fillStyle = 'rgba(60,242,255,0.045)'; ctx.fillRect(30, y - 3, 196, 12); }
             text(ordinal(i), 40, y, c);
             text(e.name, 88, y, c);
-            text(fmtScore(e.score, 7), 184, y, c, { align: 'right' });
+            text(fmtScore(e.score), 184, y, c, { align: 'right' });             // (the same 6-digit format as the HUD and the title: U15)
             text('R' + String(e.round).padStart(2, '0'), 192, y, mine ? c : th.accent2);
           });
           // a game that missed the table still shows what it scored (arcade "YOUR SCORE")
@@ -1620,14 +1689,13 @@ const Main = (() => {
             const who = session.lastPlayers === 2 ? 'P' + (m.pi + 1) + ' SCORE ' : 'YOUR SCORE ';
             ctext(who + fmtScore(m.score), 178 + i * 9, PLAYER_COL[m.pi] || COL.white);
           });
-          if (!persistent && !args.attract) ctext('SCORES KEPT THIS VISIT ONLY', 3, COL.dimmer);   // the host grants no storage: initials last until the page closes
-          // the heroes watch from the floor; footer prompt between them
+          // the heroes watch from the floor; ONE back hint between them, the sandbox notice dim underneath it (U15)
           glowAt(34, 214, 22, '#ff3ea5', 0.3, 0.3); glowAt(222, 214, 22, '#3cf2ff', 0.3, 0.3);
           spr('p1_idle', Math.floor(t / 50) % 3 === 2 ? 1 : 0, 26, 200);
           spr('p2_idle', Math.floor((t + 20) / 50) % 3 === 2 ? 1 : 0, 214, 200, { flip: true });
           const fy = missed.length > 1 ? 195 : 189;
-          if (blink(t, 30)) ctext(args.attract ? 'PUSH ANY BUTTON' : (touchLabel() + ': BACK TO TITLE'), fy, COL.dim);
-          if (!args.attract && !touchMode) ctext('ESC: BACK', fy + 11, COL.dimmer);
+          if (blink(t, 30)) ctext(args.attract ? 'PUSH ANY BUTTON' : (touchMode ? 'TAP: BACK' : 'ENTER / ESC: BACK'), fy, COL.dim);
+          if (!persistent && !args.attract) ctext(touchMode ? 'KEPT THIS VISIT ONLY' : 'SCORES KEPT THIS VISIT ONLY', fy + 11, COL.dimmer, { scale: touchMode ? 1 : 0.75 });   // the host grants no storage: initials last until the page closes
         });
       },
     };
@@ -1768,15 +1836,19 @@ const Main = (() => {
     // tableau the band never reaches (hero hop apex y = 170, pearl top y >= 174). The key hint sits on its own plate above the band.
     const BAND_TOP = 18, BAND_BOT = 160, SMALL_CY = 194, X_FADE = 14;
     const CAST_ROW = ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer', 'bonefin'];
-    let phase = 0, pt = 0;                                // 0 tableau, 1 credits, 2 finale
+    const XF_OUT = 18, XF_IN = 18;                        // section changes dissolve through the dark: 18 frames out, 18 in (U5; the bloom of the bright parts fades faster than the veil rises)
+    let phase = 0, pt = 0, show = 0, showT = 99, xf = -1, xfTo = 0, leaving = -1;   // 0 tableau, 1 credits, 2 finale; `show` = the section on screen (it lags `phase` by the fade-out)
+    /** Where text lives in each section: ambient bubbles and the celebration bubbles keep out of these (V5). */
+    const zones = () => (show === 0 ? [[16, 8, 240, 62], [56, 200, 200, 221]] : show === 1 ? [[16, 0, 240, 162]] : [[16, 0, 240, 110]]);
+    function setPhase(n) { phase = n; pt = 0; xfTo = n; xf = 0; }
     let blocks = [], endScroll = 0, scroll = 0, boost = 0, idleEnd = 0, args = {}, entries = [];
     const celeb = (() => {                                // extra rising bubbles for the celebration
       const r = U.rng(77), list = [];
       for (let i = 0; i < 18; i++) list.push({ x: r.int(20, 228), sp: r.float(0.35, 0.9), off: r.int(0, 300), ph: r.float(0, 6.28), big: r.chance(0.3) });
       return list;
     })();
-    /** 0 = the pearl is big and centred (tableau, finale), 1 = small, between the heroes (credits). */
-    const pearlMix = () => (phase === 1 ? ease(clamp01(pt / 40)) : phase === 2 ? 1 - ease(clamp01(pt / 20)) : 0);
+    /** 0 = the pearl is big and centred (tableau, finale), 1 = small, between the heroes (credits). It follows the SHOWN section, so nothing moves while a section dissolves out. */
+    const pearlMix = () => (show === 1 ? ease(clamp01(showT / 40)) : show === 2 ? 1 - ease(clamp01(showT / 20)) : 0);
 
     function build(res) {
       blocks = [];
@@ -1806,14 +1878,14 @@ const Main = (() => {
 
     /** Light rays: thin wedges rotating slowly around the pearl, additive (soft, warm white: the light returns). */
     function rays(t, a, cy) {
-      const R = 190, N = 14;
+      const R = 190, N = quality >= 1 ? 14 : 6, layers = quality >= 2 ? 2 : 1;      // 28 / 14 / 6 wedges by quality (U6)
       const g = ctx.createRadialGradient(PEARL_CX, cy, 8, PEARL_CX, cy, R);
       g.addColorStop(0, rgba(200, 225, 255, 0.11 * a));
       g.addColorStop(1, rgba(220, 240, 255, 0));
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       ctx.fillStyle = g;
-      for (let layer = 0; layer < 2; layer++) {
+      for (let layer = 0; layer < layers; layer++) {
         const rot = (layer ? -1 : 1) * t * 0.0045 + layer * 0.2;
         for (let k = 0; k < N; k++) {
           const ang = rot + (k * Math.PI * 2) / N, w = 0.045 + 0.025 * Math.sin(k * 1.7 + t / 90 + layer);
@@ -1828,13 +1900,15 @@ const Main = (() => {
       ctx.restore();
     }
 
-    function riseBubbles(t) {
+    function riseBubbles(t, avoid) {
       const n = reducedMotion ? celeb.length >> 1 : celeb.length;
       for (let i = 0; i < n; i++) {
         const b = celeb[i];
         const y = C.H + 10 - ((t * b.sp + b.off) % (C.H + 30)), x = b.x + Math.sin(t / 40 + b.ph) * 6;
         if (y < -12) continue;
-        spr('bubble', Math.floor(t / 14) + b.off, x, y, { alpha: b.big ? 0.8 : 0.5 });
+        const a = bubbleAlpha(x, y, b.big ? 0.8 : 0.5, avoid);
+        if (a < 0.03) continue;
+        GFX.has('bubble') && GFX.draw(ctx, 'bubble', Math.floor(t / 14) + b.off, x, y, { alpha: a });
       }
     }
 
@@ -1850,13 +1924,14 @@ const Main = (() => {
     function drawScene(t, dimA) {
       const mix = pearlMix(), pcy = U.lerp(PEARL_CY, SMALL_CY, mix);
       staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); });
-      const warm = ctx.createLinearGradient(0, C.H * 0.45, 0, C.H);       // reef light washing in from the bottom
+      const warm = ctx.createLinearGradient(0, C.H * 0.45, 0, C.H);       // reef light washing in from the bottom (transparent over the upper 45 %: only the lower part is filled, U6)
       warm.addColorStop(0, 'rgba(255,170,120,0)');
       warm.addColorStop(1, rgba(255, 170, 120, 0.16 * (1 - dimA * 0.6)));
-      ctx.fillStyle = warm; ctx.fillRect(0, 0, C.W, C.H);
+      ctx.fillStyle = warm; ctx.fillRect(0, C.H * 0.45, C.W, C.H * 0.55);
       rays(t, 1 - dimA * 0.6, pcy);
-      riseBubbles(t);
-      ambient.draw(t, 0.35, false);
+      const zs = zones();
+      riseBubbles(t, zs);
+      ambient.draw(t, 0.35, false, zs);
       towerFrame();
       // the big pearl, bobbing, with sparkles around it (fades out while it moves down between the heroes)
       const bob = Math.round(Math.sin(t / 22) * 3);
@@ -1913,22 +1988,25 @@ const Main = (() => {
         const res = args.res || Game.result();
         entries = args.entries;
         build(res);
-        phase = 0; pt = 0; scroll = 0; boost = 0; idleEnd = 0;
+        phase = 0; pt = 0; show = 0; showT = 99; xf = -1; xfTo = 0; leaving = -1; scroll = 0; boost = 0; idleEnd = 0;
         AUDIO.music('ending');
       },
-      band: () => ({ top: BAND_TOP, bottom: BAND_BOT, scroll, endScroll, phase }),
+      band: () => ({ top: BAND_TOP, bottom: BAND_BOT, scroll, endScroll, phase, show }),
       update(ui) {
         ambient.update();
         pt++;
-        const next = () => gotoScene('entry', { entries });
+        if (leaving >= 0) { if (++leaving >= XF_OUT) gotoScene('entry', { entries }); return; }       // dissolving out: the entry fades in from the same dark
+        const next = () => { if (leaving < 0) leaving = 0; };
         if (sceneT >= INPUT_GUARD && ui.p.pause) { next(); return; }
+        showT++;
+        if (xf >= 0) { xf++; if (xf >= XF_OUT && show !== xfTo) { show = xfTo; showT = 0; } if (xf >= XF_OUT + XF_IN) xf = -1; }
         if (phase === 0) {
-          if (pt >= TABLEAU || (pt > INPUT_GUARD && (ui.p.ok || ui.p.alt))) { phase = 1; pt = 0; }
+          if (pt >= TABLEAU || (pt > INPUT_GUARD && (ui.p.ok || ui.p.alt))) setPhase(1);
         } else if (phase === 1) {
           if (ui.p.ok || ui.p.alt) boost = 90;
           if (boost > 0) boost--;
           scroll = Math.min(endScroll, scroll + SPEED * ((ui.h.ok || ui.h.alt || boost > 0) ? FAST : 1));
-          if (scroll >= endScroll) { phase = 2; pt = 0; }
+          if (scroll >= endScroll) setPhase(2);
         } else {
           idleEnd++;
           if ((idleEnd > 30 && (ui.p.ok || ui.p.alt)) || idleEnd > 600) next();
@@ -1936,18 +2014,23 @@ const Main = (() => {
       },
       render() {
         const t = sceneT;
-        drawScene(t, phase === 0 ? 0 : phase === 1 ? 0.55 : 0.5);
-        if (phase === 0) {
+        drawScene(t, show === 0 ? 0 : show === 1 ? 0.55 : 0.5);
+        if (show === 0) {
+          const pt0 = phase === 0 ? pt : 1e9;                     // (while the tableau fades out its text stays complete)
           const lines = [['MOON PEARL', 12, 2, COL.gold, 6], ['IS SAFE!', 30, 2, COL.gold, 34], ['THE REEF SHINES AGAIN', 52, 1, COL.text, 70]];
           lines.forEach(([s, y, sc, c, at]) => {
-            const n = Math.floor(U.clamp((pt - at) * 0.9, 0, s.length));
+            const n = Math.floor(U.clamp((pt0 - at) * 0.9, 0, s.length));
             if (n > 0) ctext(s.slice(0, n), y, c, { scale: sc });
           });
-          if (pt > 150 && pt < 330 && blink(pt, 30)) hintPlate(touchLabel() + ': SKIP', 204);
-        } else if (phase === 1) {
+          if (phase === 0 && pt > 150 && pt < 330 && blink(pt, 30)) hintPlate(touchLabel() + ': SKIP', 204);
+        } else if (show === 1) {
           drawCredits(t);
           hintPlate(touchMode ? 'TAP: FASTER' : 'ENTER: FASTER  ESC: SKIP', 3);
         } else drawFinale(t);
+        if (xf >= 0 || leaving >= 0) {                            // the dissolve: a veil of the abyss colour ramps to full and back, so no section is swapped in one frame (U5)
+          const a = ease(leaving >= 0 ? Math.min(1, leaving / XF_OUT) : xf < XF_OUT ? xf / XF_OUT : 1 - (xf - XF_OUT) / XF_IN);   // (smoothstep: the steepest frame is ~1.5x the average one)
+          if (a > 0.004) { ctx.fillStyle = rgba(3, 6, 16, U.clamp(a, 0, 1)); ctx.fillRect(0, 0, C.W, C.H); }
+        }
       },
     };
   })();
@@ -2071,6 +2154,7 @@ const Main = (() => {
   }
 
   function tick(useReal) {
+    if (useReal && focusUp() && attractRun()) { tapped.clear(); touchTap.clear(); pointerEvt = null; return; }   // an attract run waits behind the click-to-play overlay (U9)
     sceneT++;
     const inp = sampleInput(useReal);
     const sc = scenes[scene];
@@ -2082,6 +2166,7 @@ const Main = (() => {
       else inp.p.ok = true;
       if (scenes[scene] !== sc) { tapped.clear(); touchTap.clear(); return; }   // the tap already changed the scene
     }
+    if (useReal && (inp.heldAny || inp.hit)) { dirty = true; activeUntil = sceneT + ACTIVE_GRACE; }   // something to show now: render this frame, and stay at full rate for a moment
     if (inp.p.mute) toggleMute();
     if (!audioSynced) {
       let ready = false;
@@ -2090,6 +2175,7 @@ const Main = (() => {
     }
     if (useReal) trackDeadAudio();
     if (toastT > 0) toastT--;
+    if (fadeIn > 0) fadeIn--;
     sc.update(inp);
     if (useReal) { tapped.clear(); touchTap.clear(); }
   }
@@ -2108,6 +2194,7 @@ const Main = (() => {
     q = U.clamp(q, 0, maxQuality);
     if (q === quality) return quality;
     quality = q;
+    dirty = true;
     qualityLog.push({ q, why: why || 'set', frame: renderCount });
     if (qualityLog.length > 64) qualityLog.shift();
     pushOptions();
@@ -2127,46 +2214,68 @@ const Main = (() => {
   }
   const autoQ = {
     sum: 0, n: 0, span: 0, calm: 0, wait: Q_RAISE_AFTER_MS, clock: 0, lastRaise: -1e9, last: 0, windows: 0, fBuf: [], fSpan: 0, skip: 0,
-    reset() { this.sum = 0; this.n = 0; this.span = 0; this.calm = 0; this.fBuf.length = 0; this.fSpan = 0; },
+    dts: [], lateN: 0, nWin: 0, longN: 0, rMax: R_MAX_DEFAULT, lastLate: 0, lastR: 0,
+    reset() { this.sum = 0; this.n = 0; this.span = 0; this.calm = 0; this.fBuf.length = 0; this.fSpan = 0; this.lateN = 0; this.nWin = 0; this.longN = 0; },
     /** One step down the ladder: quality 2 -> 1 -> 0, then the resolution lever. `avg` (ms, optional) = the measured cost: the lever then jumps to the k whose predicted
-     *  cost (fill ~ k^2) is back under the drop threshold instead of one bucket. Returns whether anything changed. */
+     *  cost (fill ~ k^2) is back under the drop threshold instead of one bucket. A drop soon after a raise (the raise was a mistake) doubles the next wait, on EVERY
+     *  path (window average, severe fast path, start-up). Returns whether anything changed. */
     degrade(why, avg) {
       let changed = false;
+      const recent = this.clock - this.lastRaise < this.wait * 1.5;
       if (quality > 0) { setQuality(quality - 1, why); changed = true; this.reset(); }
       else {
         const cur = Math.min(K, kCap); let lk = lowerK(cur);
         if (lk && avg > Q_DROP_MS) { const want = cur * Math.sqrt(Q_DROP_MS / avg) * 1.1; let b = 0; for (const g of GFX_BUCKETS) if (g <= want + 1e-6 && g >= K_CAP_MIN) b = g; lk = Math.min(lk, b || K_CAP_MIN); }
         if (lk) { setKCap(lk, why + '-res'); changed = true; this.reset(); this.skip = Q_SKIP_FRAMES; }   // the re-bake after a k change is not what the next window is about
       }
+      if (changed && recent) this.wait = Math.min(this.wait * 2, Q_WAIT_MAX_MS);
       return changed;
     },
-    /** cost = ms spent in update + render + post FX for one animation frame; dt = ms since the previous frame. */
-    feed(cost, dt) {
+    /** The calm frame period R: the shortest interval among the last R_WIN frames, clamped to [one fixed step, the display refresh seen at boot]. A frame that arrives
+     *  later than LATE_RATIO x R missed its slot: whatever the callback measured, the player waited dt - LATE_SHARE x R for it. */
+    period() {
+      let r = 1e9;
+      for (let i = 0; i < this.dts.length; i++) if (this.dts[i] < r) r = this.dts[i];
+      return U.clamp(r, STEP_MS * 0.96, this.rMax);
+    },
+    /** cost = ms spent in update + render + post FX for one animation frame; dt = ms since the previous animation frame; span (default dt) = ms of wall clock this sample stands for
+     *  (a frame that was not rendered, v3 U2 / U3, adds its time but no sample); raise = false in scenes whose cost says nothing about gameplay (menus, pause). */
+    feed(cost, dt, span, raise) {
       if (!(cost >= 0) || !(dt > 0) || qualityLocked) return;
+      if (!(span > 0)) span = dt;
       if (this.skip > 0) { this.skip--; return; }
-      this.sum += cost; this.n++; this.span += dt; this.clock += dt;
-      this.fBuf.push(cost); this.fSpan += dt;
+      this.dts.push(dt); if (this.dts.length > R_WIN) this.dts.shift();
+      const R = this.period();
+      const late = this.dts.length >= 20 && dt > LATE_RATIO * R;
+      const eff = late ? Math.max(cost, dt - LATE_SHARE * R) : cost;
+      this.lastR = R;
+      if (late) this.lateN++;
+      if (dt > 50) this.longN++;
+      this.nWin++;
+      this.sum += eff; this.n++; this.span += span; this.clock += span;
+      this.fBuf.push(eff); this.fSpan += span;
       if (this.fSpan >= Q_FAST_WINDOW_MS) {                                // severe overload fast path (see Q_SEVERE_MS)
         const a = this.fBuf.slice().sort((x, y) => x - y), med = a[a.length >> 1], enough = a.length >= Q_FAST_MIN_FRAMES, mean = a.reduce((x, y) => x + Math.min(y, 100), 0) / a.length;
         this.fBuf.length = 0; this.fSpan = 0;
         if (enough && med > Q_SEVERE_MS && this.degrade('auto-drop-fast', mean)) return;
       }
       if (this.span < Q_WINDOW_MS) return;
-      const avg = this.sum / this.n, span = this.span;
-      this.last = avg; this.windows++;
-      this.sum = 0; this.n = 0; this.span = 0;
-      if (avg > Q_DROP_MS) {
+      const avg = this.sum / this.n, lateFrac = this.lateN / Math.max(1, this.nWin), longN = this.longN;
+      this.last = avg; this.lastLate = lateFrac; this.windows++;
+      const sp = this.span;
+      this.sum = 0; this.n = 0; this.span = 0; this.lateN = 0; this.nWin = 0; this.longN = 0;
+      if (avg > Q_DROP_MS || lateFrac > Q_LATE_FRAC) {                      // slow on average, or one frame in ten misses its slot
         this.calm = 0;
-        const recent = this.clock - this.lastRaise < this.wait * 1.5;
-        if (this.degrade('auto-drop', avg) && recent) this.wait = Math.min(this.wait * 2, Q_WAIT_MAX_MS);
-      } else if (avg < Q_RAISE_MS) {
-        this.calm += span;
+        this.degrade('auto-drop', Math.max(avg, Q_DROP_MS * 1.01));
+      } else if (avg < Q_RAISE_MS && lateFrac <= 0.02 && longN === 0) {     // calm: cheap AND on time (no frame of the window over 50 ms, at most 2 % late)
+        if (raise === false) return;                                         // (the calm clock waits for a gameplay window)
+        this.calm += sp;
         if (this.calm >= this.wait && quality < maxQuality) { setQuality(quality + 1, 'auto-raise'); this.lastRaise = this.clock; this.calm = 0; }
         else if (this.calm >= this.wait && kCap < Infinity) { const hk = higherK(kCap); setKCap(hk >= kNat ? Infinity : hk, 'auto-raise-res'); this.lastRaise = this.clock; this.calm = 0; this.skip = Q_SKIP_FRAMES; }
         else if (this.calm >= 6 * Q_RAISE_AFTER_MS) this.wait = Q_RAISE_AFTER_MS;
       } else this.calm = 0;
     },
-    state() { return { quality, locked: qualityLocked, windowAvgMs: this.last, windows: this.windows, calmMs: this.calm, raiseWaitMs: this.wait, pendingMs: this.span, kCap: kCap === Infinity ? null : kCap, kNat, k: K, log: qualityLog.slice() }; },
+    state() { return { quality, locked: qualityLocked, windowAvgMs: this.last, lateFrac: this.lastLate, periodMs: this.lastR, windows: this.windows, calmMs: this.calm, raiseWaitMs: this.wait, pendingMs: this.span, kCap: kCap === Infinity ? null : kCap, kNat, k: K, log: qualityLog.slice() }; },
   };
 
   /** prefers-reduced-motion -> Game.setOptions({ reducedMotion }) and the scenes' own motion (ambient count, no flashes). `reducedOverride` (a test hook) wins. */
@@ -2203,12 +2312,39 @@ const Main = (() => {
     try {
       scenes[scene].render();
       drawOverlays();
+      if (fadeIn > 0) { ctx.fillStyle = rgba(3, 6, 16, fadeIn / FADE_IN_FRAMES); ctx.fillRect(0, 0, C.W, C.H); }
     } finally { postFX(); }
   }
 
   /** Run fn; on a throw log once and report failure to the caller. */
   function guarded(label, fn) {
     try { fn(); return true; } catch (e) { reportError(label + ' [' + scene + ']', e); return false; }
+  }
+
+  /** How many fixed updates may pass between two renders of the current scene (v3 U2 / U3): 1 = every update (the default), N = static scenes (a how-to page, the scores, the
+   *  idle title after its intro: 20 fps), 0 = never until something changes (a paused game behind the click-to-resume overlay, or while the page is not live). A render with
+   *  no update before it is a bit-identical frame and never happens (a 120 Hz display costs what a 60 Hz one does). Anything that can change the picture sets `dirty`. */
+  function renderEvery() {
+    if (sceneT < activeUntil) return 1;                                // a touch / key a moment ago: stay responsive
+    if (scene === 'play') return !paused ? 1 : (focusUp() || isHeld()) ? 0 : PAUSE_EVERY;
+    if (scene === 'title') return scenes.title.settled() ? STATIC_EVERY : 1;
+    if (scene === 'howto' || scene === 'scores') return STATIC_EVERY;
+    return 1;
+  }
+  const focusUp = () => !!(focusEl && !focusEl.hidden);
+
+  /** The display's refresh period, learnt from IDLE frames (v3 U1): animation frames that rendered nothing (a static scene, a duplicate on a fast display) arrive at the display's
+   *  refresh period unless the frame before them was still busy; over 90 of them the shortest cadence is that period. A display that really runs at a lower rate (30 Hz power
+   *  saving) must not look "late" to the ladder, so R may grow up to that period; an overloaded 60 Hz one still shows 16.7 ms between most idle frames and keeps the normal R.
+   *  Re-evaluated every 90 samples (a power-saving mode can be switched on or off at any time). */
+  const idleDts = [], idleLast = { n: 0, lo: 0, med: 0 };
+  function watchRefresh(idle, dt) {
+    if (!idle || frozen || isHeld() || !(dt >= 2 && dt < 100)) return;
+    idleDts.push(dt);
+    if (idleDts.length < 90) return;
+    const a = idleDts.slice().sort((x, y) => x - y), lo = a[a.length >> 3], med = a[a.length >> 1];
+    idleDts.length = 0; idleLast.n++; idleLast.lo = lo; idleLast.med = med;
+    if (med <= lo * 1.12) { refreshMs = med; autoQ.rMax = med > R_MAX_DEFAULT * 1.15 ? Math.min(45, med * 1.08) : R_MAX_DEFAULT; }     // (a consistent cadence: its period is the refresh period)
   }
 
   function frame(now) {
@@ -2219,21 +2355,34 @@ const Main = (() => {
     const dt = Math.min(now - last, 250);
     last = now;
     const c0 = performance.now();
-    let ok = true;
+    let ok = true, steps = 0;
+    frameStats.rafs++;
     if (frozen) acc = 0;
     else {
       acc += dt;
-      let steps = 0;
       while (acc >= STEP_MS && steps < MAX_CATCHUP) {
         ok = guarded('update', () => tick(true)) && ok;
         acc -= STEP_MS; steps++;
       }
       if (steps === MAX_CATCHUP) acc = 0;                 // drop the backlog after a long stall
     }
-    ok = guarded('render', render) && ok;
-    const cost = performance.now() - c0;
-    costs[costI] = cost; costI = (costI + 1) % costs.length; if (costN < costs.length) costN++;
-    if (!frozen && !isHeld()) autoQ.feed(cost, dt);                   // (a genuinely slow frame counts too: its cost is what the average is about)
+    frameStats.updates += steps;
+    sinceRender += steps;
+    pendingSpan += dt;
+    // render at most once per fixed update, and only as often as the scene needs (see renderEvery)
+    let rate = 1, due = frozen || dirty;
+    if (!due && sinceRender > 0) { rate = renderEvery(); due = rate > 0 && sinceRender >= rate; if (!due) frameStats.skippedStatic++; }
+    else if (!due) frameStats.skippedDup++;
+    watchRefresh(!due, dt);
+    if (due) {
+      ok = guarded('render', render) && ok;
+      sinceRender = 0; dirty = false; lastRenderAt = c0; frameStats.renders++;
+      const cost = performance.now() - c0;
+      costs[costI] = cost; costI = (costI + 1) % costs.length; if (costN < costs.length) costN++;
+      // the ladder sees the frame the player sees: its real interval counts, not only the JS cost (U1). Scenes that run below full rate say nothing about gameplay: not fed.
+      if (!frozen && !isHeld() && rate === 1 && !(scene === 'play' && paused) && sceneT >= SCENE_SETTLE) autoQ.feed(cost, dt, pendingSpan, scene === 'play' && !paused);
+      pendingSpan = 0;
+    }
     syncSoundButton();
     failStreak = ok ? 0 : failStreak + 1;
     if (failStreak >= FAIL_LIMIT && scene !== 'title') {   // soft-lock guard
@@ -2277,11 +2426,11 @@ const Main = (() => {
   function applyScale(k) {
     const w = Math.round(C.W * k), h = Math.round(C.H * k);
     let resized = false;
-    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; resized = true; }
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; resized = true; dirty = true; }
     if (k !== K || !scaleSent) {
       K = k; scaleSent = true;
       scaleLog.push(k); if (scaleLog.length > 200) scaleLog.shift();
-      bigHeroes.clear(); dropStatics();
+      dropStatics();
       try { if (typeof GFX.setScale === 'function') GFX.setScale(K); } catch (e) { reportError('GFX.setScale', e); }
     }
     return resized;
@@ -2353,10 +2502,14 @@ const Main = (() => {
     const snap0 = pickScale(pick.s, dpr);                     // crisp 1:1 fit when cheap, else fill + smooth resample
     kNat = snap0.k;
     const snap = snap0.k > kCap ? { s: snap0.s, k: kCap, snapped: false } : snap0;      // resolution lever: same css size, fewer backing pixels
-    if (touchMode && mode === 'port') {                       // the leftover height goes to the big buttons
-      btnH = U.clamp(Math.floor(baseH - C.H * snap.s - CTRL_OVERHEAD), minBtnH, BTN_MAX_H);
+    let gapTop = 0;
+    if (touchMode && mode === 'port') {                       // the leftover height goes to the big buttons, then (V4) half of the rest above the picture, half between the PAUSE / SOUND strip and the pads
+      const left = Math.floor(baseH - C.H * snap.s - CTRL_OVERHEAD);
+      btnH = U.clamp(left, minBtnH, BTN_MAX_H);
       root.style.setProperty('--btn-h', btnH + 'px');
+      gapTop = left > btnH ? Math.round((left - btnH + ROW_GAP) * GAP_TOP_SHARE) : 0;   // (the strip's own 10 px gap to the pads belongs to the lower gap)
     }
+    root.style.setProperty('--gap-top', gapTop + 'px');
     const cssW = +(C.W * snap.s).toFixed(3), cssH = +(C.H * snap.s).toFixed(3);
     const resized = applyScale(snap.k);
     canvas.style.width = cssW + 'px';
@@ -2366,6 +2519,8 @@ const Main = (() => {
       sharp: false, m: snap.k, k: snap.k, kNat, snapped: snap.snapped, backW: canvas.width, backH: canvas.height, legend: showLegend, btnW, btnH, availW: baseW, availH: baseH,
     };
     watchDpr();
+    root.classList.add('fp');                                // the page's pre-script geometry (template.html, U10) hands over to the measured one
+    dirty = true;
     if (resized && sceneReady && scenes[scene]) guarded('render', render);    // a resize clears the canvas: repaint now (also while the loop is frozen)
   }
 
@@ -2487,6 +2642,7 @@ const Main = (() => {
         ambient: () => ({ shown: ambient.shown(), avoid: lastAvoid.map((r) => r.slice()) }),   // K1: the last layered frame's exclusion rectangles
         endingBand: () => scenes.ending.band(),
         howtoPage: () => scenes.howto.page(),
+        howtoNav: () => scenes.howto.navZone(),                // v3 U13: the touch BACK zone { top, backX1, h } in logical px
         ambientReset: () => ambient.reset(),
         persistent: () => storagePersistent(),
         // ---- v2: render scale, quality, reduced motion -----------------------------------------------------
@@ -2495,8 +2651,11 @@ const Main = (() => {
         quality: () => quality,                              // current post FX / particle level 0..2
         setQuality: (q, lock) => { qualityLocked = !!lock; return setQuality(q, 'hook'); },   // lock = true freezes auto quality (tests that compare pixels)
         autoQuality: () => autoQ.state(),                    // { quality, windowAvgMs, calmMs, raiseWaitMs, log, ... }
-        autoQualityFeed: (cost, dt) => { autoQ.feed(cost, dt); return quality; },   // simulate frames: cost ms of work per frame, dt ms between frames
-        autoQualityReset: () => { qualityLocked = false; autoQ.reset(); autoQ.wait = Q_RAISE_AFTER_MS; autoQ.lastRaise = -1e9; autoQ.skip = 0; qualityLog.length = 0; setKCap(Infinity, 'reset'); },
+        autoQualityFeed: (cost, dt, span, raise) => { autoQ.feed(cost, dt, span, raise); return quality; },   // simulate frames: cost ms of work per frame, dt ms between frames (span / raise: see autoQ.feed)
+        frameStats: () => ({ ...frameStats, sinceRender, dirty, rate: renderEvery(), rMax: autoQ.rMax, refreshMs, idle: { ...idleLast, pending: idleDts.length } }),   // v3: how many rAFs ran, updates ran, frames were rendered / skipped (U2, U3)
+        calibration: () => (calib ? JSON.parse(JSON.stringify(calib)) : null),   // v3 U4: what the start-up micro-benchmark measured and picked
+        invalidate: () => { dirty = true; },
+        autoQualityReset: () => { qualityLocked = false; autoQ.reset(); autoQ.dts.length = 0; autoQ.wait = Q_RAISE_AFTER_MS; autoQ.lastRaise = -1e9; autoQ.skip = 0; autoQ.clock = 0; qualityLog.length = 0; setKCap(Infinity, 'reset'); },
         setKCap: (c) => { setKCap(c === null || c === undefined ? Infinity : +c, 'hook'); return K; },   // resolution lever (tests): cap on k, null = off
         reducedMotion: () => reducedMotion,
         setReducedMotion: (b) => { reducedOverride = b === null || b === undefined ? null : !!b; syncMotion(); return reducedMotion; },   // null = follow the OS again
@@ -2507,7 +2666,7 @@ const Main = (() => {
           return { n, avg: n ? a.reduce((s, v) => s + v, 0) / n : 0, p95: n ? a[Math.min(n - 1, Math.floor(n * 0.95))] : 0, max: n ? a[n - 1] : 0 };
         },
         renderNow: () => { render(); },
-        bigHeroes: () => ({ px: bigHeroes.px(), count: bigHeroes.count() }),
+        bigHeroes: () => ({ px: bigHeroes.px(), count: bigHeroes.count(), viaGFX: typeof GFX.drawHero === 'function' }),   // v3 V11: count = big-twin draws so far (GFX bakes and caches them)
       },
     };
     for (const k of ['scene', 'goto', 'freeze', 'step', 'start']) hooks[k] = ready(hooks[k]);
@@ -2529,21 +2688,89 @@ const Main = (() => {
     g.addColorStop(0, 'rgba(60,242,255,0.18)'); g.addColorStop(1, 'rgba(60,242,255,0)');
     ctx.fillStyle = g; ctx.fillRect(0, 0, C.W, C.H);
     ctx.fillStyle = 'rgba(60,242,255,0.5)';
-    ctx.fillRect(88, 124, 80, 1.2 / K);
+    ctx.fillRect(80, 124, 96, 1.2 / K);
     let ok = false;
-    try { GFX.text(ctx, 'LOADING', 128, 108, COL.text, { align: 'center' }); ok = true; } catch (e) { ok = false; }
+    try { GFX.text(ctx, 'LOADING', 128, 104, COL.text, { align: 'center', scale: 2 }); ok = true; } catch (e) { ok = false; }   // (scale 2: legible on a phone, U10)
     if (!ok) {
       ctx.fillStyle = '#8eeaff'; ctx.font = '8px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText('LOADING', 128, 112);
     }
   }
 
+  /** Start-up calibration (v3 U4): how fast is THIS device's raster path? A reference-size canvas gets full-frame additive blits (the operation that dominates a busy frame on a
+   *  software rasteriser and on a weak GPU) with one read-back to wait for the raster / GPU; the best of a few runs predicts the busy-frame cost of every ladder state
+   *  (CAL_RATIO x the blit, fill ~ k^2). The best state that fits CAL_BUDGET_MS becomes the starting point: a phone starts at the k / quality it can sustain instead of spending
+   *  its first seconds at 100+ ms frames while the ladder walks down (each step an extra re-bake). The ladder stays the fine tuner. Costs 5..60 ms (hard cap CAL_MAX_MS). */
+  function calibrate() {
+    const t0 = performance.now(), c = { probeMs: 0, runs: 0, ms: 0, k: K, kNat: K, quality, kCap: null, pred: [] };
+    calib = c;
+    try {
+      const src = document.createElement('canvas'), dst = document.createElement('canvas');
+      src.width = dst.width = CAL_REF_W; src.height = dst.height = CAL_REF_H;
+      const sg = src.getContext('2d'), g = dst.getContext('2d');
+      sg.fillStyle = 'rgba(30,60,90,0.5)'; sg.fillRect(0, 0, CAL_REF_W, CAL_REF_H);
+      g.globalCompositeOperation = 'lighter';
+      const run = (n) => { const a = performance.now(); for (let i = 0; i < n; i++) g.drawImage(src, 0, 0); g.getImageData(0, 0, 1, 1); return (performance.now() - a) / n; };
+      run(1);                                                          // warm-up: canvas creation, first raster
+      const xs = [];
+      for (let i = 0; i < 4 && (i < 2 || performance.now() - t0 < CAL_MAX_MS); i++) { xs.push(run(4)); c.runs++; }
+      xs.sort((a, b) => a - b);
+      src.width = src.height = dst.width = dst.height = 1;
+      c.probeMs = xs[0];                                              // the best of four: other work on the machine only ever makes a run slower
+    } catch (e) { c.probeMs = 0; }
+    if (c.probeMs > 0 && !qualityLocked) {
+      const pred = (q, k) => CAL_RATIO[q] * c.probeMs * (k / 2) * (k / 2);
+      c.pred = [0, 1, 2].map((q) => +pred(q, K).toFixed(2));
+      let q = quality;
+      while (q > 0 && pred(q, K) > CAL_BUDGET_MS * (coarse ? 1 : 2)) q--;       // (a desktop only gives up quality when the prediction is more than twice the budget: a noisy start-up measurement must not cost it its bloom)
+      let cap = Infinity;
+      // even quality 0 is too slow at this k: render smaller (the css size stays, the browser upscales). A phone does that on the first sign of it; a desktop (fine pointer) only
+      // when the prediction is far over budget (a big canvas on a weak machine): a CPU rasteriser at k 6..8 is slow but not unusable, and the ladder trims it within a second anyway.
+      if (pred(0, K) > CAL_BUDGET_MS * (coarse ? 1 : CAL_FINE_SLACK)) {
+        const want = K * Math.sqrt(CAL_BUDGET_MS / pred(0, K));
+        let b = 0; for (const g of GFX_BUCKETS) if (g <= want + 1e-6 && g >= K_CAP_MIN) b = g;
+        cap = Math.min(b || K_CAP_MIN, K);
+        if (!(cap < K)) cap = Infinity;
+      }
+      if (q !== quality) setQuality(q, 'calibrate');
+      if (cap < Infinity) setKCap(cap, 'calibrate');
+      c.quality = quality; c.kCap = cap === Infinity ? null : cap; c.k = K;
+    }
+    c.ms = +(performance.now() - t0).toFixed(1);
+    return c;
+  }
+
   const bootProf = {};                                          // ms per boot phase (diagnostics: __fizzpop.bootProfile)
+  /** (v3 regression wave) Pre-bake the twin frames the title walks through. GFX bakes a big hero per (pose, frame, scale) on its FIRST draw, and the title shows 34 distinct ones in its
+   *  first ~8 s (Fizz idle x8 + blink x8 + puff + shoot, Pop idle x8 + blink x8 = 34 bakes): on a 4x-throttled phone each lazy bake lands inside a title frame as a 45-75 ms frame (measured with
+   *  the rAF recorder: 8 spikes in 1.5-3.7 s, 4 more up to 7.7 s). They are drawn once into a 1x1 scratch canvas, two per timer task (a bake is ~1.5 ms; requestIdleCallback is starved
+   *  by the title's own frames on a throttled phone, so a short timer chain is used: 17 tasks, the first 200 ms after the boot, never while the tab is hidden); whatever is not
+   *  baked yet when the title needs it is still baked lazily, exactly as before. Needs GFX.drawHero (the stub modules of some tests do not have it: no-op). */
+  function warmTwins() {
+    if (typeof GFX.drawHero !== 'function') return;
+    const jobs = [];                                                                    // in the order the title needs them: idle breathing of both twins (Pop runs 3 frames ahead), then the blinks, then Fizz's puff + shoot
+    for (let i = 1; i <= 8; i++) { jobs.push(['fizz', 'idle', i % 8, 8]); jobs.push(['pop', 'idle', (i + 3) % 8, 8]); }
+    for (let f = 0; f < 8; f++) { jobs.push(['pop', 'blink', f, 8]); jobs.push(['fizz', 'blink', f, 8]); }
+    jobs.push(['fizz', 'puff', 0, 8]); jobs.push(['fizz', 'shoot', 0, 8]);                  // (the title passes 8 frames for these single-frame poses too: same cache key)
+    let sc = null;
+    try { const c = document.createElement('canvas'); c.width = 1; c.height = 1; sc = c.getContext('2d'); } catch (e) { return; }
+    if (!sc) return;
+    const S = touchMode ? 2.0 : 3.0;
+    const step = () => {
+      if (!jobs.length) return;
+      if (!document.hidden) { try { for (let n = 0; n < 2 && jobs.length; n++) { const j = jobs.shift(); GFX.drawHero(sc, j[0], 0, 0, S, 0, { pose: j[1], frame: j[2], frames: j[3] }); } } catch (e) { jobs.length = 0; return; } }
+      if (jobs.length) setTimeout(step, document.hidden ? 500 : 16);                    // (a hidden tab only polls twice a second until it is shown again)
+    };
+    setTimeout(step, 200);
+  }
+
   function finishBoot() {
     if (bootDone) return;
     bootDone = true;
     let t0 = performance.now();
     const lap = (name) => { const n = performance.now(); bootProf[name] = Math.round((n - t0) * 10) / 10; t0 = n; };
+    calibrate();
+    lap('calibrate');
     try { GFX.init(); } catch (e) { reportError('GFX.init', e); }
     lap('gfxInit');
     bindDom();
@@ -2559,6 +2786,7 @@ const Main = (() => {
     last = lastRaf = performance.now();
     requestAnimationFrame(frame);
     requestAnimationFrame(() => requestAnimationFrame(fit));   // re-measure once fonts / layout settled
+    try { warmTwins(); } catch (e) { reportError('warmTwins', e); }
   }
 
   function boot() {

@@ -11,6 +11,7 @@
  *
  * Stub-only extras (NOT part of the contract, do not rely on them in production code):
  *   GFX._registry() -> [{name, w, h, frames}] — every sprite of the SPEC §3.1 table.
+ *   GFX._withFrozen(on) — v3: add / remove the <e>_frozen ice-cast sprites (off by default).
  */
 const GFX = (() => {
   // ---- sprite registry (SPEC §3.1) ----------------------------------------------------------
@@ -46,6 +47,7 @@ const GFX = (() => {
   // ---- placeholder colours --------------------------------------------------------------------
   const ENEMY_COLORS = { nibbler: '#d9a441', crabbit: '#e8604c', jellop: '#b779e8', springle: '#4cc9a0', glimmer: '#4c8ae8' };
   function baseColor(name) {
+    if (name.endsWith('_frozen')) return '#d6d0ff';                                         // v3: the ice casts are pale white-lilac
     if (name.startsWith('p1_')) return '#ff6fae';
     if (name.startsWith('p2_')) return '#6fd8ff';
     if (name.startsWith('bubble') || name === 'trap_overlay') return 'rgba(110,220,255,0.55)';
@@ -227,7 +229,17 @@ const GFX = (() => {
   }
   function postFX() { /* the stub has no post pass */ }
 
+  // v3 (V1, additive): the real cast has <e>_frozen (an ice cast of the creature, 16x16, 4 frames) which Game draws while an enemy is frozen. The stub registry follows the SPEC
+  // table, so these are OFF by default (other tests pin the table); GFX._withFrozen(true) registers them, (false) removes them again.
+  function _withFrozen(on) {
+    for (const e of ENEMIES) {
+      const n = e + '_frozen';
+      if (on && !REG[n]) reg(n, 16, 16, 4);
+      else if (!on && REG[n]) { delete REG[n]; names.splice(names.indexOf(n), 1); }
+    }
+  }
+
   const _registry = () => names.map((n) => ({ name: n, w: REG[n].w, h: REG[n].h, frames: REG[n].frames }));
 
-  return { init, draw, frames, size, has, text, textWidth, levelCanvas, theme, drawLogo, sheet, setScale, define, particle, postFX, _registry };
+  return { init, draw, frames, size, has, text, textWidth, levelCanvas, theme, drawLogo, sheet, setScale, define, particle, postFX, _registry, _withFrozen };
 })();

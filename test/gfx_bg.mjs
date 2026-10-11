@@ -6,7 +6,9 @@ import path from 'path';
 import { launch, canvasFnShot, PROJECT } from '../tools/harness.mjs';
 const t = await launch({ html: path.join(PROJECT, 'test', 'gfx_sheet.html') });
 let failed = 0;
+import { timingCheck } from './timing_gate.mjs';   // release-gate policy: wall-clock checks are advisory in the blocking run (FP_TIMING=advisory)
 const check = (n, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  ' + extra}`); if (!ok) failed++; };
+const tcheck = timingCheck((n, ok, extra) => check(n, ok, extra));
 const r = await t.page.evaluate(() => {
   // v2: every check runs at an explicit bake scale (bg canvases are 256b x 208b, b = bake bucket capped at 4)
   const K = 2; GFX.setScale(K);
@@ -72,7 +74,7 @@ check(`the 5 variants of every theme are visibly different images (min pairwise 
 check(`sprites stay far brighter than the background (darkest sprite contour (brightest quarter of lit px, ${r.minSpriteName}) mean L ${r.minSpriteMeanL.toFixed(2)} vs 98th-percentile bg ${r.p98.toFixed(3)}: ${((r.minSpriteMeanL + 0.05) / (r.p98 + 0.05)).toFixed(1)}:1 >= 3)`, (r.minSpriteMeanL + 0.05) / (r.p98 + 0.05) >= 3);
 const minP99 = Math.min(...r.p99), minShipTemple = Math.min(...[10, 11, 12, 13, 14, 25, 26, 27, 28, 29].map((i) => r.p99[i]));
 check(`silhouettes are perceivable on every round: p99 dE76 vs the gradient >= 3.5 (min ${minP99}), ship + temple >= 6 (min ${minShipTemple})`, minP99 >= 3.5 && minShipTemple >= 6);
-check(`build cost per canvas at k=4: median ${r.k4Median.toFixed(1)} ms <= 45, max ${r.k4Max.toFixed(1)} ms <= 80 (CPU raster)`, r.k4Median <= 45 && r.k4Max <= 80);
+tcheck(`build cost per canvas at k=4: median ${r.k4Median.toFixed(1)} ms <= 45, max ${r.k4Max.toFixed(1)} ms <= 80 (CPU raster)`, r.k4Median <= 45 && r.k4Max <= 80);
 const sheet = (amp) => {
   GFX.setScale(2);
   const S = 0.5, cv = document.createElement('canvas'); cv.width = 5 * 256 * S + 6; cv.height = 6 * 208 * S + 7; const g = cv.getContext('2d'); g.fillStyle = '#222'; g.fillRect(0, 0, cv.width, cv.height);

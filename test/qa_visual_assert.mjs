@@ -5,9 +5,9 @@
 // (Game.render into an off-screen k-scaled canvas, exactly like Main) with the text suppressed where the question is "does the text read on what is
 // behind it?" (same technique as test/game_visual.mjs V1/V2/V3, here against the built dist/fizzpop.html):
 //  G1 facing legibility   : Fizz/Pop idle+walk+jump+fall+shoot silhouettes differ from their mirror by >= 12% of visible px (alpha > 0.3)       (unchanged threshold)
-//  G2 round number legib. : HUD round digits, all 30 rounds: the background behind the digit box (digits suppressed) keeps WCAG contrast >= 3.0 against the white-hot digit core
+//  G2 round number legib. : HUD round label "R01" (v3: x 1..25, y 16..24), all 30 rounds: the background behind the digit box (digits suppressed) keeps WCAG contrast >= 3.0 against the white-hot digit core
 //  G3 angry vs Fizz       : mean-colour dE76 between p1_idle and each *_angry >= 35 (alpha-weighted, lit pixels only)                           (unchanged threshold)
-//  G4 frozen distinct     : frozen vs active enemy rendered by the real Game (tint + sparkles), dE76 >= 20 for ALL five types                  (unchanged threshold)
+//  G4 frozen distinct     : frozen vs active enemy rendered by the real Game (v3: the cast's ice sprite), dE76 >= 20 OR chroma -35 % OR bright-pixel saturation -40 %, for ALL five types
 //  G5 moon pearl halo     : the halo is light or low-chroma, never a muddy dark-brown ring (un-premultiplied halo colours: not (L* < 50 and chroma > 12)); and it is translucent
 //  G7 ROUND banner        : the background behind the "ROUND n" text (text suppressed) keeps contrast >= 3.0 against the white-hot text, all 30 rounds
 // (G6 "springle is not a dino" was a 16-px-grid heuristic; its intent -- the Springle silhouette is distinct from every other creature -- is covered by test/v2_cast_test.mjs "enemy silhouettes pairwise distinct".)
@@ -40,11 +40,11 @@ const res = await g.evaluate(() => {
     const v = 100 * df / Math.max(1, op); g1min = Math.min(g1min, v); g1[n + '#' + f] = +v.toFixed(1);
   }
   out.G1 = { pass: g1min >= 12, min: +g1min.toFixed(1), detail: g1 };
-  // G2: HUD round digits (left wall, digits box x 0..16, y 20..29), 30 rounds
+  // G2: HUD round label "R01" (v3 / G8: x 1..25, y 16..24 = the ceiling row; the 'R' and the two digits are suppressed, the region behind them is measured), 30 rounds
   const g2 = []; const WHITE_HOT = lum(0xea, 0xff, 0xff);
   for (let r = 1; r <= 30; r++) {
     fz.start(1, r, 7); fz.step(5);
-    const bg = withoutText((s) => /^\d\d$/.test(s), () => { const d = raw(frame(), 0, 20, 16, 9), o = []; for (let i = 0; i < d.length; i += 4) o.push(lum(d[i], d[i + 1], d[i + 2])); return o; });
+    const bg = withoutText((s) => /^\d\d$/.test(s) || s === 'R', () => { const d = raw(frame(), 1, 17, 24, 6), o = []; for (let i = 0; i < d.length; i += 4) o.push(lum(d[i], d[i + 1], d[i + 2])); return o; });
     g2.push({ r, c: +contrast(WHITE_HOT, pct(bg, 0.99)).toFixed(2) });
   }
   out.G2 = { pass: g2.every((x) => x.c >= 3), failing: g2.filter((x) => x.c < 3).map((x) => x.r + ':' + x.c), min: Math.min(...g2.map((x) => x.c)) };
@@ -53,18 +53,24 @@ const res = await g.evaluate(() => {
   const p1 = bodyMean('p1_idle'); const g3 = {}; let g3min = 1e9;
   for (const e of ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer']) { const v = dE(p1, bodyMean(e + '_angry')); g3[e] = +v.toFixed(1); g3min = Math.min(g3min, v); }
   out.G3 = { pass: g3min >= 35, min: +g3min.toFixed(1), detail: g3 };
-  // G4: frozen vs active on a busy crystal round, rendered by the real Game at k
-  const g4 = {}; { const D = fz.Game.debug; let gmin = 1e9;
+  // G4: frozen vs active on a busy crystal round, rendered by the real Game at k.
+  // v3 (V1): the frozen look is the cast's pale white-lilac ice sprite (<e>_frozen); a pale lilac body can sit close to a pale active body in MEAN Lab (glimmer), so the intent
+  // "a frozen creature reads differently" is: dE76 >= 20 between active and frozen OR the mean chroma falls by >= 35 % OR the saturation of the bright pixels falls by >= 40 %
+  // (the same criterion as test/game_visual.mjs V3).
+  const g4 = {}; { const D = fz.Game.debug; let gok = true, gmin = 1e9;
     for (const k of ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer']) {
       fz.start(1, 17, 7); D.god(true); D.noClear(true); D.skipIntro(); D.clearEnemies(); fz.step(2);
       const grab = () => { const d = raw(frame(), 0, 16, 256, 208), o = []; for (let i = 0; i < d.length; i += 4) o.push([d[i], d[i + 1], d[i + 2]]); return o; };
       const bgd = grab(); D.spawn(k, 120, 100); const e = D._S().enemies[D._S().enemies.length - 1]; e.vx = 0; e.vy = 0;
-      const meanLab = (setup) => { setup(); const im = grab(); let n = 0, L = 0, A = 0, B = 0; for (let i = 0; i < im.length; i++) { const a = im[i], b = bgd[i]; if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 60) { const l = lab(...a); n++; L += l[0]; A += l[1]; B += l[2]; } } return [L / n, A / n, B / n]; };
+      const meanLab = (setup) => { setup(); const im = grab(); let n = 0, L = 0, A = 0, B = 0, sw = 0, ws = 0; for (let i = 0; i < im.length; i++) { const a = im[i], b = bgd[i]; if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 60) { const l = lab(...a); n++; L += l[0]; A += l[1]; B += l[2]; const mx = Math.max(a[0], a[1], a[2]) / 255, mn = Math.min(a[0], a[1], a[2]) / 255; if (mx >= 0.55) { sw += mx; ws += (mx ? (mx - mn) / mx : 0) * mx; } } } return [L / n, A / n, B / n, n, sw ? ws / sw : 0]; };
       const normal = meanLab(() => { e.state = 'active'; e.x = 120; e.y = 100; e.animT = 0; });
       const frozen = meanLab(() => { e.state = 'frozen'; e.freezeT = 1e9; e.x = 120; e.y = 100; });
-      g4[k] = +dE(normal, frozen).toFixed(1); gmin = Math.min(gmin, g4[k]);
+      const d = dE(normal, frozen), chN = Math.hypot(normal[1], normal[2]), chF = Math.hypot(frozen[1], frozen[2]);
+      const ok = d >= 20 || chF <= 0.65 * chN || frozen[4] <= 0.6 * normal[4];
+      g4[k] = { dE: +d.toFixed(1), chromaNormal: +chN.toFixed(1), chromaFrozen: +chF.toFixed(1), satNormal: +normal[4].toFixed(2), satFrozen: +frozen[4].toFixed(2), ok };
+      gok = gok && ok; gmin = Math.min(gmin, d);
     }
-    out.G4 = { pass: gmin >= 20, min: gmin, detail: g4 }; }
+    out.G4 = { pass: gok, min: +gmin.toFixed(1), detail: g4 }; }
   // G5: the baked moon pearl: halo pixels (0.05 < alpha < 0.98) keep a LIGHT / low-chroma colour (un-premultiplied), and the halo is translucent
   const mp = spr('moonpearl', 0); let ringN = 0, ringL = 0, ringC = 0;
   for (let i = 0; i < mp.d.length; i += 4) { const a = mp.d[i + 3] / 255; if (a > 0.05 && a < 0.98) { const L = lab(mp.d[i], mp.d[i + 1], mp.d[i + 2]); ringN++; ringL += L[0]; ringC += Math.hypot(L[1], L[2]); } }

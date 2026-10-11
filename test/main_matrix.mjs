@@ -20,7 +20,7 @@ const DPRS = QUICK ? [1, 3] : [1, 2, 3];
 const measure = () => {
   const rc = (s) => { const e = document.querySelector(s); if (!e) return null; const b = e.getBoundingClientRect(); return { x: b.x, y: b.y, r: b.right, b: b.bottom, w: b.width, h: b.height, vis: getComputedStyle(e).display !== 'none' }; };
   const btns = [...document.querySelectorAll('#touch button')].map((b) => { const r = b.getBoundingClientRect(); return { k: b.dataset.k, x: r.x, y: r.y, r: r.right, b: r.bottom, w: r.width, h: r.height }; });
-  return { lay: window.__fizzpop._main.layout(), c: rc('#screen'), legend: rc('#legend'), touch: rc('#touch'), btns, sw: document.documentElement.scrollWidth, sh: document.documentElement.scrollHeight, iw: innerWidth, ih: innerHeight,
+  return { lay: window.__fizzpop._main.layout(), c: rc('#screen'), legend: rc('#legend'), touch: rc('#touch'), pads: rc('#touch .pads'), strip: rc('[data-k="pause"]'), btns, sw: document.documentElement.scrollWidth, sh: document.documentElement.scrollHeight, iw: innerWidth, ih: innerHeight,
     rows: window.__fizzpop._main.rows(), ir: getComputedStyle(document.getElementById('screen')).imageRendering, cw: document.getElementById('screen').width };
 };
 
@@ -35,7 +35,7 @@ function verify(label, m, touch) {
   if (L.snapped) {                                             // crisp: one backing pixel per device pixel
     const dev = (c.w * L.dpr) / 256;
     check(`${label}: crisp, ${dev.toFixed(3)} device px per logical px = k ${L.k}`, Math.abs(dev - L.k) < 0.02 * L.k, String(dev));
-  } else check(`${label}: not snapped: smooth resample from k ${L.k} (device px per logical px ${((c.w * L.dpr) / 256).toFixed(3)}, within 8 % unless k is capped at 8)`, Math.abs(((c.w * L.dpr) / 256) / L.k - 1) < 0.08 || L.k === 8, String(((c.w * L.dpr) / 256) / L.k));
+  } else check(`${label}: not snapped: smooth resample from k ${L.k} (device px per logical px ${((c.w * L.dpr) / 256).toFixed(3)}, within 8 % unless k is capped at 8)`, Math.abs(((c.w * L.dpr) / 256) / L.k - 1) < 0.08 || L.k === 8 || L.k < L.kNat, String(((c.w * L.dpr) / 256) / L.k));
   if (touch) {
     check(`${label}: touch UI visible, legend hidden`, m.touch.vis && !(m.legend && m.legend.vis && m.legend.h > 0));
     const big = m.btns.filter((b) => ['left', 'right', 'jump', 'fire'].includes(b.k)), pills = m.btns.filter((b) => b.k === 'pause' || b.k === 'sound');
@@ -49,8 +49,12 @@ function verify(label, m, touch) {
     const fire = m.btns.find((b) => b.k === 'fire');
     for (const p of pills) check(`${label}: ${p.k} is not within 8 px of BUBBLE`, !(p.r + 8 > fire.x && p.x - 8 < fire.r && p.b + 8 > fire.y && p.y - 8 < fire.b), JSON.stringify({ p, fire }));
     if (m.rows) check(`${label}: title rows >= ${m.rows.length > 0 ? 40 : 0} css px (${m.rows.map((r) => Math.round(r.h * L.scale)).join('/')})`, m.rows.every((r) => r.h * L.scale >= 39.5) || L.scale < 0.95, JSON.stringify({ rows: m.rows, s: L.scale }));
-    // K2: controls rest at the bottom of the viewport (8 px page padding, no empty band below them); the picture is centred in the space above
-    if (L.mode === 'port') check(`${label}: portrait: controls anchored at the bottom, picture centred above them`, m.touch.b >= m.ih - 8 - 1.5 && m.touch.b <= m.ih - 8 + 1.5 && Math.abs((c.y - 8) - (m.touch.y - c.b)) < 2, JSON.stringify({ cy: c.y, cb: c.b, ty: m.touch.y, tb: m.touch.b, ih: m.ih }));
+    // K2 / v3 V4: controls rest at the bottom of the viewport (8 px page padding, no empty band below them); the picture and the PAUSE / SOUND strip under it are centred in the space above the pads: two moderate gaps, none above 20 % of the page
+    if (L.mode === 'port') {
+      const topGap = c.y - 8, midGap = m.pads.y - m.strip.b;
+      check(`${label}: portrait: controls anchored at the bottom, picture + strip centred above the pads (gaps ${topGap.toFixed(0)} / ${midGap.toFixed(0)})`, m.touch.b >= m.ih - 8 - 1.5 && m.touch.b <= m.ih - 8 + 1.5 && Math.abs(topGap - midGap) < 3 && m.strip.y >= c.b - 0.5, JSON.stringify({ cy: c.y, cb: c.b, ty: m.touch.y, tb: m.touch.b, py: m.pads.y, sb: m.strip.b, ih: m.ih }));
+      check(`${label}: portrait: no dead band over 20 % of the page (${topGap.toFixed(0)} / ${midGap.toFixed(0)} of ${m.ih})`, topGap <= 0.2 * m.ih && midGap <= 0.2 * m.ih, JSON.stringify({ topGap, midGap }));
+    }
   } else {
     check(`${label}: touch UI hidden on desktop`, !m.touch.vis);
   }

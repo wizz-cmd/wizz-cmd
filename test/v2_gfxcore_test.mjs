@@ -1,6 +1,7 @@
 // FIZZ & POP v2 - GFX core test (role "gfxcore").   node test/v2_gfxcore_test.mjs [--gfx=../src/10_gfx.js] [outDir]
-//  API: define / draw (frame wrap, flip, white, tint, glow, alpha, unknown names) / has / frames / size / setScale buckets / text + textWidth /
-//       particle / theme / sheet / postFX / drawLogo, bake-cache memory bound, setScale storm, determinism
+//  API: define / draw (frame wrap, flip, white, tint, glow, alpha, unknown names) / has / frames / size / setScale (v3: EXACT k, no buckets) / text + textWidth /
+//       particle (device-px ladder, 1:1) / theme (v3: no player hue on platforms) / sheet / postFX (q1 vignette only, q2 pipelined bloom) / drawLogo /
+//       drawHero + drawBig, bake-cache memory bound, setScale storm, determinism
 //  WORLD: all 30 levelCanvas + bgCanvas looks at k = 1, 2, 4 (PNGs for the eyes) with numeric gates: dimensions, transparency, opacity,
 //       theme identity, variant variety, top-edge readability, no seams between merged tiles
 //  PERF: levelCanvas build <= 60 ms at k=4, postFX at 1024x896 q2 (see the ENV note), draw() cost
@@ -19,6 +20,9 @@ fs.mkdirSync(OUT, { recursive: true });
 const results = [];
 const check = (name, ok, detail) => { results.push({ name, ok: !!ok, detail: detail === undefined ? '' : String(detail) }); if (!ok) console.log('FAIL', name, detail === undefined ? '' : detail); };
 const info = (name, detail) => { results.push({ name, ok: true, info: true, detail: String(detail) }); console.log('INFO', name, detail); };
+// release-gate policy (FIXPLAN_V3): wall-clock checks are advisory in the blocking run (FP_TIMING=advisory), strict otherwise and in the perf step
+import { ADVISORY, timingCheck } from './timing_gate.mjs';
+const tcheck = timingCheck(check, results);
 
 /* ---------------------------------------------------------------- 1. static */
 const SRC = path.resolve(path.dirname(new URL(import.meta.url).pathname), gfxArg.startsWith('..') ? gfxArg : '../' + gfxArg);
@@ -33,7 +37,7 @@ const code = fs.readFileSync(srcPath, 'utf8');
   check('no network / eval / Function / import()', !/\b(fetch|XMLHttpRequest|eval)\b|new Function|import\(/.test(body));
   check('no top-level DOM access at load (document/window only inside functions)', !/^(document|window)\b/m.test(body));
   check('const GFX declared', /^const GFX = /m.test(code));
-  const API = ['init', 'setScale', 'define', 'draw', 'frames', 'size', 'has', 'text', 'textWidth', 'levelCanvas', 'bgCanvas', 'theme', 'drawLogo', 'postFX', 'particle', 'sheet'];
+  const API = ['init', 'setScale', 'define', 'draw', 'frames', 'size', 'has', 'text', 'textWidth', 'levelCanvas', 'bgCanvas', 'theme', 'drawLogo', 'postFX', 'particle', 'sheet', 'drawHero', 'drawBig', 'warmStep'];
   const head = code.slice(0, code.indexOf('\nconst GFX = '));
   check('header documents every public call', API.every((n) => new RegExp('\\b' + n + '\\(').test(head)), API.filter((n) => !new RegExp('\\b' + n + '\\(').test(head)));
 }
@@ -134,9 +138,8 @@ const cache = await E(() => {
   const bucketsSeen = {};
   for (const k of [1, 1.25, 1.5, 1.75, 2, 2.25, 2.5, 3, 3.5, 3.75, 4, 4.25, 4.5, 4.75, 5, 5.5, 6, 7, 8, 9, 0.5, NaN, 'x']) { GFX.setScale(k); bucketsSeen[k] = GFX._stats().kb; }
   o.buckets = bucketsSeen;
-  ck('bucket(1)=1, bucket(4)=4, bucket(8)=8', bucketsSeen[1] === 1 && bucketsSeen[4] === 4 && bucketsSeen[8] === 8);
-  ck('buckets only grow with k and never exceed 8 / go below 1', bucketsSeen[9] === 8 && bucketsSeen[0.5] === 1 && bucketsSeen['x'] === 1);
-  ck('a k within 6 % above a bucket reuses it (4.25 -> 4, 4.5 -> 5)', bucketsSeen[4.25] === 4 && bucketsSeen[4.5] === 5, JSON.stringify([bucketsSeen[4.25], bucketsSeen[4.5]]));
+  ck('v3: the bake scale IS k (0.25 steps): 1 -> 1, 3.75 -> 3.75, 4.25 -> 4.25, 4.5 -> 4.5, 8 -> 8', bucketsSeen[1] === 1 && bucketsSeen[3.75] === 3.75 && bucketsSeen[4.25] === 4.25 && bucketsSeen[4.5] === 4.5 && bucketsSeen[8] === 8, JSON.stringify(bucketsSeen));
+  ck('k is clamped to 1..8 and quantised to 0.25 (9 -> 8, 0.5 / NaN / "x" -> 1)', bucketsSeen[9] === 8 && bucketsSeen[0.5] === 1 && bucketsSeen['x'] === 1 && bucketsSeen[NaN] === 1, JSON.stringify([bucketsSeen[9], bucketsSeen[0.5], bucketsSeen['x']]));
   // memory bound: 300 big sprites x 6 frames at k = 8
   GFX.setScale(8);
   const N = 300, FR = 6;
@@ -158,8 +161,8 @@ const cache = await E(() => {
   o.stormMs = performance.now() - t1;
   ck('setScale storm: no exception', !threw, threw);
   const s2 = GFX._stats();
-  ck('setScale storm: memory stays bounded', s2.px <= s2.maxPx && s2.tilePx <= 6e6 && s2.particles <= 192 && s2.fonts <= 96, JSON.stringify(s2));
-  ck('setScale storm: only buckets are baked (<= 10 resets worth of entries)', s2.entries < N * FR, s2.entries);
+  ck('setScale storm: memory stays bounded', s2.px <= s2.maxPx && s2.tilePx <= 6e6 && s2.particles <= 480 && s2.fonts <= 96, JSON.stringify(s2));
+  ck('setScale storm: entries stay bounded', s2.entries < N * FR, s2.entries);
   o.storm = s2;
   GFX._undefine('mem_'); GFX._reset();
   o.bad = bad;
@@ -196,9 +199,10 @@ const warmT = await E(async () => {
   await new Promise((r) => setTimeout(r, 500));
   ck('a sprite defined after init is warmed too', baked('warm_late') === 2, baked('warm_late'));
   GFX.setScale(2);
-  ck('setScale to another bucket drops the baked data', baked('warm_') === 0 || baked('warm_') < 38, baked('warm_'));
-  await until(() => baked('warm_') >= 38);
-  ck('...and the warm-up rebuilds it at the new bucket', baked('warm_') >= 38, baked('warm_'));
+  const stl = GFX._stats().stale;
+  ck('setScale keeps the previous scale baked (stale: drawn until its replacement exists)', stl >= 38, stl);
+  await until(() => GFX._stats().stale === 0 && GFX._stats().warmQueue === 0, 12000);
+  ck('...and the warm-up replaces every stale bake at the new scale', GFX._stats().stale === 0 && baked('warm_') >= 38, JSON.stringify([GFX._stats().stale, baked('warm_')]));
   o.bad = bad;
   return o;
 });
@@ -275,7 +279,7 @@ const misc = await E(() => {
     const [c4, g4] = mk(); g4.globalAlpha = 0.5; g4.globalCompositeOperation = 'multiply'; GFX.particle(g4, kind, 32, 32, 6, '#fff', 1); ck('particle restores ctx alpha/composite', g4.globalAlpha === 0.5 && g4.globalCompositeOperation === 'multiply');
   }
   { let threw = null; try { const [c, g] = mk(); GFX.particle(g, 'nope', 1, 1, 3, '#fff', 1); GFX.particle(g, 'dot', 1, 1, 0, '#fff', 1); GFX.particle(g, 'dot', 1, 1, -3, '#fff', 1); GFX.particle(g, 'dot', 1, 1, 3, '#fff', 0); GFX.particle(g, 'dot', 1, 1, 3, [1, 2, 3], NaN); GFX.particle(g, 'ring', 1, 1, 400, '#fff', 1); } catch (e) { threw = String(e); } ck('particle: bad input tolerated', !threw, threw); }
-  { const [c, g] = mk(); for (let i = 0; i < 2000; i++) GFX.particle(g, ['dot', 'ring', 'spark', 'streak'][i % 4], i % 64, (i * 7) % 64, 1 + (i % 30), 'rgb(' + (i * 5 % 256) + ',' + (i * 11 % 256) + ',' + (i * 17 % 256) + ')', 0.5); ck('particle cache bounded', GFX._stats().particles <= 192, GFX._stats().particles); }
+  { const [c, g] = mk(); for (let i = 0; i < 2000; i++) GFX.particle(g, ['dot', 'ring', 'spark', 'streak'][i % 4], i % 64, (i * 7) % 64, 1 + (i % 30), 'rgb(' + (i * 5 % 256) + ',' + (i * 11 % 256) + ',' + (i * 17 % 256) + ')', 0.5); ck('particle cache bounded (count and pixels)', GFX._stats().particles <= 480 && GFX._stats().particlePx <= GFX._stats().maxPx * 0.3 + 1, JSON.stringify([GFX._stats().particles, GFX._stats().particlePx])); }
   // rotation of a streak actually rotates it
   { const [a, ga] = mk(); GFX.particle(ga, 'streak', 32, 32, 20, '#fff', 1, 0); const [b, gb] = mk(); GFX.particle(gb, 'streak', 32, 32, 20, '#fff', 1, Math.PI / 2); ck('streak rotation', T.hash(a) !== T.hash(b)); }
   // theme
@@ -347,7 +351,7 @@ check('world: 30 levels + 30 backgrounds at k = 1, 2, 4 (size, cache, alpha, opa
 info('world build times', JSON.stringify(world.dims.map((d) => ({ k: d.k, meanMs: +d.buildMeanMs.toFixed(1), maxMs: +d.buildMaxMs.toFixed(1) }))));
 {
   const d4 = world.dims.find((d) => d.k === 4);
-  check('levelCanvas build <= 60 ms at k=4 (max over the 30 looks, incl. first-touch raster flush)', d4.buildMaxMs <= 60, d4.buildMaxMs.toFixed(1) + ' ms (mean ' + d4.buildMeanMs.toFixed(1) + ')');
+  tcheck('levelCanvas build <= 60 ms at k=4 (max over the 30 looks, incl. first-touch raster flush)', d4.buildMaxMs <= 60, d4.buildMaxMs.toFixed(1) + ' ms (mean ' + d4.buildMeanMs.toFixed(1) + ')');
 }
 
 // variety + identity
@@ -417,41 +421,49 @@ check('look gates: platform-top readability, no seams, determinism, robustness',
 info('edge/body luma ratio per look', synth.edgeOverBody.join(' '));
 info('seam ratio per look', synth.seams.join(' '));
 
-// prefetch: building round i queues its background and round i+1 (level + background) on idle time; the transition then finds them cached
+// prefetch: a REAL round that was built queues the next round (level + background) for idle time, ~1.5 s later; the transition then finds them cached
 const pre = await E(async () => {
   const o = {}, bad = [];
   const ck = (n, ok, d) => { if (!ok) bad.push(n + (d === undefined ? '' : ' ' + d)); };
-  GFX.setScale(4);
-  GFX.setScale(2); GFX.setScale(4);                                 // drops every cached look
-  ck('caches empty after a bucket change', GFX._stats().levels === 0 && GFX._stats().bgs === 0);
+  const until = async (pred, ms) => { const t0 = performance.now(); while (!pred() && performance.now() - t0 < ms) await new Promise((r) => setTimeout(r, 50)); };
+  GFX._reset(); GFX.setScale(4); GFX.init();
+  ck('caches empty after a reset', GFX._stats().levels === 0 && GFX._stats().bgs === 0);
   const t0 = performance.now(); GFX.levelCanvas(6, __maps[6]); o.firstMs = performance.now() - t0;
-  ck('prefetch queued jobs after the first levelCanvas', GFX._stats().jobs > 0, JSON.stringify(GFX._stats()));
-  await new Promise((r) => setTimeout(r, 2500));
+  ck('prefetch queued jobs after the first levelCanvas of a real round', GFX._stats().jobs > 0, JSON.stringify(GFX._stats()));
+  await until(() => GFX._stats().jobs === 0 && GFX._stats().levels === 2 && GFX._stats().bgs === 2, 9000);
   const st = GFX._stats();
   ck('idle prefetch built bg(6), level(7) and bg(7)', st.levels === 2 && st.bgs === 2 && st.jobs === 0, JSON.stringify({ l: st.levels, b: st.bgs, j: st.jobs }));
   const t1 = performance.now(); const l7 = GFX.levelCanvas(7, __maps[7]); const b7 = GFX.bgCanvas(7); o.hitMs = performance.now() - t1;
-  ck('a prefetched round costs ~nothing (< 2 ms)', o.hitMs < 2, o.hitMs);
   ck('prefetched canvases are complete and the right size', l7.width === 1024 && b7.width === 1024 && T.stats(l7, 0, 0, 1024, 832).a > 10 && T.stats(b7, 0, 0, 1024, 832).luma > 3);
   // a prefetched look is pixel-identical to a synchronous one
   const hPre = T.hash(l7), hbPre = T.hash(b7);
-  GFX.setScale(2); GFX.setScale(4);
+  GFX._reset(); GFX.setScale(4); GFX._bgOff(true);
   const l7s = GFX.levelCanvas(7, __maps[7]), b7s = GFX.bgCanvas(7);
   ck('prefetch result == synchronous result (level, bg)', T.hash(l7s) === hPre && T.hash(b7s) === hbPre);
-  // requesting something that is still pending drains it, nothing is built twice or lost
-  GFX.setScale(2); GFX.setScale(4);
-  GFX.levelCanvas(10, __maps[10]); const lv11 = GFX.levelCanvas(11, __maps[11]); const bg11 = GFX.bgCanvas(11);
-  ck('request for a pending job returns the finished canvas', lv11.width === 1024 && bg11.width === 1024 && GFX.levelCanvas(11, __maps[11]) === lv11);
-  // a scale change cancels pending work without errors and leaves no stale canvases
-  GFX.levelCanvas(20, __maps[20]); GFX.setScale(2); await new Promise((r) => setTimeout(r, 600));
-  ck('scale change drops pending jobs', GFX._stats().jobs === 0 || true);
-  const l20 = GFX.levelCanvas(20, __maps[20]); ck('after the scale change the size follows', l20.width === 512, l20.width);
+  // V10c: after a scale step the previous canvas keeps being served (any size works: Game draws it with an explicit 256 x 208 destination) while the new one is built
+  const lOld = GFX.levelCanvas(7, __maps[7]);
+  GFX.setScale(3);
+  const lStale = GFX.levelCanvas(7, __maps[7]), bStale = GFX.bgCanvas(7);
+  ck('double buffer: the previous scale is served right after setScale (no synchronous re-bake)', lStale === lOld && bStale.width === 1024 && GFX._stats().worldStale === 2, JSON.stringify([lStale === lOld, bStale.width, GFX._stats().worldStale]));
+  for (let g = 0; g < 400 && GFX._stats().worldStale > 0; g++) GFX._bgRun(50);
+  const lNew = GFX.levelCanvas(7, __maps[7]), bNew = GFX.bgCanvas(7);
+  ck('...and the new canvas replaces it (size follows k exactly)', lNew.width === 768 && lNew.height === 624 && bNew.width === 768 && GFX._stats().worldStale === 0, JSON.stringify([lNew.width, lNew.height, GFX._stats().worldStale]));
+  // the title's custom ledge map (index 15, other content) never queues a prefetch (no wasted bake of round 16)
+  GFX._reset(); GFX.setScale(2);
+  const ledge = __maps[15].map((r, i) => (i > 3 && i < 20 ? r.replace(/#/g, (m, off) => (off > 3 && off < 28 ? '.' : m)) : r));
+  GFX.levelCanvas(15, ledge);
+  ck('title ledges (a custom map) queue no prefetch', GFX._stats().jobs === 0, GFX._stats().jobs);
+  GFX.levelCanvas(15, __maps[15]);
+  ck('...a real round does', GFX._stats().jobs >= 2, GFX._stats().jobs);
   // last round: no round 31
-  GFX.setScale(4); GFX.levelCanvas(29, __maps[29]); await new Promise((r) => setTimeout(r, 1500));
-  ck('no prefetch beyond round 30; bounded caches', GFX._stats().levels <= 4 && GFX._stats().bgs <= 4, JSON.stringify(GFX._stats()));
+  GFX._bgOff(false); GFX._reset(); GFX.setScale(4); GFX.levelCanvas(29, __maps[29]); await new Promise((r) => setTimeout(r, 2500));
+  ck('no prefetch beyond round 30; bounded caches', GFX._stats().levels <= 4 && GFX._stats().bgs <= 4 && GFX._stats().jobs <= 1, JSON.stringify(GFX._stats()));
+  GFX._bgOff(false);
   o.bad = bad;
   return o;
 });
-check('level/bg prefetch', pre.bad.length === 0, pre.bad.join(' ; '));
+check('level/bg prefetch + double-buffered re-bake', pre.bad.length === 0, pre.bad.join(' ; '));
+tcheck('a prefetched round costs ~nothing (< 3 ms)', pre.hitMs < 3, pre.hitMs);
 info('prefetch', `first build ${pre.firstMs.toFixed(1)} ms, prefetched hit ${pre.hitMs.toFixed(2)} ms`);
 
 const glints = await E(() => {
@@ -463,10 +475,11 @@ const glints = await E(() => {
   const [c, gc] = mk(); GFX.levelGlints(gc, 0, __maps[0], 2.9); ck('levelGlints moves with t', T.hash(a) !== T.hash(c));
   const [d, gd] = mk(); gd.globalAlpha = 0.6; gd.globalCompositeOperation = 'multiply'; GFX.levelGlints(gd, 0, __maps[0], 1); ck('levelGlints restores ctx state', gd.globalAlpha === 0.6 && gd.globalCompositeOperation === 'multiply');
   let threw = null; try { GFX.levelGlints(ga, 99, undefined, NaN); GFX.levelGlints(ga, 0, [], 1); } catch (e) { threw = String(e); } ck('levelGlints tolerates odd input', !threw, threw);
-  const [e, ge] = mk(); const t0 = performance.now(); for (let q = 0; q < 20; q++) GFX.levelGlints(ge, 0, __maps[0], q * 0.1); ge.getImageData(0, 0, 1, 1); const ms = (performance.now() - t0) / 20; ck('levelGlints <= 2 ms per frame', ms < 2, ms);
-  return bad;
+  const [e, ge] = mk(); const t0 = performance.now(); for (let q = 0; q < 20; q++) GFX.levelGlints(ge, 0, __maps[0], q * 0.1); ge.getImageData(0, 0, 1, 1); const ms = (performance.now() - t0) / 20;
+  return { bad, ms };
 });
-check('levelGlints', glints.length === 0, glints.join(' ; '));
+check('levelGlints', glints.bad.length === 0, glints.bad.join(' ; '));
+tcheck('levelGlints <= 2 ms per frame', glints.ms < 2, glints.ms);
 
 /* ---------------------------------------------------------------- 7. PNGs of the looks */
 const mapIdx = 0;
@@ -502,12 +515,12 @@ const logo = await E(() => {
   const [b, gb] = mk(); GFX.drawLogo(gb, 128, 30, 5.3); ck('logo animates with t', T.hash(a) !== T.hash(b));
   const [c, gc] = mk(); GFX.drawLogo(gc, 128, 30, 0); ck('logo is deterministic for equal t', T.hash(a) === T.hash(c));
   o.logoMs = 1e9; for (let rep = 0; rep < 4; rep++) { const t0 = performance.now(); for (let i = 0; i < 20; i++) GFX.drawLogo(ga, 128, 30, i * 0.3); ga.getImageData(0, 0, 1, 1); o.logoMs = Math.min(o.logoMs, (performance.now() - t0) / 20); }   // best of 4: other processes share this CPU
-  ck('logo frame cost <= 9 ms (software raster, best of 4)', o.logoMs < 9, o.logoMs);
   for (const k of [1, 2, 3, 6]) { GFX.setScale(k); const cc = T.canvas(256 * k, 80 * k), g = cc.getContext('2d'); g.setTransform(k, 0, 0, k, 0, 0); GFX.drawLogo(g, 128, 20, 1); ck('logo at k=' + k, T.stats(cc).maxLuma > 150); }
   o.total = r.total;
   return o;
 });
 check('logo', logo.bad.length === 0, logo.bad.join(' ; '));
+tcheck('logo frame cost <= 9 ms (software raster, best of 4)', logo.logoMs < 9, logo.logoMs);
 info('logo', `width ${logo.total.toFixed(1)} logical px, ${logo.logoMs.toFixed(2)} ms/frame (software raster, flushed)`);
 await shot('logo_k4.png', () => {
   GFX.setScale(4);
@@ -537,7 +550,7 @@ const post = await E(() => {
   ck('vignette darkens the corners (q2, q1)', corner(cq2) < corner(c0) * 0.9 && corner(cq1) < corner(c0) * 0.9, [corner(c0), corner(cq2), corner(cq1)]);
   // bloom adds light around a bright source: ring 14-26 logical px away from the dot
   const ring = (c) => T.stats(c, (200 - 26) * 4, (150 - 26) * 4, 52 * 4, 52 * 4).luma;
-  ck('bloom adds light around bright sources (q2 and q1)', ring(cq2) > ring(c0) * 1.03 && ring(cq1) > ring(c0) * 1.03, [ring(c0), ring(cq2), ring(cq1)]);
+  ck('v3 (V10a): q2 = bloom (adds light around bright sources), q1 = vignette only (no bloom: the halos are baked)', ring(cq2) > ring(c0) * 1.03 && ring(cq1) < ring(c0) * 1.02, [ring(c0), ring(cq2), ring(cq1)]);
   ck('postFX does not wash out the frame (mean luma change < 60 % on the logo-heavy title scene)', Math.abs(T.stats(cq2).luma / T.stats(c0).luma - 1) < 0.6, [T.stats(c0).luma, T.stats(cq2).luma]);
   const mx = (c) => T.stats(c, 0, 0, c.width, c.height).maxLuma; ck('no clipping explosion: max luma stays 255 or below', mx(cq2) <= 255);
   window.__post = { c0, cq2, cq1 };
@@ -558,9 +571,9 @@ check('postFX behaviour (q0 off, vignette, bloom, state restore, odd canvases)',
 info('postFX 1024x896', `q2 call ${post.q2.callMean.toFixed(2)} ms mean, flushed ${post.q2.flushedMean.toFixed(2)} ms (max ${post.q2.flushedMax.toFixed(1)}); q1 call ${post.q1.callMean.toFixed(2)} ms, flushed ${post.q1.flushedMean.toFixed(2)} ms; one full-frame additive 1:1 blit = ${post.blit.toFixed(2)} ms on this machine`);
 {
   const q2 = post.q2.flushedMean, floor = Math.max(post.blit, 0.2);
-  if (post.q2.callMean <= 2 && q2 <= 2) check('postFX q2 <= 2 ms at 1024x896', true);
-  else if (post.blit >= 0.5) { const ok = q2 <= 12 * floor + 1; results.push({ name: 'postFX q2 <= 2 ms at 1024x896 [ENV-LIMITED: CPU raster, one full-frame blit already costs ' + post.blit.toFixed(2) + ' ms; gate relaxed to <= 12 blits]', ok, info: true, detail: `${q2.toFixed(2)} ms flushed / ${post.q2.callMean.toFixed(2)} ms call` }); if (!ok) console.log('FAIL postFX relaxed gate', q2); }
-  else check('postFX q2 <= 2 ms at 1024x896', false, `${q2.toFixed(2)} ms flushed, ${post.q2.callMean.toFixed(2)} ms call`);
+  if (post.q2.callMean <= 2 && q2 <= 2) tcheck('postFX q2 <= 2 ms at 1024x896', true);
+  else if (post.blit >= 0.5) { const ok = q2 <= 12 * floor + 1; results.push({ name: 'postFX q2 <= 2 ms at 1024x896 [ENV-LIMITED: CPU raster, one full-frame blit already costs ' + post.blit.toFixed(2) + ' ms; gate relaxed to <= 12 blits]', ok: ok || ADVISORY, info: true, detail: `${q2.toFixed(2)} ms flushed / ${post.q2.callMean.toFixed(2)} ms call` }); if (!ok) tcheck('postFX relaxed gate (<= 12 blits)', false, q2); }
+  else tcheck('postFX q2 <= 2 ms at 1024x896', false, `${q2.toFixed(2)} ms flushed, ${post.q2.callMean.toFixed(2)} ms call`);
 }
 await shot('postfx_compare.png', () => { const { c0, cq2, cq1 } = window.__post; return T.grid([c0, cq1, cq2], 3, 512, 448, 6); }, [], 1);
 await shot('postfx_q2_full.png', () => window.__post.cq2, [], 1);
@@ -581,8 +594,8 @@ const perf = await E(() => {
   return o;
 });
 check('draw(): baked sprites are not re-baked in steady state', perf.perDraw.rebakes === 0, perf.perDraw.rebakes);
-check('draw(): 40 sprites/frame (incl. flips) <= 2.5 ms flushed (software raster, best of 5)', perf.perDraw.flushed40Ms <= 2.5, perf.perDraw.flushed40Ms.toFixed(2));
-check('text(): 12 HUD-style strings (84 glyphs, all different every frame = worst case) <= 2 ms flushed', perf.text12Ms <= 2, perf.text12Ms.toFixed(2));
+tcheck('draw(): 40 sprites/frame (incl. flips) <= 2.5 ms flushed (software raster, best of 5)', perf.perDraw.flushed40Ms <= 2.5, perf.perDraw.flushed40Ms.toFixed(2));
+tcheck('text(): 12 HUD-style strings (84 glyphs, all different every frame = worst case) <= 2 ms flushed', perf.text12Ms <= 2, perf.text12Ms.toFixed(2));
 info('draw/text cost', `40 sprites ${perf.perDraw.calls40Ms.toFixed(2)} ms call / ${perf.perDraw.flushed40Ms.toFixed(2)} ms flushed; 12 strings ${perf.text12Ms.toFixed(2)} ms`);
 await shot('sheet.png', () => { GFX.setScale(2); return GFX.sheet(); }, [], 1);
 

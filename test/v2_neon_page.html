@@ -47,7 +47,7 @@
     bg.addColorStop(0, '#060d22'); bg.addColorStop(0.5, '#03070f'); bg.addColorStop(1, '#02040a');
     ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
     ctx.setTransform(k, 0, 0, k, 0, 0);
-    const w = lwFor(k);                                   // stroke width in units for this bake scale
+    const w = (opt.parity && L.refLwFor ? L.refLwFor : lwFor)(k);                                   // stroke width in units for this bake scale (parity: the mockup's law, v3 flattened lwFor on purpose)
     const bx = (i) => i * 16;                             // box i origin x
 
     // 0: neon circle + centre dot
@@ -95,11 +95,12 @@
 
     // text rows (stroke font)
     const cap = 6;
-    drawText(ctx, 'FIZZ & POP', 4, 19, 7, { col: RGB.magenta, track: 0.5, lw: w * 1.2 });
-    drawText(ctx, 'ROUND 12  HI SCORE', 75, 19.5, 3.4, { col: RGB.amber, track: 0.62, lw: w * 0.8 });
-    drawText(ctx, opt.parity ? '0123456789 !?.,:-+=&\'/()*#' : '0123456789 !?.,:;-+=&\'"/()%*#<>_', 4, 30, 4.4, { col: mixc(RGB.cyan, WHITE, 0.4), track: 0.38, lw: w * 0.9 });
-    drawText(ctx, 'THE SUNKEN TOWER', 4, 38, 4.4, { col: RGB.cyan, track: 0.7, lw: w * 0.8 });
-    drawText(ctx, '012300', 156, 38, 4.4, { col: mixc(RGB.magenta, WHITE, 0.5), track: 0.3, lw: w, mono: !opt.parity, align: 'right' });
+    const PA = !!opt.parity;      // v3: the parity scene avoids the glyphs that deliberately differ from the mockup now (0 8 B D O Q, X8) and uses the mockup's lwFor
+    drawText(ctx, PA ? 'FIZZ & PUP' : 'FIZZ & POP', 4, 19, 7, { col: RGB.magenta, track: 0.5, lw: w * 1.2 });
+    drawText(ctx, PA ? 'SALT 12  HI SCARE' : 'ROUND 12  HI SCORE', 75, 19.5, 3.4, { col: RGB.amber, track: 0.62, lw: w * 0.8 });
+    drawText(ctx, opt.parity ? '1234567 9 !?.,:-+=&\'/()*#' : '0123456789 !?.,:;-+=&\'"/()%*#<>_', 4, 30, 4.4, { col: mixc(RGB.cyan, WHITE, 0.4), track: 0.38, lw: w * 0.9 });
+    drawText(ctx, PA ? 'THE SUNKEN TAWER' : 'THE SUNKEN TOWER', 4, 38, 4.4, { col: RGB.cyan, track: 0.7, lw: w * 0.8 });
+    drawText(ctx, PA ? '121234' : '012300', 156, 38, 4.4, { col: mixc(RGB.magenta, WHITE, 0.5), track: 0.3, lw: w, mono: !opt.parity, align: 'right' });
     if (!opt.parity) {
       // new glyphs + fixed-advance (8 units/glyph = 8/cap em) text
       drawText(ctx, '© ♥ ★ ← →', 4, 46, 4.4, { col: RGB.lime, track: 0.5, lw: w * 0.9 });
@@ -109,7 +110,7 @@
       ctx.restore(); ctx.save();
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       const sprite = () => {                             // 16-unit box, asymmetric (pennant on the right)
-        const lw = lwFor(k);
+        const lw = (opt.parity && L.refLwFor ? L.refLwFor : lwFor)(k);
         neon(ctx, poly([[2, 14], [2, 4], [12, 4], [15, 8], [12, 12], [2, 12]], true), RGB.cyan, lw);
         neon(ctx, poly([[4, 8], [9, 8]]), RGB.magenta, lw);
         dot(ctx, 12, 8, 0.9, WHITE);

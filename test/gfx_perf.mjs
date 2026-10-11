@@ -2,6 +2,7 @@
 // Usage: node test/gfx_perf.mjs      Bars: init < 150 ms (v2: baking is lazy, so init is ~1 ms); warm draw <= 80 us, warm text <= 150 us; bake of every sprite frame at k=4 <= 3 s (CPU raster).
 // v2.0 RE-BASE (SPEC_V2 section 1 + 5): the pixel-era loop measured draws of 16x16 bitmaps; the same loop now measures blits of baked k-scaled canvases under setTransform(k).
 import path from 'path';
+import { ADVISORY } from './timing_gate.mjs';   // release-gate policy: in the blocking run (FP_TIMING=advisory) only the lint part gates; the timing bars are reported (perf step runs them strict)
 import { launch, PROJECT } from '../tools/harness.mjs';
 const html = path.join(PROJECT, 'test', 'gfx_sheet.html');
 const times = [];
@@ -39,6 +40,8 @@ for (let i = 0; i < 5; i++) {
 times.sort((a, b) => a - b);
 console.log('init ms (5 runs):', times.map((x) => x.toFixed(1)).join(', '), ' median', times[2].toFixed(1), times[2] < 150 ? 'OK' : 'TOO SLOW');
 if (lastLint.length) console.log('lint:', lastLint);
-const ok = times[2] < 150 && !lastLint.length && thr.drawUsEach <= 80 && thr.textUsEach <= 150 && thr.bakeAllMs <= 3000;
+const timingOk = times[2] < 150 && thr.drawUsEach <= 80 && thr.textUsEach <= 150 && thr.bakeAllMs <= 3000;
+const ok = !lastLint.length && (timingOk || ADVISORY);
+if (ADVISORY) console.log((timingOk ? 'ADVISORY ok   ' : 'ADVISORY MISS ') + 'gfx_perf timing bars: init ' + times[2].toFixed(1) + ' ms (< 150), draw ' + thr.drawUsEach.toFixed(1) + ' us (<= 80), text ' + thr.textUsEach.toFixed(1) + ' us (<= 150), bake-all ' + thr.bakeAllMs.toFixed(0) + ' ms (<= 3000)');
 if (!ok) console.log('FAIL: draw ' + thr.drawUsEach.toFixed(1) + ' us (<= 80), text ' + thr.textUsEach.toFixed(1) + ' us (<= 150), bake-all ' + thr.bakeAllMs.toFixed(0) + ' ms (<= 3000)');
 process.exit(ok ? 0 : 1);

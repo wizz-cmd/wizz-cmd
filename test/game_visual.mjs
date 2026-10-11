@@ -2,14 +2,15 @@
 // canvas k = 3 under setTransform(k) exactly like Main). Re-based on the "Abyss Glow" look (SPEC_V2 sec. 7): same intent as the pixel-era gates
 // (legibility, distinctness, contrast, no overlap), measured on the new neon look.   node test/game_visual.mjs      exit code 1 when a gate fails
 //  V1 ROUND banner     : all 30 rounds: the background UNDER the "ROUND n" text (frame rendered with that text suppressed) keeps WCAG contrast >= 4.5 against the white-hot text
-//  V2 round number     : HUD round digits on the wall (all 30 rounds): same idea against the soft dark pool behind them
-//  V3 frozen look      : every enemy type changes by dE76 >= 20 between active and frozen (tint + sparkles; incl. the cobalt Glimmer)
+//  V2 round number     : HUD round label "R01" (v3: in the ceiling row, inset; digits + 'R'; all 30 rounds): same idea against the soft dark pool behind them
+//  V3 frozen look      : every enemy type reads differently frozen: dE76 >= 20 between active and frozen OR the mean chroma falls by >= 35 % OR the saturation of its bright pixels falls by >= 40 %
+//                        (v3: the cast's <e>_frozen ice cast is pale and desaturated; the cobalt Glimmer's lantern / core keep its mean Lab close, its saturation drops 0.5 -> 0.2)
 //  V4 other banners    : EXTEND!, GAME OVER and the victory text sit on the soft dark gradient band: it darkens the side margins of the inner width by >= 45 % (energy ratio), one round per theme
 //  V5 boss gauge       : hidden in the intro (no neon line at the gauge row); thin neon bar + gold crown while fighting; the fill shrinks with HP
-//  V6 hurry banner     : only a faint soft band while the text is lit, NO band when it blinks off (identical to no banner); a jellop / pebble behind it stays >= 60 % as bright
+//  V6 hurry banner     : only a faint soft band while the text is lit, almost nothing at the end of its fade-out (v3: no hard blink: it fades in, pulses at 2 Hz, fades out); a jellop / pebble behind it stays >= 60 % as bright
 //  V7 popups on banner : a score popup inside a banner band keeps its light (drawn after the band: its added light equals the same popup without a band, within 12 %)
 //  V8 angry readability: angry enemies on red / lava tiles (R22) keep dE76 >= 25 against the surrounding tiles; the Game draws NO aura (a single sprite draw, no silhouette copies)
-//  V9 no strobing      : an invulnerable player never flips between fully visible / invisible (alpha toggles between 0.3 and 1 only); under reduced motion it is steady
+//  V9 no strobing      : an invulnerable player never flips between fully visible / invisible (v3: a smooth alpha pulse between 0.4 and 1 at <= 4 Hz, no frame-to-frame jump > 0.2); under reduced motion it is steady 0.6
 import { launch, PROJECT } from '../tools/harness.mjs';
 import path from 'path';
 const t = await launch({ html: path.join(PROJECT, 'test', 'game_harness.html') + '?real=1&k=3&post=0' });
@@ -39,11 +40,11 @@ const res = await page.evaluate(() => {
     v1.push({ r, c: +contrast(TEXT_L, pct(bg, 0.99)).toFixed(2) });
   }
   out.V1 = { pass: v1.every((x) => x.c >= 4.5), failing: v1.filter((x) => x.c < 4.5), min: Math.min(...v1.map((x) => x.c)) };
-  // V2: HUD round number (left wall, 2 digits at x 0..16, y 20..28)
+  // V2: HUD round label "R01" (v3: x 1..25, y 16..24 = the ceiling row): the two digits (x 9..25) against the soft dark pool behind them, with the 'R' and the digits suppressed
   const v2 = [], DIG_L = lum(0xcf, 0xfa, 0xff);
   for (let r = 1; r <= 30; r++) {
     T.start({ players: 1, level: r, seed: 7 }); T.step(3);
-    const bg = withoutText((s) => /^\d\d$/.test(s), () => { T.render(); return lums(0, 20, 16, 9); });
+    const bg = withoutText((s) => /^\d\d$/.test(s) || s === 'R', () => { T.render(); return lums(1, 17, 24, 6); });
     v2.push({ r, c: +contrast(DIG_L, pct(bg, 0.99)).toFixed(2) });
   }
   out.V2 = { pass: v2.every((x) => x.c >= 4.5), failing: v2.filter((x) => x.c < 4.5), min: Math.min(...v2.map((x) => x.c)) };
@@ -54,12 +55,14 @@ const res = await page.evaluate(() => {
     const grab = () => { const d = raw(0, 16, 256, 208), o = []; for (let i = 0; i < d.length; i += 4) o.push([d[i], d[i + 1], d[i + 2]]); return o; };
     const bg = grab();
     D().spawn(k, 120, 100); const e = S().enemies[S().enemies.length - 1]; e.vx = 0; e.vy = 0;
-    const sprite = (setup) => { setup(); T.render(); const im = grab(); let n = 0, L = 0, A = 0, B = 0; for (let i = 0; i < im.length; i++) { const a = im[i], b = bg[i]; if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 60) { const l = lab(...a); n++; L += l[0]; A += l[1]; B += l[2]; } } return [L / n, A / n, B / n, n]; };
+    const sprite = (setup) => { setup(); T.render(); const im = grab(); let n = 0, L = 0, A = 0, B = 0, sw = 0, ws = 0; for (let i = 0; i < im.length; i++) { const a = im[i], b = bg[i]; if (Math.abs(a[0] - b[0]) + Math.abs(a[1] - b[1]) + Math.abs(a[2] - b[2]) > 60) { const l = lab(...a); n++; L += l[0]; A += l[1]; B += l[2]; const mx = Math.max(a[0], a[1], a[2]) / 255, mn = Math.min(a[0], a[1], a[2]) / 255; if (mx >= 0.55) { sw += mx; ws += (mx ? (mx - mn) / mx : 0) * mx; } } } return [L / n, A / n, B / n, n, sw ? ws / sw : 0]; };
     const normal = sprite(() => { e.state = 'active'; e.x = 120; e.y = 100; e.animT = 0; });
     const frozen = sprite(() => { e.state = 'frozen'; e.freezeT = 1e9; e.x = 120; e.y = 100; });
-    v3[k] = +Math.hypot(normal[0] - frozen[0], normal[1] - frozen[1], normal[2] - frozen[2]).toFixed(1);
+    const dE = Math.hypot(normal[0] - frozen[0], normal[1] - frozen[1], normal[2] - frozen[2]);
+    const chN = Math.hypot(normal[1], normal[2]), chF = Math.hypot(frozen[1], frozen[2]);
+    v3[k] = { dE: +dE.toFixed(1), chromaNormal: +chN.toFixed(1), chromaFrozen: +chF.toFixed(1), satNormal: +normal[4].toFixed(2), satFrozen: +frozen[4].toFixed(2), ok: dE >= 20 || chF <= 0.65 * chN || frozen[4] <= 0.6 * normal[4] };
   }
-  out.V3 = { pass: Object.values(v3).every((v) => v >= 20), dE: v3 };
+  out.V3 = { pass: Object.values(v3).every((v) => v.ok), frozen: v3 };
   // V4: other banners: the soft band darkens the whole inner width, margins included (compared with the same frame without the banner)
   const v4 = {};
   const bannerFrac = (name, round, setup, y0, h, texts) => {
@@ -94,14 +97,14 @@ const res = await page.evaluate(() => {
     const hold = () => { je.x = 44; je.y = 96; je.jx = 0; je.jy = 0; S().proj.forEach((q) => { q.x = 202; q.y = 102; q.vx = 0; q.vy = 0; q.age = 0; }); };
     hold(); T.step(1); hold(); S().hurryBanner = 0; T.render();
     const band = () => { const d = raw(0, 80, 256, 48), o = []; for (let i = 0; i < d.length; i += 4) o.push([d[i], d[i + 1], d[i + 2]]); return o; }, base = band();
-    S().hurryBanner = 100; T.render(); const lit = band();        // floor(100/5) is even: text lit
-    S().hurryBanner = 97; T.render(); const off = band();         // odd: text blinked off
+    S().hurryBanner = 60; T.render(); const lit = band();         // v3: fully faded in, the 2 Hz pulse at its brightest (alpha 1)
+    S().hurryBanner = 1; T.render(); const off = band();          // the very end of the fade-out: (nearly) nothing left
     let offDiff = 0, litDiff = 0;
     for (let i = 0; i < base.length; i++) { offDiff += Math.abs(off[i][0] - base[i][0]) + Math.abs(off[i][1] - base[i][1]) + Math.abs(off[i][2] - base[i][2]); litDiff += Math.abs(lit[i][0] - base[i][0]) + Math.abs(lit[i][1] - base[i][1]) + Math.abs(lit[i][2] - base[i][2]); }
     const wpx = 256 * K;
     const lumMax = (a, x0, y0, w, h) => { let m = 0; for (let yy = y0; yy < y0 + h; yy++) for (let xx = x0; xx < x0 + w; xx++) { const q = a[Math.round((yy - 80) * K) * wpx + Math.round(xx * K)]; m = Math.max(m, 0.2126 * q[0] + 0.7152 * q[1] + 0.0722 * q[2]); } return m; };
     const jb = lumMax(base, 48, 96, 7, 16), pb = lumMax(base, 202, 102, 6, 8), jr = lumMax(lit, 48, 96, 7, 16) / jb, pr = lumMax(lit, 202, 102, 6, 8) / pb;
-    out.V6 = { pass: offDiff === 0 && litDiff > 0 && jb > 100 && pb > 100 && jr >= 0.6 && pr >= 0.6, jb: Math.round(jb), pb: Math.round(pb), offDiff, litDiff, jellopRatio: +jr.toFixed(2), pebbleRatio: +pr.toFixed(2) };
+    out.V6 = { pass: offDiff <= 0.1 * litDiff && litDiff > 0 && jb > 100 && pb > 100 && jr >= 0.6 && pr >= 0.6, jb: Math.round(jb), pb: Math.round(pb), offDiff, litDiff, jellopRatio: +jr.toFixed(2), pebbleRatio: +pr.toFixed(2) };
   }
   // V7: a popup inside a banner band keeps its light (the popup is drawn after the band): added light with a band = added light without one (within 12 %)
   { const added = (phase) => {
@@ -136,9 +139,10 @@ const res = await page.evaluate(() => {
   { const seen = (reduced) => {
       T.opts({ reducedMotion: reduced }); T.start({ players: 1, level: 3, seed: 7 }); D().god(true); D().skipIntro(); D().clearEnemies(); const p = S().players[0]; p.inv = 9999; const a = []; const o = GFX.draw;
       GFX.draw = (c, n, f, x, y, opt) => { if (n.startsWith('p1_')) a.push(opt && opt.alpha !== undefined ? opt.alpha : 1); return o.call(GFX, c, n, f, x, y, opt); };
-      for (let i = 0; i < 40; i++) T.step(1); GFX.draw = o; T.opts({ reducedMotion: false }); return { n: a.length, min: Math.min(...a), distinct: [...new Set(a)].length }; };
+      for (let i = 0; i < 40; i++) T.step(1); GFX.draw = o; T.opts({ reducedMotion: false }); return { n: a.length, min: Math.min(...a), distinct: [...new Set(a)].length, series: a }; };
     const n = seen(false), r = seen(true);
-    out.V9 = { pass: n.n === 40 && n.min >= 0.25 && n.distinct <= 2 && r.n === 40 && r.distinct === 1 && r.min > 0.4, normal: n, reduced: r }; }
+    let step = 0; for (let i = 1; i < n.series.length; i++) step = Math.max(step, Math.abs(n.series[i] - n.series[i - 1]));
+    out.V9 = { pass: n.n === 40 && n.min >= 0.4 - 1e-9 && n.distinct >= 8 && step <= 0.2 && r.n === 40 && r.distinct === 1 && r.min > 0.4, normal: { n: n.n, min: n.min, distinct: n.distinct, maxStep: +step.toFixed(3) }, reduced: { n: r.n, min: r.min, distinct: r.distinct } }; }
   return out;
 });
 let fail = 0;

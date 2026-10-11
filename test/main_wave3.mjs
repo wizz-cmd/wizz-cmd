@@ -79,11 +79,12 @@ await group('K2 phone portrait: bottom-anchored controls, centred picture', asyn
     const t = await open({ viewport: { width: w, height: h }, touch: true, deviceScaleFactor: dpr });
     await t.g.freeze(true); await t.g.step(10); await wait(150);
     const L = await t.page.evaluate(() => window.__fizzpop._main.layout());
-    const c = await rect(t.page, '#screen'), tc = await rect(t.page, '#touch');
+    const c = await rect(t.page, '#screen'), tc = await rect(t.page, '#touch'), pads = await rect(t.page, '#touch .pads'), strip = await rect(t.page, '[data-k="pause"]');
     const m = await t.page.evaluate(() => ({ sw: document.documentElement.scrollWidth, sh: document.documentElement.scrollHeight, iw: innerWidth, ih: innerHeight }));
     if (L.mode === 'port') {
       check(`${w}x${h}@${dpr}: controls end 8 px above the bottom edge (no empty band below them)`, Math.abs(tc.b - (m.ih - 8)) < 1.5, JSON.stringify({ tb: tc.b, ih: m.ih }));
-      check(`${w}x${h}@${dpr}: picture centred in the space above the controls (gaps ${(c.y - 8).toFixed(1)} / ${(tc.y - c.b).toFixed(1)})`, Math.abs((c.y - 8) - (tc.y - c.b)) < 2, JSON.stringify({ cy: c.y, cb: c.b, ty: tc.y }));
+      // (v3 V4: the PAUSE / SOUND strip hangs under the picture; picture + strip are centred in the space above the pads)
+      check(`${w}x${h}@${dpr}: picture + strip centred in the space above the pads (gaps ${(c.y - 8).toFixed(1)} / ${(pads.y - strip.b).toFixed(1)})`, Math.abs((c.y - 8) - (pads.y - strip.b)) < 3 && strip.y >= c.b - 0.5, JSON.stringify({ cy: c.y, cb: c.b, py: pads.y, sb: strip.b }));
       check(`${w}x${h}@${dpr}: 16 px side gutters kept, no scroll`, c.x >= 15.5 && c.r <= m.iw - 15.5 && m.sw <= m.iw && m.sh <= m.ih + 1, JSON.stringify({ c, m }));
     } else check(`${w}x${h}@${dpr}: landscape arrangement chosen (${L.mode}); portrait rules not applicable`, true);
     if (w === 390) await pageShot(t.page, path.join(OUT, 'k2_390x844.png'));
@@ -94,9 +95,9 @@ await group('K2 phone portrait: bottom-anchored controls, centred picture', asyn
   const t = await open({ viewport: { width: 390, height: 844 }, touch: true });
   await t.page.evaluate(() => { document.documentElement.style.padding = '47px 0 34px'; window.__fizzpop._main.fit(); });
   await wait(100);
-  const c = await rect(t.page, '#screen'), tc = await rect(t.page, '#touch');
+  const c = await rect(t.page, '#screen'), tc = await rect(t.page, '#touch'), pads = await rect(t.page, '#touch .pads'), strip = await rect(t.page, '[data-k="pause"]');
   check('portrait with 47/34 px root padding: controls end 8 px above the bottom inset, picture below the top inset', Math.abs(tc.b - (844 - 34 - 8)) < 1.5 && c.y >= 47 + 8 - 0.5, JSON.stringify({ c, tc }));
-  check('...and the picture stays centred between the top inset and the controls', Math.abs((c.y - 47 - 8) - (tc.y - c.b)) < 2, JSON.stringify({ cy: c.y, cb: c.b, ty: tc.y }));
+  check('...and the picture + strip stay centred between the top inset and the pads', Math.abs((c.y - 47 - 8) - (pads.y - strip.b)) < 3, JSON.stringify({ cy: c.y, cb: c.b, py: pads.y, sb: strip.b }));
   await t.close();
 });
 
@@ -304,12 +305,12 @@ await group('R7 touch how-to labels match their tap zones', async () => {
   await g.goto('howto', { page: 1 });
   await wait(700);                                                           // past the input guard
   const tx = await texts(t.page);
-  check('touch labels "< BACK" and "TAP: NEXT" are drawn (and no stray "TAP: NEXT" on the left)', tx.includes('< BACK') && tx.includes('TAP: NEXT'), JSON.stringify([...new Set(tx)]));
+  check('touch labels "< BACK" and "NEXT >" are drawn on their own plates (v3 U13)', tx.includes('< BACK') && tx.includes('NEXT >'), JSON.stringify([...new Set(tx)]));
   const c = await rect(t.page, '#screen');
   const tap = async (lx, ly) => { await t.page.touchscreen.tap(c.x + lx * c.w / 256, c.y + ly * c.h / 224); await wait(250); };
   const page = () => g.evaluate(() => fz._main.howtoPage());
   await tap(216, 214);
-  check('tapping the "TAP: NEXT" label advances (page 1 -> 2)', (await page()) === 2, String(await page()));
+  check('tapping the "NEXT >" plate advances (page 1 -> 2)', (await page()) === 2, String(await page()));
   await tap(24, 214);
   check('tapping the "< BACK" label goes back (page 2 -> 1)', (await page()) === 1, String(await page()));
   await tap(128, 120);
@@ -392,7 +393,7 @@ await group('P3 / P4 wording', async () => {
   await g.freeze(true); await spyText(t.page);
   await g.goto('title'); await g.step(5);
   let tx = await texts(t.page);
-  check('title says what Z and Q do', tx.includes('1P: ARROWS + Z BUBBLE') && tx.includes('2P: WASD + Q BUBBLE'), JSON.stringify([...new Set(tx)]));
+  check('title: no help / control lines any more (V3: they live in HOW TO PLAY, which names Z and Q)', !tx.some((s) => /ARROWS|WASD|UP\/DOWN|FREE SOFTWARE/.test(s)), JSON.stringify([...new Set(tx)]));
   const ty = await t.page.evaluate(() => window.__txy.slice());
   check('title: no text reaches the sound-hint / toast strip (y >= 211): the hint never covers the copyright lines', ty.every(([s, y]) => y + 8 <= 210), JSON.stringify(ty.filter(([s, y]) => y + 8 > 210)));
   check('legend names Left Shift (only the left Shift works)', await t.page.evaluate(() => /Left Shift/.test(document.getElementById('legend').textContent) && !/<kbd>Shift<\/kbd>/.test(document.getElementById('legend').innerHTML)));
@@ -407,7 +408,7 @@ await group('P3 / P4 wording', async () => {
   check('controls page: "PUSH Q TO JOIN AS P2"', joined.includes('PUSH Q TO JOIN AS P2'));
   await g.goto('scores', {}); await clearTexts(t.page); await g.step(10);
   tx = await texts(t.page);
-  check('scores footer says where ENTER leads: "ENTER: BACK TO TITLE" (not "TO CONTINUE")', tx.includes('ENTER: BACK TO TITLE') && !tx.some((s) => /TO CONTINUE/.test(s)), JSON.stringify([...new Set(tx)]));
+  check('scores footer says where ENTER leads, once: "ENTER / ESC: BACK" (not "TO CONTINUE", no second back line; v3 U15)', tx.includes('ENTER / ESC: BACK') && !tx.some((s) => /TO CONTINUE|BACK TO TITLE/.test(s)) && new Set(tx.filter((s) => /BACK/.test(s))).size === 1, JSON.stringify([...new Set(tx)]));
   t.noErrors();
   await t.close();
 });

@@ -27,7 +27,7 @@
     --cta-edge: rgba(60, 242, 255, 0.9);
     --veil: rgba(2, 4, 12, 0.5);
     --veil-fg: #eaffff;
-    --btn: min(68px, calc((100vw - 96px) / 4));   /* fallback before Main's fit() sets --btn-w/--btn-h */
+    --btn: clamp(44px, calc((100vw - 64px) / 4), 92px);   /* fallback before Main's fit() sets --btn-w/--btn-h (the same formula) */
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
@@ -99,16 +99,34 @@
   /* Phones in portrait (K2): the page is exactly as tall as the padded viewport (Main publishes --page-h), the controls rest at its
      bottom (thumb zone, inside any root padding / safe area) and the picture is centred in the space above them. No band below. */
   html.touch:not(.land) body { min-height: var(--page-h, 100%); }
-  html.touch:not(.land) #stage { flex: 1 1 auto; margin-block: 0; }
-  html.touch:not(.land) #frame { margin-block: auto; }
+  /* V4: the picture and its PAUSE / SOUND strip are centred in the free height above the pads (Main publishes --gap-top = half of what is left over) with the PAUSE / SOUND strip right under it, the four big
+     pads rest at the bottom (thumb zone): the free height is split into two moderate gaps instead of one big band above and one below the picture. #touch fills the rest of the
+     page; its strip sits at its top, its pads at its bottom. */
+  html.touch:not(.land) #stage { flex: 0 0 auto; margin-block: var(--gap-top, 0px) 0; }
+  html.touch:not(.land) #touch { flex: 1 1 auto; justify-content: space-between; }
   #frame { position: relative; line-height: 0; max-width: 100%; }
+  /* Before the script runs (U10): the frame already has the width the canvas will get, a coarse-pointer page already shows the touch pads and no keyboard legend, and the canvas
+     shows the LOADING frame's gradient: nothing jumps when Main takes over (it adds html.fp with its first fit()). */
+  html:not(.fp) #frame { width: min(100%, 768px, calc((100vh - 16px) * 256 / 224)); }
+  @media (pointer: coarse) {
+    /* the pre-script portrait stack mirrors Main's fit(): picture = full width x 7/8, strip 44 + pads of the leftover height (52..220 px), the rest split above / between */
+    html:not(.fp) { --pre-left: calc(100vh - 88px - (100vw - 32px) * 0.875); --pre-btn: clamp(52px, var(--pre-left), 220px); }
+    html:not(.fp):not(.land) #touch button { height: var(--pre-btn); }
+    html:not(.fp):not(.land) #touch button.sm { height: 44px; }
+    html:not(.fp):not(.land) #stage { margin-top: max(0px, calc((var(--pre-left) - var(--pre-btn) + 10px) / 2)); }
+    html:not(.fp):not(.land) #legend { display: none; }
+    html:not(.fp):not(.land) body { min-height: var(--page-h, 100%); }
+    html:not(.fp):not(.land) #stage { flex: 0 0 auto; }
+    html:not(.fp):not(.land) #touch { display: flex; flex-direction: column; align-items: stretch; justify-content: space-between; gap: 10px; width: 100%; flex: 1 1 auto; padding: 10px 0 8px; }
+  }
   /* The canvas is resolution independent (v2): Main sizes its backing store to css size x devicePixelRatio and draws every frame at that
      scale, so it is displayed 1:1 (or very nearly) with smooth sampling, never pixelated. */
   #screen {
     display: block;
     /* Safe default before Main's fit() sets explicit px sizes: never wider than the page. */
-    width: min(100%, 768px); height: auto; aspect-ratio: 256 / 224;
-    background: #000;
+    width: 100%; height: auto; aspect-ratio: 256 / 224;
+    background-color: #000;
+    background-image: radial-gradient(circle at 50% 48%, rgba(60, 242, 255, 0.18), #04060d 70%);   /* = Main's LOADING frame, visible until the first paint */
     image-rendering: auto;
     border-radius: 2px;
     outline: 1px solid var(--frame);
@@ -121,22 +139,22 @@
   /* click-to-play / focus overlay (an Artifact iframe starts without keyboard focus). Light veil: the picture stays visible. */
   #focus {
     position: absolute; inset: 0;
-    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px;
     background: var(--veil); color: var(--veil-fg);
     border-radius: 2px; cursor: pointer; text-align: center; line-height: 1.3;
-    font-weight: 500; letter-spacing: 0.34em; font-size: clamp(15px, 4.2vw, 28px);
+    font-weight: 500; letter-spacing: 0.3em; font-size: clamp(13px, 3.4vw, 22px);   /* compact: one pill and one caption line, the menu waits behind it (U8) */
     outline: none; -webkit-tap-highlight-color: transparent;
   }
   #focus .cta {
-    padding: 0.4em 1.2em 0.4em 1.5em; border-radius: 999px;
+    padding: 0.32em 1em 0.32em 1.3em; border-radius: 999px;
     background: rgba(3, 7, 18, 0.74); border: 1px solid var(--cta-edge);
     text-shadow: 0 0 10px rgba(60, 242, 255, 0.85), 0 0 2px #eaffff;
     box-shadow: 0 0 22px rgba(60, 242, 255, 0.4), inset 0 0 14px rgba(60, 242, 255, 0.16);
     animation: pulse 1.8s ease-in-out infinite;
   }
   #focus small {
-    font-weight: 400; letter-spacing: 0.08em; font-size: clamp(11px, 2.4vw, 14px);
-    padding: 3px 12px; border-radius: 8px; background: rgba(3, 7, 18, 0.62); max-width: 92%;
+    font-weight: 400; letter-spacing: 0.06em; font-size: clamp(10px, 2.1vw, 13px);
+    padding: 2px 10px; border-radius: 8px; background: rgba(3, 7, 18, 0.62); max-width: 90%;
     text-shadow: 0 0 6px rgba(60, 242, 255, 0.5);
   }
   @keyframes pulse { 50% { opacity: 0.6; } }
@@ -183,6 +201,8 @@
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
   }
   html:not(.land) #touch .pads button { border-radius: 24px; }
+  /* U12: the label scales with the button (BUBBLE never runs over its rim, also on the smallest landscape pads) */
+  #touch .pads button:not([data-k="left"]):not([data-k="right"]) { font-size: clamp(9px, calc(var(--btn-w, 68px) * 0.17), 12px); letter-spacing: 0.06em; }
   #touch button[data-k="left"], #touch button[data-k="right"] { font-size: 26px; letter-spacing: 0; }
   #touch button.on { background: var(--btn-on); color: var(--btn-on-fg); border-color: #eaffff; box-shadow: 0 0 22px rgba(60, 242, 255, 0.55), inset 0 0 16px rgba(60, 242, 255, 0.35); }
   #touch button.sm { width: auto; min-width: 96px; height: 44px; padding: 0 18px; border-radius: 22px; font-size: 12px; letter-spacing: 0.2em; }

@@ -22,6 +22,8 @@ const check = (name, cond, extra = '') => {
   if (cond) passed++; else failed++;
   console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : '   ' + extra}`);
 };
+// release-gate policy (FIXPLAN_V3): a wall-clock budget is advisory in the blocking run (FP_TIMING=advisory), strict otherwise / in the perf step
+const acheck = (name, cond, extra = '') => { if (process.env.FP_TIMING !== 'advisory') return check(name, cond, extra); console.log(`${cond ? 'ADVISORY ok  ' : 'ADVISORY MISS'}  ${name}${cond ? '' : '   ' + extra}`); };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function group(name, fn) {
   if (ONLY && !ONLY.has(name)) return;
@@ -167,7 +169,9 @@ await group('scaling', async () => {
       const wantLegend = withLeg >= without * 0.86 - 1e-6, free = wantLegend ? withLeg : without, want = pick(free, dpr);
       const label = `${w}x${h}@${dpr}`;
       check(`${label}: k ${want.k} (${want.snapped ? '1:1 device pixels' : 'smooth resample'}), css ${(256 * want.s).toFixed(1)} px, legend ${wantLegend ? 'kept' : 'hidden'}`,
-        Math.abs(m.w - 256 * want.s) < 0.6 && m.lay.legend === wantLegend && m.lay.k === want.k && m.lay.snapped === want.snapped, `${m.w}x${m.h} ${JSON.stringify(m.lay)}`);
+        Math.abs(m.w - 256 * want.s) < 0.6 && m.lay.legend === wantLegend && (m.lay.k === m.lay.kNat ? m.lay.k === want.k && m.lay.snapped === want.snapped : m.lay.kNat === want.k), `${m.w}x${m.h} ${JSON.stringify(m.lay)}`);
+      // (regression wave) the layout rule is about the NATURAL k (kNat); the start-up calibration (U4, CPU-raster VM: probe 0.45-0.6 ms flips k 8 from 'fits' to 'capped to 3.5' on a quiet machine)
+      // may render a huge canvas smaller (the css size stays): then only kNat is compared, and the backing-store check below uses the applied k.
       check(`${label}: backing store 256k x 224k = ${m.cw}x${m.ch}, image-rendering auto (never pixelated)`, m.ir === 'auto' && m.cw === 256 * m.lay.k && m.ch === Math.round(224 * m.lay.k) && m.lay.k >= 1 && m.lay.k <= 8 && Math.abs(m.lay.k * 4 - Math.round(m.lay.k * 4)) < 1e-9, JSON.stringify({ ir: m.ir, cw: m.cw, ch: m.ch, k: m.lay.k }));
       check(`${label}: the picture fills the free space (>= 92 % of it; the k-8 cap lets very large screens stretch instead)`, m.w >= 256 * free * 0.92 - 0.6 && m.w <= 256 * free + 0.6, `${m.w} vs ${256 * free}`);
       if (m.lay.snapped) check(`${label}: crisp: css width x DPR = backing width (${(m.w * dpr).toFixed(2)})`, Math.abs(m.w * dpr - m.cw) < 0.06, `${m.w * dpr} vs ${m.cw}`   /* layout snaps css px to 1/64 */);
@@ -433,6 +437,7 @@ await group('gameover-entry-scores', async () => {
   check('Game.isOver() with won=true -> ending scene', (await t.scene()) === 'ending');
   await g.step(60);
   await g.set(0, { pause: true }); await g.step(1); await g.set(0, { pause: false });
+  await g.step(20);                                                          // (v3 U5: the ending dissolves out over 14 frames, then the entry fades in)
   check('pause/Esc skips the credits -> entry', (await t.scene()) === 'entry');
   // credits finish on their own
   await g.evaluate(() => fz._main.resetScores());
@@ -651,7 +656,7 @@ await group('loop', async () => {
   await g.freeze(true);
   const ms = await g.evaluate(() => { const t0 = performance.now(); for (let i = 0; i < 300; i++) fz.step(1); return (performance.now() - t0) / 300; });
   console.log(`      step+render in play (stub modules): ${ms.toFixed(2)} ms/frame`);
-  check('tick + render with stubs stays far below the 16 ms budget', ms < 8, String(ms));
+  acheck('tick + render with stubs stays far below the 16 ms budget', ms < 8, String(ms));
   noErrors(t);
   await t.close();
 
@@ -1206,8 +1211,9 @@ await group('u2-u8-u16-touch-layouts', async () => {
   const dm = await d.t.page.evaluate(() => { const rc = (s) => { const b = document.querySelector(s).getBoundingClientRect(); return { y: b.y, b: b.bottom }; }; return { c: rc('#screen'), pills: rc('[data-k="pause"]') }; });
   check('390x844@3: crisp (x1.333 = k 4: 1 backing px per device px), no fractional smear', d.L.sharp === false && d.L.k === 4 && d.L.snapped && Math.abs(d.L.scale - 4 / 3) < 0.001 && d.L.dpr === 3, JSON.stringify(d.L));
   // K2: the controls rest at the bottom of the padded viewport (8 px page padding), the picture is centred in the space above them
-  const dk = await d.t.page.evaluate(() => { const b = document.getElementById('screen').getBoundingClientRect(), t = document.getElementById('touch').getBoundingClientRect(); return { cy: b.y, cb: b.bottom, ty: t.y, tb: t.bottom, vh: innerHeight }; });
-  check('portrait (K2): controls anchored to the bottom (no empty band below them), picture centred in the space above', Math.abs(dk.tb - (dk.vh - 8)) < 1.5 && Math.abs((dk.cy - 8) - (dk.ty - dk.cb)) < 1.5 && dk.cy > 8, JSON.stringify(dk));
+  // (v3 V4: the PAUSE / SOUND strip sits right under the picture, the four pads rest at the bottom, and the picture + strip block is centred in the space above the pads)
+  const dk = await d.t.page.evaluate(() => { const b = document.getElementById('screen').getBoundingClientRect(), t = document.getElementById('touch').getBoundingClientRect(), p = document.querySelector('#touch .pads').getBoundingClientRect(), s = document.querySelector('[data-k="pause"]').getBoundingClientRect(); return { cy: b.y, cb: b.bottom, ty: t.y, tb: t.bottom, py: p.y, sb: s.bottom, vh: innerHeight }; });
+  check('portrait (K2 / V4): controls anchored to the bottom (no empty band below them), picture + PAUSE strip centred in the space above the pads', Math.abs(dk.tb - (dk.vh - 8)) < 1.5 && Math.abs((dk.cy - 8) - (dk.py - dk.sb)) < 2.5 && dk.cy > 8 && dk.sb > dk.cb, JSON.stringify(dk));
   await d.t.close();
   const e = await lay(412, 915, { deviceScaleFactor: 2.625 });
   check('412x915@2.625: k on a 0.25 step, backing store 256k x 224k, css width within 8 % of the free width, image-rendering auto', e.L.k >= 2 && Math.abs(e.L.k * 4 - Math.round(e.L.k * 4)) < 1e-9 && e.L.w >= 0.92 * 380 && e.L.w <= 380.01 && (await e.t.page.evaluate(() => { const c = document.getElementById('screen'); return c.width === 256 * fz._main.k() && getComputedStyle(c).imageRendering === 'auto'; })), JSON.stringify(e.L));
@@ -1239,7 +1245,7 @@ await group('u12-u8-touch-only-vs-keyboard', async () => {
   await g.goto('title');
   await t.page.keyboard.press('KeyM');                           // a real key: a keyboard exists
   await wait(100);
-  check('after a real key press the keyboard is known: 2 PLAYERS and SOUND appear', (await ids()).includes('p2') && (await ids()).includes('sound') && !(await g.evaluate(() => fz._main.touchOnly())));
+  check('after a real key press the keyboard is known: 2 PLAYERS appears (SOUND does not: the touch UI has its own SOUND button, v3 U11)', (await ids()).includes('p2') && !(await ids()).includes('sound') && !(await g.evaluate(() => fz._main.touchOnly())));
   await t.press('Enter'); await wait(450); await t.press('Enter');
   const call2 = await g.evaluate(() => window.__calls.filter((c) => c[0] === 'game.start').pop());
   check('...and Game.start gets joinHint "PUSH Q"', call2 && call2[1].joinHint === 'PUSH Q', JSON.stringify(call2));

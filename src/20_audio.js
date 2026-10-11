@@ -8,9 +8,11 @@
  *    OfflineAudioContext (AUDIO._renderOffline).  The context runs at ENGINE_RATE = 24 kHz (12 kHz bandwidth; every DSP cost scales with the
  *    rate, the browser resamples to the device; engines that ignore the option fall back to their default rate and just cost more).
  *  - Signal path:
- *      lane buses (one mixer strip per instrument lane) -> track out -> musicIn --> glue compressor -> music gain --+
- *      reverb / delay returns --------------------------> musicIn                                                   +-> master -> limiter ->
- *      sfx groups -> sfx gain ----------------------------------------------------------------------------------- +   soft ceiling -> mute -> out
+ *      lane buses (one mixer strip per instrument lane) -> track out -> musicIn --> glue compressor -> music gain -> duck --+
+ *      reverb / delay returns --------------------------> musicIn                                                          +-> master -> limiter ->
+ *      sfx groups -> sfx gain ------------------------------------------------------------------------------------------- +   soft ceiling -> mute -> out
+ *    `duck` is the priority duck of the music bed under the critical cues (SFX_DUCK, FIXPLAN_V3 A4); the limiter is soft and slow (-1 dB, knee 6, 10:1, 3 ms / 160 ms) so an
+ *    everyday sound never pumps the bed (A3: the music dips <= 1.5 dB under any single pop / jump / kill).
  *    Lane strip: in -> [drive] -> [crush] -> [lpf] -> [hpf] -> [chorus] -> [tremolo] -> vol -> (sends: rev / hall / spr / dly) -> [sidechain duck]
  *    -> [pan] -> track out.  Only the stages a lane asks for are created (every silent node still costs CPU).
  *  - Reverbs: `hall` (2.5 s) and `room` (0.4 s) are ConvolverNodes with procedurally generated MONO impulse responses fed by a mono down-mix (one
@@ -19,7 +21,7 @@
  *    SFX send into the `room` reverb too.  The sidechain is gain automation per kick on the lane's `duck` gain (see §3.6).
  *  - Instruments (INST table): supersaw / stab / pad (pre-baked unison-saw buffers: ONE looping buffer source per chord note), choir (baked saws + formant
  *    band-passes), chorus pick bass / upright (one combined-wave oscillator), 808 sub, distorted riff bass, cold arp, lead, alarm lead, Karplus-Strong twang
- *    (computed in JS, played from a buffer), FM bell / vibes, a full drum kit (Linn kick, EDM kick, 808 boom, gated-reverb snare, hard / crushed snare, clap,
+ *    (computed in JS, played from a buffer), FM bell / vibes, a full drum kit (machine kick, EDM kick, 808 boom, gated-reverb snare, hard / crushed snare, clap,
  *    finger snap, rim, toms, closed / open / metallic hats, ride, crash), industrial hits (ring-modulated clangs, noise hits) and FX (riser, down-sweep,
  *    reverse swell, impact, zap).
  *  - Sequencer: songs are compiled lazily to a per-16th-step event table.  A setInterval (25 ms) pump schedules events HORIZON (0.28 s) ahead on
@@ -52,10 +54,10 @@
  *    is switched off with a single console.warn; an sfx that fails 6 times is disabled.  Nothing ever throws into game code.
  *  - SFX voice limits steal the oldest instance of the same sound (pop x3, shoot x2 ...); a global source-node budget (MAX_VOICES / MAX_SFX_VOICES)
  *    drops new SFX when exceeded.  Music is never dropped.  sfx options: {pitch: semitones, vol}.  `kill` is designed for pitch 0..+12.
- *  - Non-contract debug extras (tests / board / composer scratch pad): _info(name), _dump(name), _events(name), _validate(), _stats(), _state(), _tap(), _seek(step),
+ *  - Non-contract debug extras (tests / board / composer scratch pad): _info(name), _dump(name), _events(name), _validate(), _stats(), _state(), _tap(),  _seek(step, pass),
  *    _skip([lane|'drum']) (live ablation), _capture(sec); demos: _demoNames(), _demo(name), _define('demo_x', songDef) (register a scratch song and get its compile issues,
  *    then _demo('demo_x')), _note(inst, [midi], dur, {vel, lane, cfg}), _hit(char), _fxNow(name, seconds); tables: _instruments(), _kit(), _pats();
- *    _renderOffline(name, seconds, opts) accepts {tempo, skip:[lane|'drum'], sfx, noComp, noTrim, chunk, pitch, pass, vol, mg} (tests only).
+ *    _renderOffline(name, seconds, opts) accepts {tempo, skip:[lane|'drum'], sfx:[[name, at, polarity?, pitch?]], noComp, noTrim, chunk, pitch, pass, alternate, vol, mg} (tests only).
  *
  * ================================================================================================================================
  * 3. COMPOSITION NOTATION  (what the composer writes: songDefs() below)
@@ -98,6 +100,11 @@
  *      p        pattern per lane (below).  The lane's instrument decides the default FORMAT; prefix `n:` `r:` `c:` forces notes / relative / chord.
  *      mix      per-section velocity multipliers per lane name ({ pad: 0.5, drums: 0 }), 0 = lane tacet (builds, breakdowns); `drums` = all four kit lanes, `all`.
  *      auto     automation over the section (§3.5).      duck     sidechain override (§3.6).      pats    section-local named patterns.
+ *      alt      SECOND-PASS version of a LOOP section (FIXPLAN_V3 A8, composer addition):  alt: { p: { lane: 'pattern', drums3: '...' }, mix: { bell: 2 }, dbl: { lead: 12 }, dblVel: 0.55 }
+ *               On every odd pass of the loop (the 2nd, 4th ... time it plays; the first pass is always the original) the section plays with `alt.p` patterns replacing the same-named ones
+ *               (or adding a lane that is silent in the original: counter-melody, fills) and `alt.mix` merged over `mix`.  `dbl` adds a transposed copy of a lane's notes:
+ *               `lead: 12` (same lane, +1 octave) or `lead: { semi: -12, to: 'twang', vel: 0.6, bars: [1, 4] }` (other lane, velocity, bars 1-based inclusive).  The engine compiles both versions and keeps
+ *               only the differences as events flagged for odd / even passes, so drums, sidechain triggers and fx follow along.  Not for intro sections, jingles or `auto`.
  *
  *  3.3 PATTERN FORMATS
  *   (a) NOTES  (lead, alarm, twang, bell, vibes; also usable on any lane with `n:`):   `| e5/2 g5/2 b5/4 r/8 |`
@@ -115,7 +122,7 @@
  *         `1-1-1-1-1-1-1-1-` eighth-note root pump;  `1181118111811181` gallop;  `1358a853c8531358` 16th arpeggio.  With a slash-bass chord (`Am7@E`) `1` plays the slash bass on bass lanes.
  *       - DRUM grid (key `drums`; routes to the lanes kick snare hats perc).  ONE hit per 16th step per grid: the extra keys `drums2` / `drums3` (composer addition, v2.0) are further
  *         grids that LAYER on the same steps (kick + hat on one step, snare + clap, ghost snares under a backbeat); all follow `mix.drums`, `R` rolls and the sidechain triggers alike:
- *           k Linn kick   K EDM kick   b 808 boom (long)        s gated-reverb snare   S hard snare   y bit-crushed snare   n ghost snare   B brushed snare   p clap
+ *           k machine kick   K EDM kick   b 808 boom (long)        s gated-reverb snare   S hard snare   y bit-crushed snare   n ghost snare   B brushed snare   p clap
  *           f finger snap   r rimshot   t / u / v hi / mid / low tom                    h closed hat   o open hat   m metallic 808 hat   M open metallic   d ride   c crash
  *           x low clang   X high clang   z noise hit   w noise blast  (industrial; lane `perc`)           R = SNARE ROLL: the run of consecutive R steps ramps in velocity
  *           q = silent sidechain trigger (a "ghost kick" so the pumping continues in a breakdown)                         . = rest
@@ -138,7 +145,8 @@
  *      stabs + 808 sub + kick + hats, duck on).  demo_build (AUDIO._demo('demo_build')) is the reference.  Halftime / industrial sections: snare on beat 3 only (`........S.......`),
  *      riff lane with drive, clangs `x X`.  Dreamy breakdown: duck false, pads + twang + choir, `mix: { drums: 0 }`, `q` pulse optional.
  *
- *  3.8 LEVELS  every instrument is calibrated so that its demo at lane vol 1 sits at about -24 LUFS (drums -21, fx -22); a full arrangement at lane vols 0.5-0.9 lands at about
+ *  3.8 LEVELS  every instrument is calibrated so that its demo at lane vol 1 sits at about -24 LUFS (drums -21, fx -22; the cold arp -11.5: FIXPLAN_V3 A5 raised its level 21 dB so that the arp
+ *      lanes at their authored 0.3 are audible); a full arrangement at lane vols 0.5-0.9 lands at about
  *      -18 LUFS after the song `gain` fit.  Music target: K-weighted integrated -18 +-2 LUFS, true peak <= -1 dBFS (test/audio_analyze.mjs checks, --fit-music suggests `gain`).
  *
  *  3.9 CPU BUDGET (this reference VM, % of one core, live): empty running context ~3, glue + limiter 1, hall reverb 3, room reverb 1.3, delay / spring / ping-pong < 1,
@@ -169,11 +177,14 @@
  * 5. DESIGN CHOICES where the SPEC is silent / tests
  * ================================================================================================================================
  *  - SFX are calibrated PERCEPTUALLY: every non-quiet SFX sits on the same K-weighted (ITU-R BS.1770) active level, quiet ones (menu_move -9 dB, land -12 dB)
- *    below it, clearly above the music.  The per-SFX `trim` constants come from `node test/audio_analyze.mjs --apply-trims` (repeat until flat).
+ *    below it, clearly above the music.  The per-SFX `trim` constants come from `node test/audio_analyze.mjs --apply-trims` (repeat until flat); every SFX is measured WARM (started 1 s into
+ *    a running chain -- a sound at t=0 meets a cold limiter and reads up to 14 dB low, which is what mis-fitted the v2.0 table).  The critical cues (hurry, death, ghost, 1UP, EXTEND letter,
+ *    round clear, power-up) carry an `lvl` bonus and pull the music bed down by SFX_DUCK while they sound, so they stay >= 8 dB over the loudest drop (test/audio_v3_mix.mjs).
  *  - COMPOSER ADDITIONS (v2.0, additive): (1) `drums2` / `drums3` section keys = extra drum grids that layer on the same steps (§3.3); (2) rel symbols `f` (b2), `g` (b6), `h` (b5) and
  *    power chords ('B5' = [0, 7]) no longer yield NaN for the fifth ('5', 'c', 'b' fall back to the last chord tone) -- a NaN pitch used to throw inside the scheduler and count toward the
  *    20-fault shutdown; the compiler now reports a non-finite symbol; (3) voiceChord() avoids muddy voicings: a semitone below MIDI 72 costs 40, minor 9th 14, low second / 9th 3-6, an
  *    extension (9th / 11th) is never the lowest voice (so Em9 / Gm9 pads are rootless 3-5-7-9 stacks, Bbmaj7 sits in root position and never puts the 7th a semitone under the root).
+ *    (3) `alt` second-pass versions (§3.2); (4) kicks on beats 2 and 4 of the drops through a third drum grid (four-on-the-floor, FIXPLAN_V3 A7).
  *    Song arrangement conventions: quiet sections use `mix: { all: 0.5-0.7 }`, builds ramp `auto: { 'master.vol': [0.7, 1, 'in'] }` plus `master.hpf` / `super.lpf` sweeps, drops reset to full.
  *  - Tests: test/audio_lint.mjs (composition rules), test/audio_analyze.mjs (loudness / peaks / seams / SFX table), test/audio_runtime.mjs --strict (API),
  *    test/audio_cpu.mjs (CPU), test/audio_v2_board.html (listening board).  Spectrogram tools: test/audio_spectro.mjs, test/audio_sfxsheet.mjs.
@@ -205,7 +216,7 @@ const AUDIO = (() => {
   const OFFLINE_CHUNK = 2;       // seconds of music scheduled per slice in _renderOffline
   const MAX_VOICES = 190;        // global source-node budget (music + sfx); new SFX are dropped above this
   const MAX_SFX_VOICES = 64;     // source nodes alive in SFX groups; new SFX are dropped above this
-  const MUSIC_LEVEL = 0.5, SFX_LEVEL = 1.0, MASTER_LEVEL = 0.95;
+  const MUSIC_LEVEL = 0.6, SFX_LEVEL = 1.0, MASTER_LEVEL = 0.95;     // MUSIC_LEVEL 0.5 -> 0.6 with the softer limiter (FIXPLAN_V3 A3: it adds ~1.6 dB less automatic make-up; the loop gains stay as fitted)
   const DELAY_SEND_FB = 0.38;    // ping-pong feedback
   const KS_RATE = ENGINE_RATE;   // sample rate of the generated Karplus-Strong plucks
   const BAKE_T = 1.5;            // loop length (s) of the pre-baked unison-saw buffers (supersaw / pad / choir)
@@ -758,7 +769,7 @@ const AUDIO = (() => {
   INST.riff = { fmt: 'rel', mono: true, play: riffVoice, src: () => 2, lo: 33, cost: 0.1,
     d: { wave: { saw: 1, sub: 0.7 }, cut: 1400, fst: 2.2, ft: 0.1, q: 4, a: 0.003, d: 0.25, s: 0.7, r: 0.05, gate: 0.82, lv: 0.9, det: 11 } };
   INST.arp = { fmt: 'rel', mono: true, play: arpVoice, src: (c) => (c.n | 0 || 1) + (c.pw2 ? 1 : 0), lo: 57, cost: 0.08,
-    d: { wave: 0.25, n: 1, spread: 8, cut: 2600, fst: 2.4, ft: 0.13, q: 3, a: 0.003, d: 0.14, s: 0.18, r: 0.06, gate: 0.7, lv: 0.17, pw2: 0, pwl: 0.4 } };
+    d: { wave: 0.25, n: 1, spread: 8, cut: 2600, fst: 2.4, ft: 0.13, q: 3, a: 0.003, d: 0.14, s: 0.18, r: 0.06, gate: 0.7, lv: 1.9, pw2: 0, pwl: 0.4 } };      // lv 1.9 (was 0.17): FIXPLAN_V3 A5, the cold arp sat 20-37 dB under its band and could not be heard (lane vols stay as authored)
   INST.lead = { fmt: 'notes', mono: true, play: arpVoice, src: (c) => (c.n | 0 || 2), cost: 0.1,
     d: { wave: 'sawtooth', n: 2, spread: 9, cut: 3600, fst: 1.8, ft: 0.25, q: 1.2, a: 0.008, d: 0.2, s: 0.8, r: 0.1, gate: 0.94, lv: 0.112, scoop: 25 } };
   INST.alarm = { fmt: 'notes', mono: true, play: arpVoice, src: (c) => (c.n | 0 || 2) + 1, cost: 0.12,
@@ -787,7 +798,7 @@ const AUDIO = (() => {
     o.connect(g);
     return g;
   }
-  function kLinn(ctx, bus, t, v) {                     // LinnDrum-like: short, round, mid-heavy with a soft beater
+  function kMachine(ctx, bus, t, v) {                     // 80s drum-machine kick: short, round, mid-heavy with a soft beater
     sineHit(ctx, bus.in, t, 150, 58, 0.055, 0.075, v * 1.0);
     sineHit(ctx, bus.in, t, 320, 100, 0.02, 0.02, v * 0.35, 'triangle');
     nzHit(ctx, bus.in, t, 'highpass', 1800, 0.7, 0.005, v * 0.3, 0.0005, 0.03);
@@ -832,10 +843,10 @@ const AUDIO = (() => {
     [0, 0.0105, 0.0215, 0.032].forEach((at, i) => nzHit(ctx, bus.in, t + at, 'bandpass', 1500 + i * 100, 1.1, 0.009, v * 0.7, 0.0005, 0.04));
     nzHit(ctx, bus.in, t + 0.032, 'bandpass', 1350, 0.9, 0.06, v * 0.6, 0.001, 0.4);
   }
-  function snap(ctx, bus, t, v) {                      // finger snap: a dry "tick" with a hollow body
-    nzHit(ctx, bus.in, t, 'bandpass', 2700, 3.2, 0.014, v * 1.0, 0.0004, 0.12);
-    nzHit(ctx, bus.in, t, 'highpass', 5200, 0.7, 0.004, v * 0.35, 0.0003, 0.03);
-    sineHit(ctx, bus.in, t, 1300, 520, 0.02, 0.012, v * 0.4);
+  function snap(ctx, bus, t, v) {                      // finger snap: a dry "tick" with a hollow body (FIXPLAN_V3 A6: x3.5, the snaps are the only percussion of the title / ending intro and were 13 dB under the twang band)
+    nzHit(ctx, bus.in, t, 'bandpass', 2700, 3.2, 0.014, v * 3.5, 0.0004, 0.12);
+    nzHit(ctx, bus.in, t, 'highpass', 5200, 0.7, 0.004, v * 1.2, 0.0003, 0.03);
+    sineHit(ctx, bus.in, t, 1300, 520, 0.02, 0.012, v * 1.4);
   }
   function rim(ctx, bus, t, v) {
     sineHit(ctx, bus.in, t, 1750, 1600, 0.01, 0.008, v * 0.6, 'square');
@@ -854,8 +865,9 @@ const AUDIO = (() => {
     const bp = bq(ctx, 'bandpass', bpF, 0.6), hp = bq(ctx, 'highpass', hpF, 0.7), g = decayEnv(ctx, bus.in, t, 0.0005, tau, v);
     s.connect(bp); bp.connect(hp); hp.connect(g);
   }
-  const metC = (ctx, bus, t, v) => metal(ctx, bus, t, v * 0.85, 0.02, 0.2, 9500, 6500);
-  const metO = (ctx, bus, t, v) => metal(ctx, bus, t, v * 0.8, 0.13, 0.9, 9000, 6000, true);
+  // FIXPLAN_V3 A2: the six-square source is ~15 dB under noise hats after the 6.5 kHz high-pass, so the metal hats carry a make-up of x7.3 / x6.75 (K-active m / M = h / o, was -17 dB)
+  const metC = (ctx, bus, t, v) => metal(ctx, bus, t, v * 6.2, 0.02, 0.2, 9500, 6500);
+  const metO = (ctx, bus, t, v) => metal(ctx, bus, t, v * 5.4, 0.13, 0.9, 9000, 6000, true);
   const ride = (ctx, bus, t, v) => { metal(ctx, bus, t, v * 0.55, 0.32, 1.6, 6200, 3500, true); nzHit(ctx, bus.in, t, 'highpass', 8000, 0.7, 0.02, v * 0.18, 0.0004, 0.15); };
   function crash(ctx, bus, t, v) {
     nzHit(ctx, bus.in, t, 'highpass', 3600, 0.5, 0.5, v * 0.7, 0.002, 3.4);
@@ -882,7 +894,7 @@ const AUDIO = (() => {
 
   /** drum grid char -> [kit lane, voice, triggers the sidechain] */
   const KIT = {
-    k: ['kick', kLinn, true], K: ['kick', kEdm, true], b: ['kick', kBoom, true],
+    k: ['kick', kMachine, true], K: ['kick', kEdm, true], b: ['kick', kBoom, true],
     s: ['snare', snGate], S: ['snare', snHard], y: ['snare', snCrush], n: ['snare', snGhost], B: ['snare', snBrush], p: ['snare', clap],
     f: ['perc', snap], r: ['perc', rim], t: ['perc', tomAt(200)], u: ['perc', tomAt(145)], v: ['perc', tomAt(100)],
     h: ['hats', hatC], o: ['hats', hatO], m: ['hats', metC], M: ['hats', metO], d: ['hats', ride], c: ['hats', crash],
@@ -997,7 +1009,7 @@ const AUDIO = (() => {
     const pf = P && !o.fix ? P.f : 1, pv = P ? P.v : 1;
     t += o.at || 0;
     const d = o.d, src = mkNoise(ctx, t, t + d + 0.03), f = bq(ctx, o.ft || 'bandpass', o.f * pf, o.q === undefined ? 0.8 : o.q);
-    if (o.f2) f.frequency.exponentialRampToValueAtTime(o.f2 * pf, t + d);
+    if (o.f2) { f.frequency.setValueAtTime(o.f * pf, t); f.frequency.exponentialRampToValueAtTime(o.f2 * pf, t + d); }      // anchored at the start (FIXPLAN_V3 A1): an exponential ramp without a start event runs from context time 0, so in the live game (t >> d) every noise sweep sat on its end frequency
     const g = ctx.createGain(), v = o.v * pv, a = Math.min(o.a === undefined ? 0.003 : o.a, d * 0.5);
     g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(v, t + a); g.gain.exponentialRampToValueAtTime(0.0008, t + d);
     src.connect(f); f.connect(g);
@@ -1073,134 +1085,134 @@ const AUDIO = (() => {
   // Energy plan: the heavy sounds (thunder / bomb / boss_hit / boss_die / land) keep their weight in a 200-2500 Hz band plus a short sub
   // tail, so they survive laptop and phone speakers.
   const SFX = {
-    jump: { max: 2, rev: 0.14, trim: 2.891, lvl: 1, fn(k) {            // rubbery digital blip up
+    jump: { max: 2, rev: 0.14, trim: 1.336, lvl: 1, fn(k) {            // rubbery digital blip up
       k.tone({ w: 'tri', pts: [[0, 330], [0.05, 520], [0.13, 800]], d: 0.14, v: 0.5, lp: [1900, 4600, 1.5] });
       k.tone({ w: 0.25, pts: [[0, 660], [0.12, 1500]], d: 0.12, v: 0.2, lp: [2600, 5200, 1] });
       k.bell({ f: 1320, mr: 2, idx: 0.7, id: 0.05, d: 0.1, v: 0.2, at: 0.03 });
       k.noise({ ft: 'bandpass', f: 3000, q: 1.5, d: 0.025, v: 0.1 });
     } },
-    shoot: { max: 2, rev: 0.2, trim: 1.551, fn(k) {                     // soap-bubble blow: glassy rising plinks + airy puff
+    shoot: { max: 2, rev: 0.2, trim: 1.101, fn(k) {                     // soap-bubble blow: glassy rising plinks + airy puff
       k.tone({ w: 'sine', pts: [[0, 480], [0.09, 1180]], d: 0.1, v: 0.5 });
       k.bell({ f: 1500, mr: 1.5, idx: 0.5, id: 0.05, d: 0.1, v: 0.32, at: 0.045 });
       k.tone({ w: 'sine', pts: [[0, 760], [0.08, 1700]], d: 0.09, v: 0.22, at: 0.05 });
       k.noise({ ft: 'bandpass', f: 2400, f2: 4400, q: 1.3, d: 0.08, v: 0.13 });
     } },
-    pop: { max: 3, rev: 0.16, trim: 2.55, lvl: 1, fn(k) {              // crisp pop with a tiny sub thump
+    pop: { max: 3, rev: 0.16, trim: 0.59, lvl: 1, fn(k) {              // crisp pop with a tiny sub thump
       k.noise({ ft: 'highpass', f: 3600, d: 0.05, v: 0.5 });
       k.tone({ w: 'sine', pts: [[0, 1900], [0.07, 430]], d: 0.08, v: 0.5 });
       k.tone({ w: 'sine', pts: [[0, 125], [0.05, 52]], d: 0.1, v: 0.7, fix: true });
       k.bell({ f: 2600, mr: 2.4, idx: 0.5, id: 0.03, d: 0.07, v: 0.16 });
     } },
-    trap: { max: 2, rev: 0.28, trim: 0.841, fn(k) {                     // enemy sealed in: shimmering upward chime
+    trap: { max: 2, rev: 0.28, trim: 0.952, fn(k) {                     // enemy sealed in: shimmering upward chime
       k.bells([784, 1047, 1319, 1760], 0.05, { d: 0.32, v: 0.34, mr: 3.5, idx: 0.8, id: 0.07 });
       k.tone({ w: 'sine', pts: [[0, 700], [0.25, 2900]], d: 0.28, v: 0.14 });
       k.noise({ ft: 'bandpass', f: 1500, f2: 7200, q: 2, d: 0.26, v: 0.1, a: 0.05 });
     } },
-    kill: { max: 3, rev: 0.16, trim: 1.963, fn(k) {                     // punchy digital zap with a metallic transient; the pitch option climbs with the chain
-      const vs = 1 - 0.018 * Math.max(0, k.semi);
+    kill: { max: 3, rev: 0.16, trim: 0.75, fn(k) {                     // punchy digital zap with a metallic transient; the pitch option climbs with the chain
+      const sm = Math.max(0, k.semi), vs = (1 - 0.018 * sm) * (sm >= 6 ? 1.45 : 1);     // the +6.. variants carry a bell tail (more quiet frames in the K-active mean): +3.2 dB keeps the ladder flat (FIXPLAN_V3 A1, warm fit)
       k.ring({ f: 2200, r: 1.41, d: 0.06, v: 0.5 * vs });
       k.tone({ w: 'saw', pts: [[0, 2600], [0.13, 320]], d: 0.16, v: 0.55 * vs, lp: [7000, 1000, 2] });
       k.tone({ w: 0.25, pts: [[0, 1040], [0.1, 520]], d: 0.1, v: 0.3 * vs, at: 0.02 });
-      k.tone({ w: 'sine', pts: [[0, 190], [0.18, 62]], d: 0.24, v: 0.32, fix: true });                // the thump keeps its pitch
-      if (k.semi >= 6) k.bell({ f: 2093, at: 0.11, d: 0.26, v: 0.2 * vs });
+      k.tone({ w: 'sine', pts: [[0, 190], [0.18, 62]], d: 0.24, v: 0.32 * (1 - 0.035 * sm), fix: true });   // the thump keeps its pitch (a little less of it as the chain climbs, so the climb is heard)
+      if (sm >= 6) k.bell({ f: 2093, at: 0.11, d: 0.26, v: 0.2 * vs });
     } },
-    bounce: { max: 2, rev: 0.12, trim: 1.895, fn(k) {                   // rubbery synth blip
+    bounce: { max: 2, rev: 0.12, trim: 1.022, fn(k) {                   // rubbery synth blip
       k.tone({ w: 'tri', pts: [[0, 200], [0.04, 640], [0.12, 330], [0.2, 430], [0.26, 370]], d: 0.27, v: 0.62, vib: [26, 90, 0.03], lp: [2800, 1300, 3] });
       k.bell({ f: 440, mr: 1, idx: 2, ie: 0.1, id: 0.05, d: 0.13, v: 0.18 });
     } },
-    food: { max: 3, rev: 0.26, trim: 0.778, fn(k) {                     // sparkle chime
+    food: { max: 3, rev: 0.26, trim: 0.8, fn(k) {                     // sparkle chime
       k.bell({ f: 1568, d: 0.2, v: 0.42, p2: 2.76 });
       k.bell({ f: 2349, at: 0.06, d: 0.3, v: 0.42, p2: 2.76 });
       k.bell({ f: 3136, at: 0.11, d: 0.3, v: 0.24 });
       k.noise({ ft: 'highpass', f: 9000, d: 0.2, v: 0.05, at: 0.06 });
     } },
-    powerup: { max: 1, rev: 0.26, trim: 1.283, fn(k) {                  // rising supersaw arp into a swelling chord
+    powerup: { max: 1, rev: 0.26, trim: 2.137, lvl: 2.5, fn(k) {                  // rising supersaw arp into a swelling chord
       k.seq([659, 784, 988, 1175, 1319, 1568, 1976], 0.04, { w: 'saw', v: 0.28, d: 0.07, lp: [3000, 5200, 1] });
       k.saws({ f: [659, 988, 1319], n: 5, at: 0.3, d: 0.44, v: 0.55, cut: [1400, 7500], a: 0.04 });
       k.bell({ f: 2637, at: 0.3, d: 0.4, v: 0.2 });
     } },
-    item_appear: { max: 1, rev: 0.3, trim: 0.885, fn(k) {               // bloop + three twinkles
+    item_appear: { max: 1, rev: 0.3, trim: 1.041, fn(k) {               // bloop + three twinkles
       k.tone({ w: 'sine', pts: [[0, 520], [0.07, 1300]], d: 0.09, v: 0.34 });
       k.bell({ f: 2093, at: 0.07, d: 0.24, v: 0.3 });
       k.bell({ f: 2637, at: 0.12, d: 0.24, v: 0.3 });
       k.bell({ f: 3136, at: 0.17, d: 0.28, v: 0.27 });
       k.noise({ ft: 'highpass', f: 8000, d: 0.2, v: 0.05, at: 0.07 });
     } },
-    letter: { max: 2, rev: 0.3, trim: 0.716, fn(k) {                    // bright bell triad
+    letter: { max: 2, rev: 0.3, trim: 1.129, lvl: 3.0, fn(k) {                    // bright bell triad
       k.bells([784, 988, 1175], 0.08, { d: 0.42, v: 0.46, mr: 3.5, idx: 0.7, id: 0.08, p2: 2.76 });
       k.noise({ ft: 'highpass', f: 7500, d: 0.15, v: 0.04, at: 0.16 });
     } },
-    oneup: { max: 1, rev: 0.3, trim: 1.091, fn(k) {                     // triumphant arp + supersaw chord + bell
+    oneup: { max: 1, rev: 0.3, trim: 1.318, lvl: 0.5, fn(k) {                     // triumphant arp + supersaw chord + bell
       k.seq([392, 494, 587, 784, 988, 1175, 1568], 0.055, { w: 'saw', v: 0.28, d: 0.09, lp: [2600, 5000, 1] });
       k.saws({ f: [784, 988, 1175], n: 5, at: 0.39, d: 0.5, v: 0.55, cut: [2000, 8000], a: 0.02 });
       k.bell({ f: 1568, at: 0.39, d: 0.5, v: 0.28 });
       k.bell({ f: 2349, at: 0.45, d: 0.4, v: 0.2 });
     } },
-    death: { max: 1, rev: 0.22, trim: 0.848, fn(k) {                    // descending glitch + boom
+    death: { max: 1, rev: 0.22, trim: 1.121, lvl: 1.5, fn(k) {                    // descending glitch + boom
       k.tone({ w: 'saw', pts: [[0, 880], [0.15, 600], [0.3, 360], [0.62, 90]], d: 0.66, v: 0.4, lp: [5200, 320, 2], vib: [16, 180, 0.05] });
       [0, 1, 2, 3, 4, 5].forEach((i) => k.tone({ w: 0.25, f: 760 - i * 90, f2: 700 - i * 95, d: 0.04, v: 0.22, at: i * 0.05, crush: 4 }));
       k.tone({ w: 'sine', pts: [[0, 150], [0.55, 32]], d: 0.65, v: 0.6, at: 0.14, fix: true });
       k.noise({ ft: 'lowpass', f: 3200, f2: 260, q: 0.7, d: 0.5, v: 0.26, at: 0.12 });
     } },
-    hurry: { max: 1, rev: 0.16, trim: 1.191, fn(k) {                    // dark synth alarm
+    hurry: { max: 1, rev: 0.16, trim: 2.002, lvl: 3.0, fn(k) {                    // dark synth alarm
       [0, 0.12, 0.24, 0.36, 0.48, 0.6].forEach((at, i) => k.tone({ w: 'saw', f: i % 2 ? 494 : 659, f2: i % 2 ? 480 : 640, d: 0.1, v: 0.34, at, lp: [2600, 1500, 4] }));
       k.tone({ w: 'square', f: 165, d: 0.7, v: 0.12, sh: 'hold', lp: [900, 700, 1] });
     } },
-    ghost: { max: 1, rev: 0.4, trim: 0.736, fn(k) {                     // eerie detuned whisper
+    ghost: { max: 1, rev: 0.4, trim: 1.068, lvl: 1.5, fn(k) {                     // eerie detuned whisper
       k.tone({ w: 'sine', pts: [[0, 392], [0.4, 470], [0.9, 372]], d: 0.95, v: 0.3, a: 0.22, vib: [5, 70, 0.1] });
       k.tone({ w: 'sine', pts: [[0, 397], [0.4, 476], [0.9, 377]], d: 0.95, v: 0.3, a: 0.25, vib: [6.2, 90, 0.12] });
       k.tone({ w: 'tri', pts: [[0, 196], [0.9, 186]], d: 0.95, v: 0.16, a: 0.3 });
       k.noise({ ft: 'bandpass', f: 1700, f2: 900, q: 6, d: 0.9, v: 0.26, a: 0.28 });
     } },
-    thunder: { max: 1, rev: 0.2, trim: 1.114, fn(k) {                   // electric crack + rumble (energy above 200 Hz)
+    thunder: { max: 1, rev: 0.2, trim: 0.61, fn(k) {                   // electric crack + rumble (energy above 200 Hz)
       k.noise({ ft: 'highpass', f: 2600, d: 0.08, v: 0.9, a: 0.0006 });
       k.tone({ w: 'saw', pts: [[0, 3400], [0.11, 190]], d: 0.15, v: 0.45, lp: [7000, 500, 2] });
       k.noise({ ft: 'bandpass', f: 1600, f2: 260, q: 0.6, d: 0.55, v: 0.85 });
       k.tone({ w: 'square', pts: [[0, 96], [0.4, 58]], d: 0.42, v: 0.22, lp: [900, 300, 1] });
       [0.05, 0.12, 0.2, 0.29].forEach((at, i) => k.noise({ ft: 'highpass', f: 3000 + i * 900, d: 0.025, v: 0.35, at }));
     } },
-    fire: { max: 1, rev: 0.16, trim: 1.706, fn(k) {                     // whoosh + crackle
+    fire: { max: 1, rev: 0.16, trim: 1.767, fn(k) {                     // whoosh + crackle
       k.noise({ ft: 'bandpass', f: 420, f2: 2200, q: 0.9, d: 0.44, v: 0.85, a: 0.08 });
       k.tone({ w: 'saw', pts: [[0, 130], [0.36, 300]], d: 0.4, v: 0.14, a: 0.06, lp: [800, 2000, 1] });
       [0.06, 0.13, 0.2, 0.26, 0.33].forEach((at, i) => k.noise({ ft: 'highpass', f: 2600 + i * 650, d: 0.02, v: 0.22, at }));
     } },
-    water: { max: 1, rev: 0.3, trim: 1.465, fn(k) {                     // bubbly swoosh
+    water: { max: 1, rev: 0.3, trim: 1.678, fn(k) {                     // bubbly swoosh
       k.noise({ ft: 'bandpass', f: 650, f2: 1700, q: 2.5, d: 0.46, v: 0.28, a: 0.06 });
       [[620, 0], [880, 0.06], [740, 0.11], [1040, 0.17], [820, 0.23], [1200, 0.3]].forEach(([f, at]) =>
         k.tone({ w: 'sine', f, f2: f * 1.9, d: 0.075, v: 0.34, at }));
       k.bell({ f: 1760, at: 0.2, d: 0.25, v: 0.12, mr: 2 });
     } },
-    freeze: { max: 1, rev: 0.34, trim: 0.802, fn(k) {                   // crystalline down-shimmer
+    freeze: { max: 1, rev: 0.34, trim: 0.865, fn(k) {                   // crystalline down-shimmer
       k.bells([3136, 2637, 2349, 1976, 1568, 1319], 0.055, { d: 0.26, v: 0.3, mr: 3.5, idx: 0.6, id: 0.05 });
       k.tone({ w: 'sine', pts: [[0, 2300], [0.4, 520]], d: 0.45, v: 0.15, vib: [22, 120, 0] });
       k.noise({ ft: 'highpass', f: 7000, d: 0.36, v: 0.07 });
     } },
-    bomb: { max: 1, rev: 0.24, trim: 0.694, fn(k) {                     // industrial impact + sub drop
+    bomb: { max: 1, rev: 0.24, trim: 0.505, fn(k) {                     // industrial impact + sub drop
       k.ring({ f: 170, r: 1.41, d: 0.55, v: 0.55 });
       k.noise({ ft: 'bandpass', f: 2600, f2: 280, q: 0.5, d: 0.75, v: 0.95, crush: 6 });
       k.tone({ w: 'saw', pts: [[0, 320], [0.5, 60]], d: 0.55, v: 0.28, lp: [3000, 300, 1] });
       k.tone({ w: 'sine', pts: [[0, 150], [0.6, 30]], d: 0.7, v: 0.5, fix: true });
       k.noise({ ft: 'highpass', f: 2200, d: 0.07, v: 0.5 });
     } },
-    menu_move: { max: 2, rev: 0.1, trim: 1.61, quiet: true, fn(k) {    // soft clean tick
+    menu_move: { max: 2, rev: 0.1, trim: 0.426, quiet: true, fn(k) {    // soft clean tick
       k.tone({ w: 'sine', f: 1760, d: 0.05, v: 0.4, a: 0.002 });
       k.noise({ ft: 'highpass', f: 6000, d: 0.012, v: 0.07 });
     } },
-    menu_select: { max: 1, rev: 0.22, trim: 0.95, fn(k) {              // soft chime up
+    menu_select: { max: 1, rev: 0.22, trim: 0.954, fn(k) {              // soft chime up
       k.bell({ f: 880, d: 0.18, v: 0.45, mr: 2, idx: 0.5 });
       k.bell({ f: 1320, at: 0.055, d: 0.34, v: 0.45, mr: 2, idx: 0.5, p2: 2.76 });
     } },
-    pause: { max: 1, rev: 0.06, trim: 1.342, fn(k) {                    // soft chime down (must be over, with its stop padding, within the 320 ms before a hard pause suspends the context)
+    pause: { max: 1, rev: 0.06, trim: 1.194, fn(k) {                    // soft chime down (must be over, with its stop padding, within the 320 ms before a hard pause suspends the context)
       k.bell({ f: 988, d: 0.1, v: 0.45, mr: 2, idx: 0.5 });
       k.bell({ f: 659, at: 0.07, d: 0.14, v: 0.45, mr: 2, idx: 0.5 });
     } },
-    boss_hit: { max: 2, rev: 0.2, trim: 2.534, lvl: 3, fn(k) {          // metallic clang + thud (mid-heavy: survives small speakers)
+    boss_hit: { max: 2, rev: 0.2, trim: 1.091, lvl: 3, fn(k) {          // metallic clang + thud (mid-heavy: survives small speakers)
       k.ring({ f: 420, r: 1.47, d: 0.3, v: 0.62 });
       k.ring({ f: 1130, r: 1.22, d: 0.18, v: 0.34 });
       k.noise({ ft: 'bandpass', f: 2200, f2: 700, q: 0.9, d: 0.2, v: 0.75 });
       k.tone({ w: 'sine', pts: [[0, 280], [0.1, 70]], d: 0.28, v: 0.35, fix: true });
     } },
-    boss_die: { max: 1, rev: 0.3, trim: 0.756, fn(k) {                  // cascading explosions, reverse swell, one big industrial boom (~1.2 s, no chime tail)
+    boss_die: { max: 1, rev: 0.3, trim: 0.685, fn(k) {                  // cascading explosions, reverse swell, one big industrial boom (~1.2 s, no chime tail)
       k.noise({ ft: 'lowpass', f: 250, f2: 7000, q: 0.7, d: 0.62, v: 0.5, a: 0.5, at: 0.05 });                // reverse swell into the boom
       for (let i = 0; i < 4; i++) {
         const at = i * 0.12;
@@ -1213,22 +1225,22 @@ const AUDIO = (() => {
       k.tone({ w: 'saw', pts: [[0, 260], [0.45, 45]], d: 0.5, v: 0.32, at: 0.68, lp: [2500, 250, 1] });
       k.tone({ w: 'sine', pts: [[0, 110], [0.5, 26]], d: 0.58, v: 0.5, at: 0.68, fix: true });
     } },
-    enemy_shot: { max: 3, rev: 0.12, trim: 5.067, lvl: 1.5, fn(k) {      // digital pew
+    enemy_shot: { max: 3, rev: 0.12, trim: 1.388, lvl: 1.5, fn(k) {      // digital pew
       k.tone({ w: 'saw', pts: [[0, 1100], [0.1, 330]], d: 0.12, v: 0.5, lp: [4200, 900, 2] });
       k.tone({ w: 0.25, pts: [[0, 2200], [0.06, 800]], d: 0.07, v: 0.2 });
       k.noise({ ft: 'bandpass', f: 2200, q: 1, d: 0.04, v: 0.15 });
     } },
-    spawn: { max: 3, rev: 0.34, trim: 1.832, fn(k) {                    // materialise: swelling shimmer into a glass ping
+    spawn: { max: 3, rev: 0.34, trim: 1.731, fn(k) {                    // materialise: swelling shimmer into a glass ping
       k.noise({ ft: 'bandpass', f: 600, f2: 4200, q: 2, d: 0.22, v: 0.25, a: 0.05 });
       k.tone({ w: 'sine', pts: [[0, 390], [0.1, 780], [0.2, 1170]], d: 0.22, v: 0.3, vib: [18, 80, 0] });
       k.bell({ f: 2349, at: 0.16, d: 0.2, v: 0.22 });
     } },
-    land: { max: 2, rev: 0.06, trim: 1.078, quiet: 12, fn(k) {          // soft tick + thump
+    land: { max: 2, rev: 0.06, trim: 0.313, quiet: 12, fn(k) {          // soft tick + thump
       k.noise({ ft: 'bandpass', f: 1100, q: 1.2, d: 0.045, v: 0.35 });
       k.tone({ w: 'tri', pts: [[0, 360], [0.05, 160]], d: 0.07, v: 0.4 });
       k.tone({ w: 'sine', pts: [[0, 130], [0.06, 70]], d: 0.08, v: 0.3 });
     } },
-    clear: { max: 1, rev: 0.34, trim: 0.799, fn(k) {                    // round-clear stinger (~0.7 s): bright ping run into a sparkling bell chord
+    clear: { max: 1, rev: 0.34, trim: 0.902, fn(k) {                    // round-clear stinger (~0.7 s): bright ping run into a sparkling bell chord
       k.seq([784, 988, 1175, 1568], 0.075, { w: 'saw', v: 0.28, d: 0.1, lp: [3000, 5500, 1] });
       k.bells([1568, 1175, 988], 0, { at: 0.3, d: 0.4, v: 0.34, mr: 3.5, idx: 0.6, id: 0.07, p2: 2.76 });
       k.saws({ f: [784, 1175], n: 5, at: 0.3, d: 0.36, v: 0.3, cut: [3000, 8000], a: 0.02 });
@@ -1482,7 +1494,76 @@ const AUDIO = (() => {
     (prog.events[step] || (prog.events[step] = [])).push(ev);
   }
 
+  /**
+   * Compile one section.  FIXPLAN_V3 A8: a loop section may carry `alt: { p, mix, dbl, dblVel }` -- the SECOND-PASS version of the section (every odd pass of the loop: counter-melody,
+   * octave doubling, fills, a different lane balance).  The section is compiled twice (the second time with the `alt` patterns / mix merged over the original ones) and the two event lists
+   * are diffed per step: events that are identical stay unflagged (they sound in every pass), events only in the first version get `o: 0` (even passes only), events only in the second
+   * `o: 1` (odd passes only) -- so drums, sidechain triggers, fx and the chord lanes need no special handling.  `dbl: { lane: semitones }` adds a transposed copy of that lane's
+   * notes (velocity x dblVel, default 0.55) to the second version.  The first pass of a stage is always the original composition.  Only the lanes the alt version touches (its `p`
+   * keys, `mix` keys and `dbl` sources; the drum grids + sidechain count as one unit) are recompiled and diffed, so a song with a few alt sections compiles ~1.5x as fast as a full double compile.
+   */
   function compileSection(prog, def, sec, sn, off, issues, laneOf) {
+    const mem0 = sec.alt && prog.voiceMem ? JSON.parse(JSON.stringify(prog.voiceMem)) : null;
+    const steps = compileSectionOnce(prog, def, sec, sn, off, issues, laneOf);
+    if (!sec.alt) return steps;
+    if (prog.kind !== 'loop' || (def.intro || []).indexOf(sn) >= 0) { issues.push(prog.name + '.' + sn + ': alt only makes sense in a loop section (not in the intro / a jingle)'); return steps; }
+    const A = sec.alt, tag = prog.name + '.' + sn + '.alt';
+    for (const k of Object.keys(A)) if (['p', 'mix', 'dbl', 'dblVel'].indexOf(k) < 0) issues.push(tag + ': unknown key "' + k + '" (p mix dbl dblVel)');
+    // shadow program: shares lanes / lane map / master flags, owns events, notes and the voice-leading memory
+    const sh2 = Object.create(prog);
+    sh2.events = []; sh2.meta = { lead: [], notes: [], chords: [], issues, sections: [] }; sh2.voiceMem = mem0 || {}; sh2.sectionsForReset = []; sh2.autoKeys = new Set();
+    const sec2 = Object.assign({}, sec, { p: Object.assign({}, sec.p || {}, A.p || {}), mix: Object.assign({}, sec.mix || {}, A.mix || {}), alt: null });
+    // scope: only the lanes (and the drum grids + sidechain as one 'drums' unit) the alt version touches are recompiled and diffed; a section-wide `mix: { all }` recompiles everything
+    let only = new Set();
+    for (const k of Object.keys(A.p || {})) only.add(k === 'drums' || k === 'drums2' || k === 'drums3' ? 'drums' : k);
+    for (const k of Object.keys(A.mix || {})) { if (k === 'all') only = null; else if (only) only.add(k === 'drums' || KIT_LANES.indexOf(k) >= 0 ? 'drums' : k); }
+    if (only) for (const k of Object.keys(A.dbl || {})) only.add(k);
+    compileSectionOnce(sh2, def, sec2, sn, off, issues, laneOf, only);
+    // doublings: dbl: { lead: 12 } (a transposed copy of the lane's notes) or { lead: { semi: -12, to: 'twang', vel: 0.6, bars: [1, 4] } } (other lane / bar range, 1-based, inclusive)
+    for (const ln of Object.keys(A.dbl || {})) {
+      const spec = typeof A.dbl[ln] === 'number' ? { semi: A.dbl[ln] } : (A.dbl[ln] || {});
+      const semi = +spec.semi, to = spec.to || ln, vel = spec.vel === undefined ? (A.dblVel === undefined ? 0.55 : A.dblVel) : spec.vel;
+      const Lt = laneOf(to, tag);
+      if (!Lt || !Number.isFinite(semi) || !INST[Lt.inst] || !INST[Lt.inst].play) { issues.push(tag + '.dbl: bad lane / interval for "' + ln + '"'); continue; }
+      Lt.used = true;
+      const instT = INST[Lt.inst], cfgT = Object.assign({}, instT.d, Lt.cfg, (sec.cfg && sec.cfg[to]) || {});
+      const b0 = spec.bars ? (spec.bars[0] - 1) * STEPS_PER_BAR : 0, b1 = spec.bars ? spec.bars[1] * STEPS_PER_BAR : steps;
+      for (let s = off + b0; s < Math.min(off + steps, off + b1); s++) for (const e of (sh2.events[s] || []).slice()) {
+        if (e.k !== 'n' || e.lane !== ln) continue;
+        addEv(sh2, s, { k: 'n', lane: to, play: instT.play, n: e.n, m: e.m.map((x) => x + semi), vel: e.vel * vel, c: to === ln ? e.c : cfgT, dbl: 1 });
+        for (const m of e.m) sh2.meta.notes.push({ s, n: e.n, m: m + semi, v: to });
+      }
+    }
+    // diff the two versions per step
+    const cfgKey = new Map(), keyOf = (e) => {
+      switch (e.k) {
+        case 'n': { let ck = cfgKey.get(e.c); if (ck === undefined) { ck = JSON.stringify(e.c); cfgKey.set(e.c, ck); } return 'n|' + e.lane + '|' + e.n + '|' + e.m.join(',') + '|' + e.vel.toFixed(4) + '|' + ck; }
+        case 'd': return 'd|' + e.lane + '|' + (e.fn && e.fn.name) + '|' + e.vel.toFixed(4);
+        case 'f': return 'f|' + e.lane + '|' + e.name + '|' + e.n + '|' + e.vel.toFixed(4);
+        case 'u': return 'u|' + e.lane + '|' + e.depth.toFixed(4) + '|' + e.rel;
+        default: return 'a|' + e.lane + '|' + e.p + '|' + e.v0 + '|' + e.v1;
+      }
+    };
+    const inScope = !only ? () => true : (e) => (e.k === 'n' || e.k === 'f' ? only.has(e.lane) : (e.k === 'd' || e.k === 'u') && only.has('drums'));
+    let nOdd = 0, nEven = 0;
+    for (let s = off; s < off + steps; s++) {
+      const base = (prog.events[s] || []).filter(inScope), alt = (sh2.events[s] || []).slice(), pool = new Map();
+      for (const e of alt) { const k = keyOf(e); (pool.get(k) || pool.set(k, []).get(k)).push(e); }
+      for (const e of base) {
+        const list = pool.get(keyOf(e));
+        if (list && list.length) list.pop(); else { e.o = 0; nEven++; }          // only in the original version: even passes
+      }
+      const left = new Set(); for (const list of pool.values()) for (const e of list) left.add(e);
+      for (const e of alt) if (left.has(e)) { e.o = 1; nOdd++; (prog.events[s] || (prog.events[s] = [])).push(e); }   // only in the second version: odd passes
+    }
+    const seen = new Set(prog.meta.notes.map((x) => x.s + '|' + x.m + '|' + x.v));
+    prog.meta.altNotes = (prog.meta.altNotes || []).concat(sh2.meta.notes.filter((x) => !seen.has(x.s + '|' + x.m + '|' + x.v)));
+    (prog.meta.altSections || (prog.meta.altSections = [])).push({ name: sn, start: off, steps, odd: nOdd, even: nEven });
+    if (!nOdd && !nEven) issues.push(tag + ': the alt version is identical to the original');
+    return steps;
+  }
+
+  function compileSectionOnce(prog, def, sec, sn, off, issues, laneOf, only) {          // only: Set of lane names (+ 'drums') to compile -- the second-pass version of a section recompiles just what its `alt` touches
     const tag = prog.name + '.' + sn;
     const ch = parseChords(sec.chords, issues, tag + '.chords');
     const steps = ch.steps;
@@ -1504,9 +1585,10 @@ const AUDIO = (() => {
 
     // ---------- pitched lanes ----------
     const DRUM_KEYS = ['drums', 'drums2', 'drums3'];            // drum grids: one hit per 16th per grid; extra grids LAYER (kick + hat on one step, snare + clap)
-    const drumGrids = DRUM_KEYS.filter((k) => P[k]).map((k) => [k, P[k]]);
+    const drumGrids = only && !only.has('drums') ? [] : DRUM_KEYS.filter((k) => P[k]).map((k) => [k, P[k]]);
     for (const k of DRUM_KEYS) delete P[k];
     for (const ln of Object.keys(P)) {
+      if (only && !only.has(ln)) continue;
       const L = laneOf(ln, tag); if (!L) continue;
       L.used = true;
       if (L.inst === 'kit') { issues.push(tag + ': lane "' + ln + '" is a drum-kit lane -- write the grid into p.drums (or drums2 / drums3)'); continue; }
@@ -1608,7 +1690,7 @@ const AUDIO = (() => {
     }
     // ---------- sidechain ----------
     const dk = sec.duck;
-    for (const L of prog.lanes) {
+    for (const L of only && !only.has('drums') ? [] : prog.lanes) {
       if (L.inst === 'kit') continue;
       let depth = L.cfg.duck || 0;
       if (dk === false) depth = 0;
@@ -1620,7 +1702,7 @@ const AUDIO = (() => {
       }
     }
     // ---------- automation ----------
-    for (const key of Object.keys(sec.auto || {})) {
+    for (const key of only ? [] : Object.keys(sec.auto || {})) {
       const [ln, param] = key.split('.');
       const targets = ln === 'master' ? ['master'] : ln === 'drums' ? KIT_LANES : [ln];
       for (const tn of targets) {
@@ -1641,7 +1723,7 @@ const AUDIO = (() => {
       }
     }
     // params automated in ANOTHER section but not here fall back to their lane default at the section start (finishSong)
-    (prog.sectionsForReset || (prog.sectionsForReset = [])).push({ off, steps, have: new Set(Object.keys(sec.auto || {})) });
+    if (!only) (prog.sectionsForReset || (prog.sectionsForReset = [])).push({ off, steps, have: new Set(Object.keys(sec.auto || {})) });
     return steps;
   }
 
@@ -1684,16 +1766,19 @@ const AUDIO = (() => {
     prog.autoKeys = null;
     // estimate: highest number of simultaneously sounding source nodes (lint / budget)
     let peak = 0;
-    const ends = [];
-    for (let s = 0; s < prog.steps; s++) {
-      for (let i = ends.length - 1; i >= 0; i--) if (ends[i][0] <= s) ends.splice(i, 1);
-      for (const e of prog.events[s] || []) {
-        if (e.k === 'n') { const L = prog.laneMap[e.lane], inst = INST[L.inst]; ends.push([s + e.n + 2, inst.src ? inst.src(e.c, e.m.length) : 2]); }
-        else if (e.k === 'd') ends.push([s + 2, 3]);
-        else if (e.k === 'f') ends.push([s + e.n + 1, 4]);
+    for (const par of [0, 1]) {                       // even / odd loop pass (a section's `alt` version only sounds on odd passes)
+      const ends = [];
+      for (let s = 0; s < prog.steps; s++) {
+        for (let i = ends.length - 1; i >= 0; i--) if (ends[i][0] <= s) ends.splice(i, 1);
+        for (const e of prog.events[s] || []) {
+          if (e.o !== undefined && e.o !== par) continue;
+          if (e.k === 'n') { const L = prog.laneMap[e.lane], inst = INST[L.inst]; ends.push([s + e.n + 2, inst.src ? inst.src(e.c, e.m.length) : 2]); }
+          else if (e.k === 'd') ends.push([s + 2, 3]);
+          else if (e.k === 'f') ends.push([s + e.n + 1, 4]);
+        }
+        const tot = ends.reduce((a, b) => a + b[1], 0);
+        if (tot > peak) peak = tot;
       }
-      const tot = ends.reduce((a, b) => a + b[1], 0);
-      if (tot > peak) peak = tot;
     }
     prog.peakSources = peak;
   }
@@ -1733,7 +1818,7 @@ const AUDIO = (() => {
     //   FORM MAP (bars)          chords (one bar each unless dotted)                                   what enters / leaves
     //   I   intro      8  once   Em9 Em9 Cmaj7 Cmaj7 Am9 Am9 B7sus B7sus                               pad swell, 8th arp fades in, ghost-kick pump (q), bell pings 1..3,
     //                                                                                                   choir + sub + soft kick + hats from bar 5, reverse swell + riser into V
-    //   V   verse     16  A: Em9 Em9 Cmaj7 Cmaj7 Am9 Am9 B7sus B7b9                                  Linn kick + gated snare + 8th hats, chorus pick bass (8ths), cold arp,
+    //   V   verse     16  A: Em9 Em9 Cmaj7 Cmaj7 Am9 Am9 B7sus B7b9                                  machine kick + gated snare + 8th hats, chorus pick bass (8ths), cold arp,
     //                      B: Em9 Gmaj7 Cmaj7 Am9.B7sus Em9 Gmaj7 Am9 B7b9                              twang verse tune (A low and sparse, B higher), choir joins in B, 16th hats in B
     //   B1  build      8  Am9 Am9 Cmaj7 Cmaj7 Gmaj7 Gmaj7 B7sus B7sus                                 EDM kick 4/4, supersaw stabs under a rising lpf, master hp-sweep, riser,
     //                                                                                                   snare roll bars 5-8, everything cuts for the last beat
@@ -1756,8 +1841,11 @@ const AUDIO = (() => {
     //   distorted riff gallop in B2 / D2; the choir joins the singing second hook (D2 bars 9-16).
     //   Mix intent (section loudness): I -23, V -20, B1 -19, D1 -16, K -24, B2 -19, D2 -15 LUFS (quiet verse / loud drop contrast, spread >= 6 dB).
     // ============================================================================================================================================
+    // the twang line of drop 2, bars 1-8 (the hook an octave under the lead) -- shared by the original and the second-pass version of D2
+    const s1d2tw = `| e4/1 r/1 e4/1 r/1 e4/2 g4/2 b4/8 | d4/1 r/1 d4/1 r/1 d4/2 e4/2 g4/8 | e4/1 r/1 e4/1 r/1 e4/2 a4/2 c5/8 | b4/4 a4/4 g4/2 f#4/2 d#4/4 |
+                    | e4/1 r/1 e4/1 r/1 e4/2 g4/2 b4/4 d5/4 | d4/1 r/1 d4/1 r/1 d4/2 e4/2 g4/4 c5/4 | e4/1 r/1 e4/1 r/1 e4/2 a4/2 c5/4 e5/4 | f#5/4 e5/4 d#5/4 b4/4 |`;
     D.stage1 = {
-      bpm: 122, swing: 0.5, echo: 3, fb: 0.38, key: 4, mode: MINOR, gain: 1.488, duckRel: 0.55,
+      bpm: 122, swing: 0.5, echo: 3, fb: 0.38, key: 4, mode: MINOR, gain: 1.222, duckRel: 0.55,
       lanes: {
         pad: { inst: 'pad', vol: 0.5, hall: 0.35, duck: 0.5 },
         choir: { inst: 'choir', vol: 0.6, hall: 0.55, vib: [5.2, 14], duck: 0.35 },
@@ -1781,7 +1869,8 @@ const AUDIO = (() => {
         f4: 'K...K...K...K...', bk: 'K...p...K...p...', bkf: 'K...p...K...p.pp', bky: 'K...p...K...p.yy',  // EDM four-on-floor / drop groove (kick + clap) / with a fill
         off: '..o...o...o...o.', mh: 'm,m,m,m,m,m,m,m,m,m,m,m,m,m,m,m,',          // off-beat open hat / metallic 16ths
         mhc: 'cm,m,m,m,m,m,m,m,m,m,m,m,m,m,m,',                                // metallic 16ths with a crash on the downbeat
-        mhc8: 'c.m.m.m.m.m.m.m.', st2: '......x.......x.',                          // metallic 8ths with a crash / two off-beat stabs per bar (CPU budget: the 16ths are kept for builds and fills)
+        mhc8: 'c.m.m.m.m.m.m.m.', st2: '......x.......x.',
+        mhk8: 'm.m.K.m.m.m.K.m.', mhck8: 'c.m.K.m.m.m.K.m.', mhf: 'm.m.K.m.m.m.t.uv',                           // FIXPLAN_V3 A7: the same metallic 8ths with a kick on beats 2 and 4 (drops are four-on-the-floor; the kick lane / sidechain trigger from any grid)                          // metallic 8ths with a crash / two off-beat stabs per bar (CPU budget: the 16ths are kept for builds and fills)
         // bass
         b8: '1-1-1-1-1-1-1-1-', b8o: '1-1-1-1-1-1-8-1-', b8f: '1-1-1-1-1-8-7-5-',
         off808: '..1-..1-..1-..1-',
@@ -1824,6 +1913,16 @@ const AUDIO = (() => {
             fx: 'impact@0:0.5 down@15b/1b',
           },
           mix: { arp: 0.9, snare: 0.5, perc: 0.5, twang: 0.8, all: 0.7 },
+          // SECOND PASS (A8): a soft bell counter-line answers the verse tune (bars 1-8), the choir and the 16th hats come in four bars earlier, the arp runs 16ths in the last four bars
+          alt: {
+            p: {
+              bell: `| r/8 g5/2, b5/2, e6/4, | b5/6, g5/2, e5/8, | r/8 e5/2, g5/2, b5/4, | g5/6, e5/2, r/8 | r/8 a5/2, c6/2, e6/4, | e6/6, c6/2, a5/8, | r/8 f#5/2, a5/2, b5/4, | a5/6, f#5/2, d#5/8, |
+                      | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 |`,
+              choir: rest(4) + hold(12),
+              drums2: cells('hh8*4', 'hh16*12'),
+              arp: cells('arp8*12', 'arp16*4'),
+            },
+          },
         },
         // ------------------------------------------------------------------------------------------------ BUILD 1 (8 bars)
         B1: {
@@ -1838,7 +1937,14 @@ const AUDIO = (() => {
             fx: 'riser@0/124 swell@4b/3b',
           },
           mix: { super: 0.85, snare: 0.6 },
-          auto: { 'super.lpf': [500, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 600], [7.8125, 10]], 'arp.vol': [0.22, 0.5], 'master.vol': [0.8, 1.0, 'in'] },
+          auto: { 'super.lpf': [500, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 600], [7.8125, 10]], 'arp.vol': [0.08, 0.18], 'master.vol': [0.8, 1.0, 'in'] },
+          // SECOND PASS (A8): the build already carries the distorted riff and the clangs of build 2 (bars 5-8)
+          alt: {
+            p: {
+              riff: cells(rest(4), 'rf1 rf2 rf1', 'rf3'),
+              drums3: cells('................', '................', '..........x.....', '................', '..X...x...X...x.', 'x...x...x...x...', 'zzzzzzzz........', '................'),
+            },
+          },
         },
         // ------------------------------------------------------------------------------------------------ DROP 1 (16 bars)
         D1: {
@@ -1854,8 +1960,17 @@ const AUDIO = (() => {
                     | e5/1 r/1 e5/1 r/1 e5/2 a5/2 c6/8 | f#5/1 r/1 f#5/1 r/1 f#5/2 b5/2 d6/8 | g5/1 r/1 g5/1 r/1 g5/2 c6/2 e6/8 | f#6/4 d#6/4 b5/4 r/4 |`,
             drums: cells('bk*3 bkf', 'bk*3 bkf', 'bk*3 bkf', 'bk*3 K...p...K.......'),
             drums2: cells(rep('off', 15), 'RRRRRRRR........'),
-            drums3: cells('mhc8', 'mh8*7', 'mhc8', 'mh8*7'),
+            drums3: cells('mhck8', 'mhk8*7', 'mhck8', 'mhk8*6', 'mh8'),        // A7: kicks on 2 and 4 (every bar but the roll bar 16)
             fx: 'impact@0 swell@7b/1b down@15b/1b',
+          },
+          mix: { arp: 1.6 },                                                 // A5: the cold arp stays audible in the drops (+4 dB)
+          // SECOND PASS (A8): the first hook statement is doubled an octave up, a soft twang tenor line moves under the second statement and the last phrase, tom fills close bars 4 / 8 / 12
+          alt: {
+            dbl: { lead: { semi: 12, bars: [1, 4], vel: 0.5 } },
+            p: {
+              twang: `| r/16 | r/16 | r/16 | r/16 | e4/8, g4/8, | g4/8, e4/8, | e4/8, c5/8, | f#4/8, d#4/8, | r/16 | r/16 | r/16 | r/16 | a4/8, c5/8, | b4/8, d5/8, | e4/8, g4/8, | f#4/8, d#4/8, |`,
+              drums3: cells('mhck8', 'mhk8*2', 'mhf', 'mhk8*3', 'mhf', 'mhck8', 'mhk8*2', 'mhf', 'mhk8*3', 'mh8'),
+            },
           },
         },
         // ------------------------------------------------------------------------------------------------ BREAKDOWN (8 bars)
@@ -1889,7 +2004,7 @@ const AUDIO = (() => {
             fx: 'riser@0/124 swell@3b/4b',
           },
           mix: { super: 0.85, riff: 0.8, snare: 0.6 },
-          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 1200], [7.8125, 10]], 'arp.vol': [0.25, 0.55], 'pad.hall': [0.35, 0.85], 'master.vol': [0.75, 1.0, 'in'] },
+          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 1200], [7.8125, 10]], 'arp.vol': [0.09, 0.2], 'pad.hall': [0.35, 0.85], 'master.vol': [0.75, 1.0, 'in'] },
         },
         // ------------------------------------------------------------------------------------------------ DROP 2 (16 bars)
         D2: {
@@ -1906,16 +2021,22 @@ const AUDIO = (() => {
                     | e6/1 r/1 e6/1 r/1 e6/2 g6/2 b6/4 g6/4 | d6/1 r/1 d6/1 r/1 d6/2 e6/2 g6/4 e6/4 | e6/1 r/1 e6/1 r/1 e6/2 a6/2 c7/4 a6/4 | f#6/4 e6/4 d#6/4 b5/4 |
                     | a5/4 c6/4 e6/8 | d6/6 c6/2 b5/8 | g5/4 b5/4 d6/4 f#6/4 | e6/6 d6/2 a5/8 |
                     | a5/4 c6/4 e6/4 g6/4 | e6/6 d6/2 c6/8 | b5/4 e6/4 f#6/8 | g6/4 f#6/4 d#6/4 b5/4 |`,
-            twang: `| e4/1 r/1 e4/1 r/1 e4/2 g4/2 b4/8 | d4/1 r/1 d4/1 r/1 d4/2 e4/2 g4/8 | e4/1 r/1 e4/1 r/1 e4/2 a4/2 c5/8 | b4/4 a4/4 g4/2 f#4/2 d#4/4 |
-                    | e4/1 r/1 e4/1 r/1 e4/2 g4/2 b4/4 d5/4 | d4/1 r/1 d4/1 r/1 d4/2 e4/2 g4/4 c5/4 | e4/1 r/1 e4/1 r/1 e4/2 a4/2 c5/4 e5/4 | f#5/4 e5/4 d#5/4 b4/4 |
-                    | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 |`,
+            twang: `${s1d2tw} | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 |`,
             drums: cells('bk*3 bky', 'bk*3 bky', 'ht*3 ht2', 'bk*3 K...p...RRRRRRRR'),
             drums2: cells('off*8', 'mh8*4', 'off*4'),
-            drums3: cells('mhc8', 'mh8*7', 'mhc8', 'mh8*7'),
+            drums3: cells('mhck8', 'mhk8*7', 'mhc8', 'mh8*3', 'mhk8*3', 'mh8'),   // A7: four-on-the-floor in bars 1-8 and 13-15; the half-time bars 9-12 and the roll bar 16 keep their feel
             fx: 'impact@0 impact@8b:0.7 swell@15b/1b',
           },
-          mix: { twang: 0.55, choir: 0.8 },
+          mix: { twang: 0.55, choir: 0.8, arp: 1.6 },
           cfg: { super: { n: 7, spread: 24 }, lead: { cut: 4600 } },
+          // SECOND PASS (A8): hook statement 1 doubled an octave up, a twang tenor counter-line under the singing second hook (bars 9-16), tom fills at bars 4 / 8
+          alt: {
+            dbl: { lead: { semi: 12, bars: [1, 4], vel: 0.5 } },
+            p: {
+              twang: `${s1d2tw} | a4/8, c5/8, | g4/8, e5/8, | d5/8, b4/8, | f#4/8, a4/8, | c5/8, e5/8, | g4/8, c5/8, | f#4/8, a4/8, | d#5/8, f#5/8, |`,
+              drums3: cells('mhck8', 'mhk8*2', 'mhf', 'mhk8*3', 'mhf', 'mhc8', 'mh8*3', 'mhk8*3', 'mh8'),
+            },
+          },
         },
       },
       intro: ['I'],
@@ -1925,13 +2046,13 @@ const AUDIO = (() => {
     // ============================================================================================================================================
     // TITLE "Neon Abyss"   92 bpm   D minor   36 bars = intro 4 (once) + loop 32   ~ 1:34 per pass, loop 1:23
     //
-    //   Concept: a lonely synth-noir theme under neon lights.  The first 10 s are pure Twin-Peaks atmosphere (a cold pad that opens up, a tremolo twang line
+    //   Concept: a lonely synth-noir theme under neon lights.  The first 10 s are pure cold noir atmosphere (a cold pad that opens up, a tremolo twang line
     //   with spring reverb, finger snaps); then the beat and the chorus bass walk in under the same tune (A), the tune is promoted to a big saw lead over
     //   a side-chained supersaw pad (B, the "hook"), a distorted half-time industrial bridge (C, nu-metal weight, metal clangs) and a final chorus (B').
     //
     //   FORM MAP (bars)          chords                                                                 what enters / leaves
     //   I   intro      4  once   Dm9 Bbmaj7 Gm9 A7sus.A7                                                pad (opening filter), choir bars 3-4, twang states the tune, snaps from bar 3
-    //   A   verse + tune 8       Dm9 Bbmaj7 Gm9 A7sus.A7 | Dm9 Bbmaj7 Gm9 Em7b5.A7                     Linn kick + gated snare + snaps + 8th hats, chorus pick bass, cold arp, twang tune
+    //   A   verse + tune 8       Dm9 Bbmaj7 Gm9 A7sus.A7 | Dm9 Bbmaj7 Gm9 Em7b5.A7                     machine kick + gated snare + snaps + 8th hats, chorus pick bass, cold arp, twang tune
     //   B   hook       8         Bbmaj7 Fmaj7 Gm9 Dm9 | Bbmaj7 Fmaj7 Gm9.Em7b5 A7                      EDM kick + clap, sidechained supersaw, 808 sub, pick bass, LEAD hook, choir
     //   C   bridge     8         Dm Dm Bbmaj7 Bbmaj7 Gm7 Gm7 A7sus A7                                   half-time: distorted riff with b2 (Eb) bite, clangs, boom kick, crushed snare, choir + twang
     //   B'  final hook 8         as B                                                                   everything + twang doubles the lead one octave down, bell sparkle, snare roll out
@@ -1942,7 +2063,7 @@ const AUDIO = (() => {
     //   Mix intent (section loudness): I -25, A -20, B -16, C -17, B' -15 LUFS.
     // ============================================================================================================================================
     D.title = {
-      bpm: 92, swing: 0.5, echo: 3, fb: 0.4, key: 2, mode: MINOR, gain: 1.335, duckRel: 0.6,
+      bpm: 92, swing: 0.5, echo: 3, fb: 0.4, key: 2, mode: MINOR, gain: 1.102, duckRel: 0.6,
       lanes: {
         pad: { inst: 'pad', vol: 0.55, hall: 0.4, duck: 0.4 },
         choir: { inst: 'choir', vol: 0.6, hall: 0.55, vib: [5.2, 14], duck: 0.3 },
@@ -1961,7 +2082,7 @@ const AUDIO = (() => {
         vg: 'k...s...k.k.s...', vgf: 'k...s...k.k.s.nn', vgs: 'k...s...k.k.....',      // verse groove / ghost-snare fill / open last beat (before the hook)
         sn: '....f.......f...', pf: '..........t.u.v.',                                  // snaps on 2 and 4 / tom fill
         hh8: "h,.h'.h,.h'.h,.h'.h,.h'.",
-        bg: 'K...s...K...s...', bgf: 'K...s...K...s.ss', cl: '....p.......p...', oh: '..o...o...o...o.',
+        bg: 'K...s...K...s...', bgf: 'K...s...K...s.ss', cl: '....p.......p...', oh: '..o...o...o...o.', ohk: '..o.K.o...o.K.o.', ohf: '..o.K.o...o.t.uv',   // ohk: A7, open hats with the beat-2 / beat-4 kick
         ht: 'K.....b.y.......', ht2: 'K.....b.y.....yy', hx: '..x.......x.....',     // half-time bridge: kick, boom, crushed snare, clangs
         b8: '1-1-1-1-1-1-1-1-', b8o: '1-1-1-1-1-1-8-1-', b8f: '1-1-1-1-1-8-7-5-',
         pump: '1-1-8-1-1-1-8-1-', off808: '..1-..1-..1-..1-',
@@ -2002,6 +2123,13 @@ const AUDIO = (() => {
           },
           mix: { choir: 0.8, arp: 0.8, all: 0.75 },
           auto: { 'arp.vol': [0.15, 0.32, 'lin', 0, 8] },
+          // SECOND PASS (A8): the choir holds the whole section and a soft bell counter-line answers the second tune statement (bars 5-8)
+          alt: {
+            p: {
+              choir: hold(8),
+              bell: `| r/16 | r/16 | r/16 | r/16 | r/8 a5/2, d6/2, f6/4, | r/8 f5/2, a5/2, d6/4, | r/12 d6/2, g6/2, | g5/4, d6/4, c#6/4, e6/4, |`,
+            },
+          },
         },
         // ------------------------------------------------------------------------------------------------ B: the hook (lead), supersaw pump
         B: {
@@ -2017,9 +2145,12 @@ const AUDIO = (() => {
             bell: `| r/16 | r/16 | r/16 | r/12 a6/2 r/2 | r/16 | r/16 | r/16 | r/12 e6/2 r/2 |`,
             drums: cells('bg*3 bgf', 'bg*3 K...s...RRRRRRRR'),
             drums2: 'cl*8',
-            drums3: cells('oh*8'),
+            drums3: cells('ohk*7', 'oh'),
             fx: 'impact@0 down@7b/1b',
           },
+          mix: { arp: 2.0 },                                                 // A5: the cold arp stays audible in the hook (+6 dB)
+          // SECOND PASS (A8): the hook is doubled by a plucked twang an octave below (as in the final hook), a tom fill closes bar 4
+          alt: { dbl: { lead: { semi: -12, to: 'twang', vel: 1.4 } }, p: { drums3: cells('ohk*3', 'ohf', 'ohk*3', 'oh') } },
         },
         // ------------------------------------------------------------------------------------------------ C: half-time industrial bridge
         C: {
@@ -2054,10 +2185,10 @@ const AUDIO = (() => {
             bell: `| r/16 | r/16 | r/16 | r/12 a6/2 r/2 | r/16 | r/16 | r/16 | r/12 e6/2 r/2 |`,
             drums: cells('bg*3 bgf', 'bg*3 K...s...RRRRRRRR'),
             drums2: cells('cl*7', '................'),
-            drums3: 'oh*8',
+            drums3: cells('ohk*7', 'oh'),
             fx: 'impact@0 riser@6b/2b',
           },
-          mix: { twang: 0.9 },
+          mix: { twang: 0.9, arp: 2.0 },
         },
       },
       intro: ['I'],
@@ -2086,8 +2217,11 @@ const AUDIO = (() => {
     //   RIFF (distorted saw, 3-3-2): C# . . C# . . C# . C# . . C# . . D .   (b2 on the last 16th of the bar), on D the last note is E.
     //   Mix intent (section loudness): I -23, A -18, C -15, H -19, V2 -19, B2 -17, D2 -14.5 LUFS.
     // ============================================================================================================================================
+    // the twang line of drop 2, bars 1-8 (the hook an octave under the lead) -- shared by the original and the second-pass version of D2
+    const s2d2tw = `| r/2 c#4/2 r/2 c#4/2 e4/2 d4/2 c#4/4 | r/2 d4/2 r/2 d4/2 f#4/2 e4/2 d4/4 | r/2 c#4/2 e4/2 g#4/2 b4/2 g#4/4 e4/2 | f#4/4 d4/4 b3/8 |
+                    | r/2 c#4/2 r/2 c#4/2 e4/2 g#4/2 b4/4 | r/2 a4/2 r/2 a4/2 f#4/2 e4/2 d4/4 | c#5/4 b4/4 a4/4 e4/4 | f#4/4 e4/4 d4/8 |`;
     D.stage2 = {
-      bpm: 126, swing: 0.5, echo: 3, fb: 0.36, key: 1, mode: [0, 1, 3, 5, 7, 8, 10], gain: 1.34, duckRel: 0.5,
+      bpm: 126, swing: 0.5, echo: 3, fb: 0.36, key: 1, mode: [0, 1, 3, 5, 7, 8, 10], gain: 1.184, duckRel: 0.5,
       lanes: {
         riff: { inst: 'riff', vol: 1.5, drive: 7, lpf: 3800, lq: 0.8, duck: 0.3 },
         sub: { inst: 'sub', vol: 0.55, drive: 2.5, duck: 0.92, lpf: 700 },
@@ -2110,6 +2244,7 @@ const AUDIO = (() => {
         cl: '....p.......p...', m16: "m,m,m,m,m,m,m,m,m,m,m,m,m,m,m,m,", m16c: 'cm,m,m,m,m,m,m,m,m,m,m,m,m,m,m,',
         ht: 'K.....b.S.......', ht2: 'K.....b.S.....SS', hx: '..x...........x.',        // half-time: kick, boom, snare on 3, clangs
         xb: 'x...............', xo: '........x.......', xX: 'x.......X.......', zz: '..............z.',
+        k24: '....K.......K...', xbk: 'x...K.......K...', xXk: 'x...K...X...K...', xXf: 'x...K...X...t.uv', k24f: '....K.......t.uv',      // FIXPLAN_V3 A7: kicks on beats 2 and 4 (alone / under the clangs) = four-on-the-floor with the 'bk' kicks on 1 and 3
         // bass: 1 root, f = b2, 2 = 2nd, 3 = minor third, 5 = fifth, g = b6, 7 = b7
         rA: "1'..1..1'.1..1..f.", rB: "1'..1..1'.1..1..2.", rC: "1'..1..1'.1..1.5.f", rD: "1'.11.1.11'.11.1.1", rDc: "1'.11.1.11'.11....", rootc: '1-----------....',
         rH: '1.......1.1.f...', rH2: '1.......1.1.1.f.',
@@ -2155,6 +2290,14 @@ const AUDIO = (() => {
           },
           mix: { arp: 0.8, snare: 0.7 },
           auto: { 'master.hpf': [[0, 20], [12, 20], [15.75, 600], [15.8125, 10]], 'master.vol': [[0, 0.6], [12, 0.6], [16, 1.0]] },
+          // SECOND PASS (A8): a bell counter-line over the verse tune (bars 1-12)
+          alt: {
+            mix: { bell: 2.4 },
+            p: {
+              bell: `| r/12 g#5/2, c#6/2, | g#5/6, e5/2, c#5/8, | r/8 f#5/2, a5/2, d6/4, | g#5/6, e5/2, c#5/8, | r/12 g#5/2, c#6/2, | c#6/6, g#5/2, e5/8, | r/8 a5/2, d6/2, f#6/4, | g#5/6, e5/2, b4/8, |
+                      | r/8 a5/2, c#6/2, f#6/4, | c#6/6, a5/2, f#5/8, | d6/8, a5/8, | f#5/8, a5/8, | r/16 | r/16 | r/16 | r/16 |`,
+            },
+          },
         },
         // ------------------------------------------------------------------------------------------------ C: drop 1 (16 bars)
         C: {
@@ -2172,8 +2315,14 @@ const AUDIO = (() => {
                     | c#6/4 e6/4 a6/8 | b6/4 f#6/4 d6/8 | g#6/6 f#6/2 d6/4 b5/4 | c#6/4 g#5/4 d#5/4 r/4 |`,
             drums: cells('bk*3 bkf', 'bk*3 bkf', 'bk*3 bkf', 'bk*3 K...S...RRRRRRRR'),
             drums2: cells('m16c', 'mh*5', 'm16*2', 'm16c', 'mh*5', 'm16*2'),
-            drums3: cells(rest(3), 'xX', rest(3), 'xX', rest(3), 'xX', rest(3), 'x.......X.z.z.z.'),
+            drums3: cells(rep('k24', 3), 'xXk', rep('k24', 3), 'xXk', rep('k24', 3), 'xXk', rep('k24', 3), 'x.......X.z.z.z.'),
             fx: 'impact@0 swell@7b/1b impact@8b:0.6 down@15b/1b',
+          },
+          mix: { arp: 1.6 },                                                 // A5: the cold arp stays audible in the drops (+4 dB)
+          // SECOND PASS (A8): the hook's first statement doubled an octave up, tom fills close bars 4 / 8 / 12
+          alt: {
+            dbl: { lead: { semi: 12, bars: [1, 4], vel: 0.5 } },
+            p: { drums3: cells(rep('k24', 3), 'xXf', rep('k24', 3), 'xXf', rep('k24', 3), 'xXf', rep('k24', 3), 'x.......X.z.z.z.') },
           },
         },
         // ------------------------------------------------------------------------------------------------ H: half-time breakdown (8 bars)
@@ -2209,8 +2358,10 @@ const AUDIO = (() => {
             drums3: cells(rest(3), 'zz', rest(3), 'xX'),
             fx: 'swell@0/1b riser@4b/4b',
           },
-          mix: { riff: 0.8, snare: 0.6, all: 0.6 },
+          mix: { riff: 0.8, snare: 0.6, all: 0.6, arp: 1.6 },
           auto: { 'arp.vol': [0.2, 0.4], 'master.hpf': [20, 300, 'exp', 4, 8] },
+          // SECOND PASS (A8): the singing line is doubled by the twang an octave below
+          alt: { dbl: { lead: { semi: -12, to: 'twang', vel: 1.1 } } },
         },
         // ------------------------------------------------------------------------------------------------ B2: build (8 bars)
         B2: {
@@ -2227,7 +2378,7 @@ const AUDIO = (() => {
           },
           mix: { super: 0.85, snare: 0.6 },
           cfg: { super: { voicing: { lo: 55, hi: 79, n: 3 } } },
-          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 1200], [7.8125, 10]], 'arp.vol': [0.25, 0.55], 'master.vol': [0.65, 1.0, 'in'] },
+          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 1200], [7.8125, 10]], 'arp.vol': [0.09, 0.2], 'master.vol': [0.65, 1.0, 'in'] },
         },
         // ------------------------------------------------------------------------------------------------ D2: drop 2 (16 bars)
         D2: {
@@ -2242,15 +2393,22 @@ const AUDIO = (() => {
                     | r/2 c#6/2 r/2 c#6/2 e6/2 d6/2 c#6/4 | r/2 d6/2 r/2 d6/2 f#6/2 e6/2 d6/4 | r/2 c#6/2 e6/2 g#6/2 b6/2 g#6/4 e6/2 | f#6/4 d6/4 b5/8 |
                     | r/2 f#5/2 r/2 f#5/2 a5/2 g#5/2 f#5/4 | r/2 a5/2 r/2 a5/2 f#5/2 e5/2 d5/4 | r/2 c#6/2 r/2 c#6/2 e6/2 d6/2 c#6/4 | f#6/4 d6/4 b5/8 |
                     | c#6/4 e6/4 a6/8 | b6/4 f#6/4 d6/8 | g#6/6 f#6/2 d6/4 b5/4 | c#6/4 g#5/4 d#5/4 r/4 |`,
-            twang: `| r/2 c#4/2 r/2 c#4/2 e4/2 d4/2 c#4/4 | r/2 d4/2 r/2 d4/2 f#4/2 e4/2 d4/4 | r/2 c#4/2 e4/2 g#4/2 b4/2 g#4/4 e4/2 | f#4/4 d4/4 b3/8 |
-                    | r/2 c#4/2 r/2 c#4/2 e4/2 g#4/2 b4/4 | r/2 a4/2 r/2 a4/2 f#4/2 e4/2 d4/4 | c#5/4 b4/4 a4/4 e4/4 | f#4/4 e4/4 d4/8 |
-                    | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 |`,
+            twang: `${s2d2tw} | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 |`,
             drums: cells('bk*3 bkf', 'bk*3 bkf', 'bk*3 bkf', 'bk*3 K...S...RRRRRRRR'),
             drums2: cells('m16c', 'mh*5', 'm16*2', 'm16c', 'mh*5', 'm16*2'),
-            drums3: cells(rep('xb xX', 7), 'xb', 'x.......X.z.z.z.'),
+            drums3: cells(rep('xbk xXk', 7), 'xbk', 'x.......X.z.z.z.'),
             fx: 'impact@0 swell@7b/1b impact@8b:0.6 swell@15b/1b',
           },
           cfg: { super: { n: 7, spread: 28 } },
+          mix: { arp: 1.6 },
+          // SECOND PASS (A8): hook statement 1 doubled an octave up, a twang tenor counter-line under the second half (bars 9-16), tom fills at bars 4 / 8 / 12
+          alt: {
+            dbl: { lead: { semi: 12, bars: [1, 4], vel: 0.5 } },
+            p: {
+              twang: `${s2d2tw} | a4/8, c#5/8, | f#4/8, a4/8, | g#4/8, e4/8, | f#4/16, | e5/8, c#5/8, | f#5/8, b4/8, | r/16 | r/16 |`,
+              drums3: cells('xbk xXk', 'xbk xXf', 'xbk xXk', 'xbk xXf', 'xbk xXk', 'xbk xXf', 'xbk xXk', 'xbk', 'x.......X.z.z.z.'),
+            },
+          },
         },
       },
       intro: ['I'],
@@ -2282,7 +2440,7 @@ const AUDIO = (() => {
     const kx4 = (a, b, c) => rep(`${a}/1 ${b}/1 ${a}/1 ${c}/1`, 4);
     const kx2 = (a, b, c, tail) => rep(`${a}/1 ${b}/1 ${a}/1 ${c}/1`, 2) + ' ' + tail;
     D.boss = {
-      bpm: 140, swing: 0.5, echo: 3, fb: 0.34, key: 5, mode: [0, 2, 3, 5, 7, 8, 10], gain: 1.073, maxTempo: 1.2, duckRel: 0.45,
+      bpm: 140, swing: 0.5, echo: 3, fb: 0.34, key: 5, mode: [0, 2, 3, 5, 7, 8, 10], gain: 0.985, maxTempo: 1.2, duckRel: 0.45,
       lanes: {
         riff: { inst: 'riff', vol: 1.4, drive: 9, lpf: 3600, lq: 0.8, duck: 0.3 },
         sub: { inst: 'sub', vol: 0.55, drive: 2.5, duck: 0.92, lpf: 700 },
@@ -2306,6 +2464,8 @@ const AUDIO = (() => {
         cl: '....p.......p...',
         ht: 'K.K...b.S.......', ht2: 'K.K...b.S.....SS', hx: '..x...X...x...x.',
         xb: 'x...............', xo: '........x.......', xX: 'x.......X.......', zz: '..............z.',
+        k24: '....K.......K...', xXk: 'x...K...X...K...', xXf: 'x...K...X...t.uv',                         // FIXPLAN_V3 A7: kicks on beats 2 and 4 (four-on-the-floor in the drops)
+        mhk: 'mhmhKhmhmhmhKhmh', mhf: 'mhmhKhmhmhmhtuvv', m16k: "m,m,m,m,K" + "m,m,m,m,m,m,m," + "K" + "m,m,m,",       // the double-time metal hats with the beat-2 / beat-4 kick in place of the hat
         // bass: 1 root, f = b2, 3 = minor third, 5, g = b6, 7 = b7
         gal: '1181118111811181', galf: '1181118111811f81', gal5: '1181118111811581',
         galx: '1.111.111.111.11', galxf: '1.111.111.111.1f', galx5: '1.111.111.111.15',            // the gallop with 12 notes per bar (1 . x x per beat): the 16th gallop above costs a third more CPU
@@ -2344,6 +2504,8 @@ const AUDIO = (() => {
             fx: 'impact@0:0.6 swell@7b/1b',
           },
           mix: { arp: 0.8, all: 0.82 },
+          // SECOND PASS (A8): the supersaw stabs and the choir join for the second half of the alarm
+          alt: { mix: { stab: 3, choir: 1.2 }, p: { stab: cells(rest(4), 'stab*4'), choir: rest(4) + hold(4) } },
         },
         // ------------------------------------------------------------------------------------------------ B: crown (8 bars)
         B: {
@@ -2357,10 +2519,13 @@ const AUDIO = (() => {
             lead: `| c5/2 f5/2 ab5/4 c6/8 | bb5/2 db6/2 f6/4 eb6/8 | db6/2 bb5/2 f5/4 ab5/8 | g5/4 bb5/4 e6/4 c6/4 |
                     | c5/2 f5/2 ab5/4 c6/4 db6/4 | bb5/2 db6/2 f6/4 ab6/4 g6/4 | g5/2 bb5/2 eb6/4 g6/8 | e6/4 c6/4 bb5/4 g5/4 |`,
             drums: cells('bk*3 bkf', 'bk*3 K...S...RRRRRRRR'),
-            drums2: cells('mh*6', 'm16*2'),
+            drums2: cells('mhk*6', 'm16k', 'm16'),
             drums3: cells('cl*8'),
             fx: 'impact@0 swell@7b/1b',
           },
+          mix: { arp: 1.6 },                                                 // A5: the cold arp stays audible in the drops (+4 dB)
+          // SECOND PASS (A8): the crown hook is doubled by a plucked twang an octave below, a tom fill closes bar 4
+          alt: { dbl: { lead: { semi: -12, to: 'twang', vel: 1.4 } }, p: { drums2: cells('mhk*3', 'mhf', 'mhk*2', 'm16k', 'm16') } },
         },
         // ------------------------------------------------------------------------------------------------ C: half-time drop (8 bars)
         C: {
@@ -2406,7 +2571,7 @@ const AUDIO = (() => {
             fx: 'riser@0/60 swell@2b/2b',
           },
           mix: { super: 0.85, snare: 0.6 },
-          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [1, 20], [3.75, 1200], [3.8125, 10]], 'arp.vol': [0.25, 0.55], 'master.vol': [0.72, 1.0, 'in'] },
+          auto: { 'super.lpf': [400, 9000, 'exp'], 'master.hpf': [[0, 20], [1, 20], [3.75, 1200], [3.8125, 10]], 'arp.vol': [0.09, 0.2], 'master.vol': [0.72, 1.0, 'in'] },
         },
         // ------------------------------------------------------------------------------------------------ F: drop 2 (8 bars)
         F: {
@@ -2421,10 +2586,19 @@ const AUDIO = (() => {
                     | c5/2 f5/2 ab5/4 c6/4 db6/4 | bb5/2 db6/2 f6/4 ab6/4 g6/4 | g5/2 bb5/2 eb6/4 g6/8 | e6/2 g6/2 bb6/4 c7/8 |`,
             drums: cells('bk*3 bkf', 'bk*3 K...S...RRRRRRRR'),
             drums2: cells('m16c', 'mh*5', 'm16*2'),
-            drums3: cells(rest(1), 'xX', rest(1), 'xX', rest(1), 'xX', rest(1), 'x.......X.z.z.z.'),
+            drums3: cells('k24', 'xXk', 'k24', 'xXk', 'k24', 'xXk', 'k24', 'x.......X.z.z.z.'),
             fx: 'impact@0 swell@7b/1b',
           },
           cfg: { super: { n: 7, spread: 28 } },
+          mix: { arp: 1.6 },
+          // SECOND PASS (A8): the choir crowns the second half, the hook doubles on the twang (octave below) there, tom fills at bars 4 / 6
+          alt: {
+            dbl: { lead: { semi: -12, to: 'twang', vel: 1.1, bars: [5, 8] } },
+            p: {
+              choir: rest(4) + hold(4),
+              drums3: cells('k24', 'xXk', 'k24', 'xXf', 'k24', 'xXf', 'k24', 'x.......X.z.z.z.'),
+            },
+          },
         },
         // ------------------------------------------------------------------------------------------------ G: fury (8 bars)
         G: {
@@ -2444,6 +2618,7 @@ const AUDIO = (() => {
             fx: 'impact@0 swell@7b/1b',
           },
           cfg: { super: { n: 7, spread: 30 }, alarm: { n: 1 } },
+          mix: { arp: 1.6 },
         },
       },
       intro: ['I'],
@@ -2454,7 +2629,7 @@ const AUDIO = (() => {
     // ENTRY "Midnight Diner"   76 bpm (swung 8ths)   A minor, maj7 colours   16 bars (one jazz chorus, AABA of 4 bars), loop ~ 50 s
     //
     //   Concept: the high-score screen as an all-night diner: a slow noir ballad.  Walking upright bass, a brushed snare on 2 and 4, a lazy swung ride, a vibraphone
-    //   (with tremolo) singing a low-key tune, a dark pad, and a lonely tremolo-twang answering at the ends of the phrases (Twin Peaks, never quoted).
+    //   (with tremolo) singing a low-key tune, a dark pad, and a lonely tremolo-twang answering at the ends of the phrases (an all-original late-night mood).
     //   Deliberately quiet: no kick drum, no side-chain, no build.  Contrast to the arcade tracks is the point.
     //
     //   CHORD CHART (one bar each)
@@ -2468,7 +2643,7 @@ const AUDIO = (() => {
     //   Mix intent: one flat, quiet arc, section loudness within 2 dB (-18 LUFS integrated after the gain fit).
     // ============================================================================================================================================
     D.entry = {
-      bpm: 76, swing: 0.6, echo: 3, fb: 0.32, key: 9, mode: MINOR, gain: 1.855,
+      bpm: 76, swing: 0.6, echo: 3, fb: 0.32, key: 9, mode: MINOR, gain: 1.85,
       lanes: {
         pad: { inst: 'pad', vol: 0.5, hall: 0.4, cut: 1300 },
         vibes: { inst: 'vibes', vol: 1.0, trem: { rate: 5.2, depth: 0.35 }, hall: 0.35, dly: 0.2 },
@@ -2480,7 +2655,7 @@ const AUDIO = (() => {
       pats: {
         br: '....B.......B...', brg: '....B.......B.n.',                     // brushed snare on 2 and 4 (+ a ghost brush)
         rd: 'd...d.d.d...d.d.', rdf: 'd...d.d.d...d.dd',                      // swung ride (1, 2, and-of-2, 3, 4, and-of-4)
-        rm: '..........r.....', hp: '....h.......h...', sn: '....f.......f...',    // rim click, foot hat on 2 and 4, finger snaps on 2 and 4 (second half)
+        rm: '..........r.....', hp: '....h.......h...', sn: '....f,.......f,...', brr: '....B.......BnBn',    // rim click, foot hat on 2 and 4, finger snaps on 2 and 4 (second half; soft: the snap voice is x3.5 louder since FIXPLAN_V3 A6, in this quiet ballad they now sit ~6 dB above the rest)
       },
       sections: {
         E: {
@@ -2503,6 +2678,11 @@ const AUDIO = (() => {
             drums3: cells('hp*3 rm', 'hp*3 rm', 'sn*3 rm', 'sn*3 rm'),
           },
           mix: { pad: 1.0, twang: 1.0 },
+          // SECOND PASS (A8): the vibraphone tune is doubled an octave up in the bridge (bars 9-12) and the brushes fill the end of every phrase
+          alt: {
+            dbl: { vibes: { semi: 12, vel: 0.35, bars: [9, 12] } },
+            p: { drums: cells('br*3 brr', 'br*3 brr', 'br*3 brr', 'br*3 brr') },
+          },
         },
       },
       order: ['E'],
@@ -2517,7 +2697,7 @@ const AUDIO = (() => {
     //
     //   FORM MAP (bars)           chords                                                                 what enters / leaves
     //   M   dream      8          Dm9 Dm9 Bbmaj7 Bbmaj7 Fmaj7 Fmaj7 Gm9 A7sus                              pad, choir, twang tune in half speed (A4 F5 | E5 D5 ...), snaps from bar 5
-    //   M2  memory     8          Dm9 Bbmaj7 Fmaj7 Gm9 | Dm9 Bbmaj7 Gm9 A7                                  Linn kick + gated snare, chorus bass, cold arp, the tune at original speed, bell
+    //   M2  memory     8          Dm9 Bbmaj7 Fmaj7 Gm9 | Dm9 Bbmaj7 Gm9 A7                                  machine kick + gated snare, chorus bass, cold arp, the tune at original speed, bell
     //   BU  build      8          Bb Bb F F Gm Gm A7sus A7sus                                               riser, snare roll, hp-sweep, supersaw rises, chords brighten toward the dominant
     //   FI  finale    12          D A Bm G | D A G A | Bm G A A                                            D MAJOR: supersaw wall + 808 sub + EDM kick + clap, LEAD theme (F#), choir, twang an octave down
     //   OU  outro      4          D Dmaj9 D6 D                                                              everything dissolves into pad + choir + bell sparkles; the D major rings into the Dm9 of the next pass
@@ -2526,7 +2706,7 @@ const AUDIO = (() => {
     //   Mix intent (section loudness): M -25, M2 -21, BU -19, FI -14.5, OU -25 LUFS  (the biggest dynamic arc of the soundtrack, spread >= 8 dB).
     // ============================================================================================================================================
     D.ending = {
-      bpm: 100, swing: 0.5, echo: 3, fb: 0.4, key: 2, mode: MINOR, gain: 1.697, duckRel: 0.55,
+      bpm: 100, swing: 0.5, echo: 3, fb: 0.4, key: 2, mode: MINOR, gain: 1.548, duckRel: 0.55,
       lanes: {
         pad: { inst: 'pad', vol: 0.6, hall: 0.4, duck: 0.4 },
         choir: { inst: 'choir', vol: 0.6, hall: 0.55, vib: [5, 14], duck: 0.3 },
@@ -2543,7 +2723,7 @@ const AUDIO = (() => {
       pats: {
         sn: '....f.......f...', vg: 'k...s...k.k.s...', vgf: 'k...s...k.k.s.nn', vgo: 'k...s...k.k.....',
         hh8: "h,.h'.h,.h'.h,.h'.h,.h'.", pf: '..........t.u.v.',
-        f4: 'K...K...K...K...', bk: 'K...s...K...s...', bkf: 'K...s...K...s.ss', cl: '....p.......p...', oh: '..o...o...o...o.',
+        f4: 'K...K...K...K...', bk: 'K...s...K...s...', bkf: 'K...s...K...s.ss', cl: '....p.......p...', oh: '..o...o...o...o.', ohk: '..o.K.o...o.K.o.', ck: 'c...K.......K...',   // ohk / ck: A7, the beat-2 / beat-4 kick of the finale
         m16: "h,h,h,h,h,h,h,h,h,h,h,h,h,h,h,h,",
         b8: '1-1-1-1-1-1-1-1-', b8o: '1-1-1-1-1-1-8-1-', pump: '1-1-8-1-1-1-8-1-', off808: '..1-..1-..1-..1-',
         // melodic chorus-bass lines (80s dark wave: the bass sings): 1 root, 3 / 5 / 7 chord tones, 8 octave
@@ -2596,7 +2776,7 @@ const AUDIO = (() => {
             fx: 'riser@0/124 swell@4b/3b',
           },
           mix: { super: 0.85, snare: 0.6 },
-          auto: { 'super.lpf': [500, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 600], [7.8125, 10]], 'arp.vol': [0.22, 0.5], 'master.vol': [0.72, 1.0, 'in'] },
+          auto: { 'super.lpf': [500, 9000, 'exp'], 'master.hpf': [[0, 20], [2, 20], [7.75, 600], [7.8125, 10]], 'arp.vol': [0.08, 0.18], 'master.vol': [0.72, 1.0, 'in'] },
         },
         // ------------------------------------------------------------------------------------------------ FI: finale (12 bars, D major)
         FI: {
@@ -2617,7 +2797,7 @@ const AUDIO = (() => {
             bell: `| r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | r/16 | a6/2 e6/2 c#6/2 a5/2 r/8 |`,
             drums: cells('bk*3 bkf', 'bk*3 bkf', 'bk*3 K...s...RRRRRRRR'),
             drums2: cells('cl*11', '................'),
-            drums3: cells('c...............', 'oh*7', 'c...............', 'oh*3'),
+            drums3: cells('ck', 'ohk*7', 'ck', 'ohk*2', 'oh'),
             fx: 'impact@0 impact@8b:0.7 swell@11b/1b',
           },
         },
@@ -2650,7 +2830,7 @@ const AUDIO = (() => {
     //              (Bb - C - F) lift: riser under the line, supersaw on every chord, the crown fanfare (C5 F5 A5 C6: the boss hook with the third raised), big hall.
     // ============================================================================================================================================
     D.start = {
-      kind: 'jingle', bpm: 120, swing: 0.5, echo: 3, fb: 0.3, key: 4, mode: MINOR, gain: 1.221,
+      kind: 'jingle', bpm: 120, swing: 0.5, echo: 3, fb: 0.3, key: 4, mode: MINOR, gain: 1.225,
       lanes: {
         fx: { inst: 'fx', vol: 0.8, hall: 0.35 },
         super: { inst: 'super', vol: 0.8, hall: 0.35, n: 7, spread: 22, a: 0.02, r: 0.7 },
@@ -2676,10 +2856,10 @@ const AUDIO = (() => {
     };
 
     D.extend = {
-      kind: 'jingle', bpm: 150, swing: 0.5, echo: 3, fb: 0.3, key: 4, mode: MAJOR, gain: 1.933,
+      kind: 'jingle', bpm: 150, swing: 0.5, echo: 3, fb: 0.3, key: 4, mode: MAJOR, gain: 1.914,
       lanes: {
         bell: { inst: 'bell', vol: 0.9, hall: 0.4, dly: 0.2 },
-        arp: { inst: 'arp', vol: 0.5, dly: 0.3, hall: 0.2, hpf: 250 },
+        arp: { inst: 'arp', vol: 0.045, dly: 0.3, hall: 0.2, hpf: 250 },       // vol x0.09 = the arp make-up of INST.arp (lv 0.17 -> 1.9): the jingle keeps its level
         super: { inst: 'super', vol: 0.9, hall: 0.4, n: 7, spread: 20, a: 0.02, r: 0.6 },
         fx: { inst: 'fx', vol: 0.7, hall: 0.35 },
         kick: { vol: 0.9 },
@@ -2700,7 +2880,7 @@ const AUDIO = (() => {
     };
 
     D.gameover = {
-      kind: 'jingle', bpm: 90, swing: 0.5, echo: 3, fb: 0.3, key: 9, mode: MINOR, gain: 2.101,
+      kind: 'jingle', bpm: 90, swing: 0.5, echo: 3, fb: 0.3, key: 9, mode: MINOR, gain: 2.136,
       lanes: {
         fx: { inst: 'fx', vol: 0.9, hall: 0.5 },
         pad: { inst: 'pad', vol: 0.8, hall: 0.5, a: 0.3, r: 1.6, cut: 900 },
@@ -2722,7 +2902,7 @@ const AUDIO = (() => {
     };
 
     D.clear_boss = {
-      kind: 'jingle', bpm: 140, swing: 0.5, echo: 3, fb: 0.3, key: 5, mode: MAJOR, gain: 1.991,
+      kind: 'jingle', bpm: 140, swing: 0.5, echo: 3, fb: 0.3, key: 5, mode: MAJOR, gain: 2.002,
       lanes: {
         super: { inst: 'super', vol: 0.9, hall: 0.5, n: 7, spread: 20, a: 0.02, r: 0.9 },
         bell: { inst: 'bell', vol: 0.9, hall: 0.5 },
@@ -2876,13 +3056,15 @@ const AUDIO = (() => {
     const glue = ctx.createDynamicsCompressor();
     // gentle glue: high threshold + low ratio so section dynamics survive; the limiter / ceiling after it are the actual guard
     glue.threshold.value = -19; glue.knee.value = 14; glue.ratio.value = 2.2; glue.attack.value = 0.012; glue.release.value = 0.2;
-    const music = gn(ctx, MUSIC_LEVEL), sfx = gn(ctx, SFX_LEVEL), master = gn(ctx, MASTER_LEVEL);
+    const music = gn(ctx, MUSIC_LEVEL), duck = gn(ctx, 1), sfx = gn(ctx, SFX_LEVEL), master = gn(ctx, MASTER_LEVEL);
     const limiter = ctx.createDynamicsCompressor();
-    limiter.threshold.value = -3; limiter.knee.value = 0; limiter.ratio.value = 20; limiter.attack.value = 0.002; limiter.release.value = 0.08;
+    // FIXPLAN_V3 A3: a SOFT, slow master limiter (the old -3 dB / 20:1 / 2 ms / 80 ms brick pushed the music down 4-6 dB under every pop).  The SFX trims keep the SFX peaks
+    // below it, so it only catches coincident peaks; the one deliberate music duck is the per-cue duck on the `duck` gain (SFX_DUCK, A4).
+    limiter.threshold.value = -1; limiter.knee.value = 6; limiter.ratio.value = 10; limiter.attack.value = 0.003; limiter.release.value = 0.16;
     const shaper = ctx.createWaveShaper();
     shaper.curve = softClipCurve(); shaper.oversample = '2x';       // 2x oversampled: a flat-topped, aliased ceiling would overshoot the 4x true peak by 2 dB
     const mute = gn(ctx, startMuted ? 0 : 1);
-    musicIn.connect(glue); glue.connect(music); music.connect(master); sfx.connect(master);
+    musicIn.connect(glue); glue.connect(music); music.connect(duck); duck.connect(master); sfx.connect(master);
     master.connect(limiter); limiter.connect(shaper); shaper.connect(mute); mute.connect(ctx.destination);
 
     // effect buses are created on first use (every silent node costs CPU): `room` (SFX use it from the first sound on), `hall`, `spring`, ping-pong `echo`
@@ -2904,7 +3086,7 @@ const AUDIO = (() => {
       },
     };
     return {
-      musicIn, music, sfx, master, glue, limiter, shaper, mute, ctx, parts,
+      musicIn, music, duck, sfx, master, glue, limiter, shaper, mute, ctx, parts,
       /** input node of an effect bus (created on first use) */
       send(kind) { return (parts[kind] || (parts[kind] = make[kind]())).in; },
       setEchoTime(sec) {
@@ -3061,12 +3243,13 @@ const AUDIO = (() => {
     if (!evs || silent) return;
     const fr = stepFractions(tr.prog.swing);
     const ctx = tr.ctx;
-    const lift = tr.prog.lift && (tr.pass & 1) ? tr.prog.lift : 0;
+    const odd = tr.pass & 1, lift = tr.prog.lift && odd ? tr.prog.lift : 0;
     const dtStep = beat * fr[step & 3];
     let failure = null;
     REG = tr.reg;
     try {
       for (const e of evs) {
+        if (e.o !== undefined && e.o !== odd) continue;                // second-pass version of a section (`alt`, FIXPLAN_V3 A8): o 0 = even passes only, o 1 = odd passes only
         if (e.lane !== 'master' && skipHit(tr, e.lane)) continue;
         try {                                                 // one bad event must not take the others (or the clock) down
           const lane = tr.lanes[e.lane];
@@ -3293,6 +3476,8 @@ const AUDIO = (() => {
         else if (e.play === twangVoice) job('k' + e.m[0], () => ksBuffer(ctx, e.m[0]));
       } });
     }
+    // the other tracks are compiled in idle slices too (stage 2 / boss / ending / entry / jingles; one compile per slice, 10-45 ms with the second-pass versions), so no round change compiles on the spot
+    for (const name of ['stage2', 'boss', 'entry', 'ending', 'extend', 'gameover', 'clear_boss']) job('prog:' + name, () => getProg(name));
     const slice = () => {
       if (!ctx || disabled) return;
       const t0 = performance.now();
@@ -3384,6 +3569,7 @@ const AUDIO = (() => {
     tr.wallDeadline = performance.now() + (prog.steps / 4 * 60 / prog.bpm + 1.2) * 1000;
     active.push(tr);
     cur = tr;
+    releaseDuck();                                          // a fanfare is the main event itself: it never plays under a cue's duck
   }
 
   function stopMusic(fadeSec) {
@@ -3393,6 +3579,25 @@ const AUDIO = (() => {
 
   function setTempo(scale) {
     tempo = clamp(+scale || 1, 0.5, 2);
+  }
+
+  // FIXPLAN_V3 A4: PRIORITY DUCK.  The cues the player must not miss (HURRY alarm, death, ghost, 1UP, EXTEND letter, round clear, power-up, boss kill) pull the music bed down by
+  // [dB, hold s] on the `duck` gain (smooth: tau 15 ms down, tau 0.2 s back), the controlled replacement for the accidental limiter pumping.  Everyday sounds (jump, shoot, pop, kill,
+  // bounce, enemy_shot, land, menus) do not duck at all; mid-priority ones stay <= 3 dB and short.
+  const SFX_DUCK = { death: [4, 0.7], hurry: [4.5, 0.7], ghost: [3.5, 0.9], oneup: [4, 0.9], letter: [3.5, 0.5], clear: [4.5, 0.7], powerup: [3.8, 0.8], boss_die: [4, 1.3],
+    trap: [1.5, 0.25], item_appear: [2.5, 0.25], freeze: [2.5, 0.4], bomb: [3, 0.5], thunder: [2, 0.3], food: [1, 0.2], fire: [1.5, 0.3], water: [1.5, 0.3], boss_hit: [1.5, 0.15], spawn: [1, 0.2] };
+  function releaseDuck() {
+    try { if (chain && chain.duck) { const g = chain.duck.gain, now = ctx.currentTime; g.cancelScheduledValues(now); g.setTargetAtTime(1, now, 0.04); } } catch (e) { /* ignore */ }
+  }
+  function duckMusicFor(ch, at, name) {
+    const d = SFX_DUCK[name];
+    if (!d || !ch.duck) return;
+    try {
+      const g = ch.duck.gain;
+      g.cancelScheduledValues(at);
+      g.setTargetAtTime(dbToLin(-d[0]), at, 0.015);
+      g.setTargetAtTime(1, at + d[1], 0.2);
+    } catch (e) { /* ignore */ }
   }
 
   function sfxGroup(c, ch, def) {                          // dry gain + short shared reverb send
@@ -3431,6 +3636,7 @@ const AUDIO = (() => {
       const P = sfxParams(def, opts);
       REG = grp.reg;
       def.fn(sfxKit(ctx, nodes.g, now + 0.003, P));
+      if (!paused && !(cur && cur.kind === 'jingle' && !cur.stopped)) duckMusicFor(chain, now + 0.003, name);      // not under a fanfare (extend / clear_boss / game over)
     } catch (e) {
       sfxFaults[name] = (sfxFaults[name] | 0) + 1;
       if (sfxFaults[name] >= SFX_FAULT_LIMIT) warnFault('sfx:' + name, 'sfx "' + name + '" keeps failing (' + (e && e.message ? e.message : e) + ') -- disabled');
@@ -3527,7 +3733,8 @@ const AUDIO = (() => {
       const tr = makeTrack(oc, ch, prog, prog.kind === 'jingle' ? 'jingle' : 'loop', false, opts.tempo || 1);
       tr.tempoFixed = opts.tempo || 1;
       tr.skip = opts.skip || null;                    // debug: lanes to leave out ('drum' = the kit)
-      tr.pass = opts.pass | 0;                        // debug: which loop pass to render (odd = key-lifted when the song has a lift)
+      tr.pass = opts.pass | 0;                        // debug: which loop pass to render (odd = key-lifted when the song has a lift, and plays the `alt` version of the sections that have one)
+      if (opts.alternate) tr.passLocked = false;      // debug: let the pass counter run (0, 1, 0 ... at every loop wrap) to test the seams between a pass and its variation
       tr.nextTime = 0;
       ch.setEchoTime(prog.echo * (60 / (prog.bpm * tr.tempoFixed)) / 4);
       ch.setEchoFb(prog.fb);
@@ -3541,12 +3748,14 @@ const AUDIO = (() => {
     } else {
       throw new Error('AUDIO._renderOffline: unknown name ' + name);
     }
-    // debug: extra SFX layered over the render, [[sfxName, atSeconds], ...] (mix / clipping stress tests)
-    for (const [sn, at] of opts.sfx || []) {
+    // debug: extra SFX layered over the render, [[sfxName, atSeconds, polarity?, pitch?], ...] (mix / clipping / warm-level tests)
+    for (const [sn, at, pol, pitch] of opts.sfx || []) {       // [name, at s, polarity (+1 / -1), pitch in semitones]
       const def = sfxDef(sn);
       if (!def) continue;
       const nodes = sfxGroup(oc, ch, def);
-      def.fn(sfxKit(oc, nodes.g, at, { f: 1, v: def.trim === undefined ? 1 : def.trim }));
+      if (pol) nodes.g.gain.value = pol;                    // measurement hook: polarity of the whole SFX (+1 / -1), so (mix + inverted mix) / 2 isolates the music as the chain left it
+      def.fn(sfxKit(oc, nodes.g, at, { f: Math.pow(2, (+pitch || 0) / 12), v: def.trim === undefined ? 1 : def.trim }));
+      duckMusicFor(ch, at, sn);                                // the inverted-polarity twin of a measurement pair ducks identically (the duck is part of "the music as the chain left it")
     }
     const t0 = performance.now();
     const buf = await oc.startRendering();
@@ -3564,13 +3773,14 @@ const AUDIO = (() => {
       bars: prog.steps / STEPS_PER_BAR, seconds: prog.steps / 4 * beat, lift: prog.lift, maxTempo: prog.maxTempo,
       loopSeconds: (prog.steps - prog.loopStart) / 4 * beat, introSeconds: prog.loopStart / 4 * beat,
       placeholder: prog.placeholder, gain: prog.gain, peakSources: prog.peakSources, lanes: prog.lanes.map((L) => L.name),
+      altSections: (prog.meta.altSections || []).map((a) => Object.assign({}, a)),       // sections that have a second-pass version (FIXPLAN_V3 A8)
     };
   }
   function dump(name) {
     const p = getProg(name);
     const notes = p.meta.notes.slice().sort((a, b) => a.s - b.s);
     return { name, bpm: p.bpm, swing: p.swing, key: p.key, mode: p.mode, steps: p.steps, loopStart: p.loopStart,
-      lead: p.meta.lead, chords: p.meta.chords, sections: p.meta.sections, notes, issues: p.meta.issues.slice(), kind: p.kind,
+      lead: p.meta.lead, chords: p.meta.chords, sections: p.meta.sections, notes, altNotes: (p.meta.altNotes || []).slice().sort((a, b) => a.s - b.s), issues: p.meta.issues.slice(), kind: p.kind,
       lanes: p.lanes.map((L) => ({ name: L.name, inst: L.inst, cfg: L.cfg })), placeholder: p.placeholder, peakSources: p.peakSources };
   }
   function validate() {
@@ -3606,8 +3816,8 @@ const AUDIO = (() => {
   /** debug: leave these lanes out of the current track (['drum'] = the kit) -- live CPU ablation */
   function skipLanes(list) { if (cur) cur.skip = list && list.length ? list.slice() : null; }
   /** debug: move the current loop's read position (e.g. just before its end to test the loop wrap / pass counter) */
-  function seek(step) {
-    if (cur && cur.kind === 'loop' && !cur.stopped) cur.pos = clamp(step | 0, 0, cur.prog.steps - 1);
+  function seek(step, pass) {
+    if (cur && cur.kind === 'loop' && !cur.stopped) { cur.pos = clamp(step | 0, 0, cur.prog.steps - 1); if (pass !== undefined) cur.pass = pass | 0; }       // pass 1 = the second-pass (`alt`) version of the sections
   }
   function state() {
     const c = cur && !cur.stopped ? cur : null;
@@ -3626,9 +3836,9 @@ const AUDIO = (() => {
     return tapNode;
   }
   /** debug: compiled events of a track, [{step, k, lane, ...}] (k: n note, d drum, f fx, u duck, a automation) -- for the notation tests */
-  function eventsOf(name) {
-    const p = getProg(name), out = [];
-    p.events.forEach((list, step) => { if (list) for (const e of list) out.push({ step, k: e.k, lane: e.lane, n: e.n, m: e.m, vel: e.vel, name: e.name, depth: e.depth, p: e.p, v0: e.v0, v1: e.v1, fn: e.fn && e.fn.name }); });
+  function eventsOf(name, pass) {
+    const p = getProg(name), out = [], par = (pass | 0) & 1;
+    p.events.forEach((list, step) => { if (list) for (const e of list) { if (e.o !== undefined && e.o !== par) continue; out.push({ step, k: e.k, lane: e.lane, n: e.n, m: e.m, vel: e.vel, name: e.name, depth: e.depth, p: e.p, v0: e.v0, v1: e.v1, fn: e.fn && e.fn.name, o: e.o }); } });
     return out;
   }
   /** debug: register / replace a 'demo_*' song def (composer scratch pad and notation tests); returns the compile issues */

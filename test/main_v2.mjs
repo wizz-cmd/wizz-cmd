@@ -13,6 +13,8 @@ fs.mkdirSync(OUT, { recursive: true });
 const HTML = process.env.V2_HTML || path.join(PROJECT, 'dist', 'fizzpop.html');
 let failed = 0, passed = 0;
 const check = (name, cond, extra = '') => { if (cond) passed++; else failed++; console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${cond ? '' : '   ' + extra}`); };
+// release-gate policy (FIXPLAN_V3): a wall-clock budget is advisory in the blocking run (FP_TIMING=advisory), strict otherwise / in the perf step
+const acheck = (name, cond, extra = '') => { if (process.env.FP_TIMING !== 'advisory') return check(name, cond, extra); console.log(`${cond ? 'ADVISORY ok  ' : 'ADVISORY MISS'}  ${name}${cond ? '' : '   ' + extra}`); };
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
 async function group(name, fn) {
   if (process.env.ONLY_GROUPS && !process.env.ONLY_GROUPS.split(',').includes(name)) return;
@@ -233,7 +235,8 @@ await group('auto-quality-real-throttle', async () => {
   await cdp.send('Emulation.setCPUThrottlingRate', { rate: 1 });
   const st = await g.evaluate(() => fz._main.autoQuality());
   check(`a real 20x CPU throttle in play drops the quality within 20 s (${q0} -> ${q} after ${waited} ms, window avg ${st.windowAvgMs.toFixed(1)} ms)`, q < q0, JSON.stringify(st));
-  check('...Game follows', (await g.evaluate(() => fz.Game.debug.options().quality)) === q);
+  // (regression wave) both qualities are read in ONE evaluate: the ladder may take another step between two calls (it was still walking down under the 20x throttle that has just been lifted)
+  check('...Game follows', await g.evaluate(() => fz.Game.debug.options().quality === fz._main.quality()));
   const perf = await g.evaluate(() => fz._main.perf());
   check('_main.perf() reports n, avg, p95, max of the last frames', perf.n > 10 && perf.avg > 0 && perf.p95 >= perf.avg * 0.5 && perf.max >= perf.p95, JSON.stringify(perf));
   t.noErrors();
@@ -368,7 +371,7 @@ await group('loading-and-boot', async () => {
     await u.close();
   }
   console.log('      boot to the first title paint at 4x CPU throttle (ms since navigation start): ' + times.join(', '));
-  check(`boot to interactive title <= 1500 ms at 4x CPU throttle (best of 3: ${Math.min(...times)} ms)`, Math.min(...times) <= 1500, times.join(','));
+  acheck(`boot to interactive title <= 1500 ms at 4x CPU throttle (best of 3: ${Math.min(...times)} ms)`, Math.min(...times) <= 1500, times.join(','));
 });
 
 await group('crisp-pixel-grid', async () => {

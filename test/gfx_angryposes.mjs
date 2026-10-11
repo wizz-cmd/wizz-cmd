@@ -39,7 +39,10 @@ check('zero console errors (sheet page)', t.errors.length === 0, JSON.stringify(
 await t.close();
 
 const game = fs.readFileSync(path.join(PROJECT, 'src', '40_game.js'), 'utf8');
-check("Game.actionPose picks '<pose>_angry' while angry", /function actionPose\(base, e\) \{ return e\.angry && GFX\.has\(base \+ '_angry'\)/.test(game));
+// v3 (G7): the sprite-name string is no longer built per call; a constant table POSE maps every action pose to '<pose>_angry' (same behaviour, no per-frame concatenation)
+const poseTable = (game.match(/const POSE = \{([^}]*)\};/) || [])[1] || '';
+const poseEntries = [...poseTable.matchAll(/(\w+):\s*'(\w+)'/g)].map((m) => [m[1], m[2]]);
+check("Game.actionPose picks '<pose>_angry' while angry (v3: via the POSE name table)", /function actionPose\(base, e\) \{ return e\.angry && GFX\.has\(POSE\[base\]\)/.test(game) && poseEntries.length >= 3 && poseEntries.every(([k, v]) => v === k + '_angry'), JSON.stringify(poseEntries));
 if (process.argv.includes('--proof')) {
   const O = path.join(PROJECT, 'out', 'v2', 'integration'); fs.mkdirSync(O, { recursive: true });
   const t2 = await launch({});
