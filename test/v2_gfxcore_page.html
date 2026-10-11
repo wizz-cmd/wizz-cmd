@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GFX core test page</title>
+<!--
+  GFX core (src/10_gfx.js) test page, owned by the "gfxcore" role. Loads src/00_shared.js, src/09_neon.js, the GFX module under test
+  (?gfx=<relative path>, default ../src/10_gfx.js) and, unless ?cast=0, src/11_gfx_cast.js, as classic scripts (top-level consts are
+  shared between them, like in the bundle). Helpers on window.T (driven by test/v2_gfxcore_test.mjs):
+    T.canvas(w, h)                          new canvas
+    T.levelShot(i, k, withBg)               bg + level composited at k (256k x 208k) -> canvas
+    T.fakeSprite(name, w, h, frames, pad)   defines a procedural test sprite
+-->
+<style>html, body { margin: 0; background: #05070f; color: #9fd; font: 12px monospace; } canvas { display: block; }</style>
+</head>
+<body>
+<script>
+  (() => {
+    const q = new URLSearchParams(location.search);
+    const gfx = q.get('gfx') || '../src/10_gfx.js';
+    document.write('<script src="../src/00_shared.js"><\/script><script src="../src/09_neon.js"><\/script><script src="../src/30_levels.js"><\/script><script src="' + gfx + '"><\/script>');
+    if (q.get('cast') !== '0') document.write('<script src="../src/11_gfx_cast.js" onerror="window.__noCast=1"><\/script>');
+  })();
+</script>
+<script>
+  const T = window.T = {};
+  window.__maps = (typeof LEVELS !== 'undefined') ? LEVELS.map((l) => l.map) : [];
+  T.canvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
+  T.levelShot = (i, k, withBg, map) => {
+    GFX.setScale(k);
+    const c = T.canvas(Math.round(256 * k), Math.round(208 * k)), g = c.getContext('2d');
+    g.setTransform(k, 0, 0, k, 0, 0);
+    g.imageSmoothingEnabled = true;
+    g.fillStyle = '#02040a'; g.fillRect(0, 0, 256, 208);
+    if (withBg !== false) g.drawImage(GFX.bgCanvas(i), 0, 0, 256, 208);
+    g.drawImage(GFX.levelCanvas(i, map || window.__maps[i]), 0, 0, 256, 208);
+    return c;
+  };
+
+  /* ---- measuring helpers (all in page space; the node test only reads numbers + PNGs) ---- */
+  T.px = (cv, x, y, w, h) => cv.getContext('2d').getImageData(x === undefined ? 0 : x, y === undefined ? 0 : y, w || cv.width, h || cv.height);
+  T.lum = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  T.stats = (cv, x, y, w, h) => {                       // mean rgb / luma / alpha and max luma of a rect
+    const d = T.px(cv, x, y, w, h).data; let r = 0, g = 0, b = 0, a = 0, mx = 0; const n = d.length / 4;
+    for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i + 1]; b += d[i + 2]; a += d[i + 3]; const l = T.lum(d[i], d[i + 1], d[i + 2]); if (l > mx) mx = l; }
+    return { r: r / n, g: g / n, b: b / n, a: a / n, luma: T.lum(r / n, g / n, b / n), maxLuma: mx };
+  };
+  T.hash = (cv) => { const d = T.px(cv).data; let h = 2166136261 >>> 0; for (let i = 0; i < d.length; i += 3) h = Math.imul(h ^ d[i], 16777619) >>> 0; return h; };
+  T.grid = (items, cols, cw, ch, gap, bg) => {          // items: canvases, drawn scaled to cw x ch
+    const rows = Math.ceil(items.length / cols), c = T.canvas(cols * cw + (cols + 1) * gap, rows * ch + (rows + 1) * gap), g = c.getContext('2d');
+    g.fillStyle = bg || '#000'; g.fillRect(0, 0, c.width, c.height); g.imageSmoothingEnabled = true;
+    items.forEach((it, i) => g.drawImage(it, gap + (i % cols) * (cw + gap), gap + Math.floor(i / cols) * (ch + gap), cw, ch));
+    return c;
+  };
+  T.bgOnly = (i, k) => { GFX.setScale(k); const b = GFX.bgCanvas(i); const c = T.canvas(b.width, b.height); c.getContext('2d').drawImage(b, 0, 0); return c; };
+  T.mapWith = (rows) => { const m = []; for (let r = 0; r < 26; r++) m.push(rows[r] || '#'.repeat(2) + '.'.repeat(28) + '##'); return m; };
+  T.fakeSprite = (name, w, h, frames, pad) => GFX.define(name, {
+    w, h, frames, pad,
+    draw(ctx, f, o) {
+      const p = NEON.circlePath(w / 2, h / 2, Math.min(w, h) * 0.38 + (f % 3) * 0.3);
+      NEON.body(ctx, p, NEON.RGB.magenta, NEON.lwFor(o.k), { core: [w / 2, h / 2, w * 0.35, 0.5] });
+      NEON.neon(ctx, p, NEON.RGB.magenta, NEON.lwFor(o.k));
+      NEON.glow(ctx, w / 2, h / 2, w * 0.7, NEON.RGB.magenta, 0.3);
+    },
+  });
+</script>
+</body>
+</html>

@@ -1,4 +1,7 @@
 // FIZZ & POP — Game module tests (real headless Chromium via Playwright, deterministic, stubs for GFX/AUDIO/LEVELS).
+//   v2: sections 1-21 are MECHANICS (unchanged numbers) + presentation hooks; section 22 = v2 "Abyss Glow" presentation gates (setOptions, photosensitivity
+//   caps, reduced motion, particle / entity bounds, trails, render cost, fallbacks, HUD hooks); 11 = soak. Pixel-level look gates live in test/game_visual.mjs,
+//   mechanics equivalence against the pre-v2 build in test/game_equiv.mjs.
 //   node test/game_tests.mjs            run everything
 //   node test/game_tests.mjs 8 11       run only tests whose name starts with "8" or "11"
 //   REAL=1 node test/game_tests.mjs     run against the real GFX/AUDIO/LEVELS modules instead of the stubs
@@ -1378,12 +1381,14 @@ await test('21c chained thunder pops do not strobe the screen flash (<= 3 flashe
     S.bubbles.forEach((b) => { b.age = 0; b.att = null; });
     p.x = 100; p.y = 60; p.inv = 9999;
     let onsets = 0, prev = 0, popped = 0;
-    for (let f = 0; f < 90; f++) { T.step(1); const a = S.flashT > 0 ? S.flashA * Math.min(1, S.flashT / S.flashDur) : 0; if (a > 0 && prev === 0) onsets++; prev = a; }
+    let maxA = 0;
+    for (let f = 0; f < 90; f++) { T.step(1); const a = S.flashT > 0 ? S.flashA * Math.min(1, S.flashT / S.flashDur) : 0; if (a > 0 && prev === 0) onsets++; prev = a; maxA = Math.max(maxA, a); }
     popped = 8 - S.bubbles.filter((b) => !b.dead && b.kind === 'thunder').length;
     // and the flash is back after the cooldown for a later, separate pop
     Game.debug.spawn('thunder', 150, 150); S.bubbles[S.bubbles.length - 1].att = null; p.x = 150; p.y = 150; T.step(1);
-    return { onsets, popped, later: S.flashT > 0 };
+    return { onsets, popped, later: S.flashT > 0, maxA };
   });
+  ok(r.maxA <= 0.12 + 1e-9, 'thunder flash alpha capped at 12 % (' + r.maxA + ')');
   ok(r.popped >= 5, 'the cluster chained (' + r.popped + ' popped)'); ok(r.onsets >= 1 && r.onsets <= 5, 'flash onsets in 90 frames: ' + r.onsets + ' (<= 1 per 20 frames)'); ok(r.later, 'a later pop flashes again');
 });
 
@@ -1422,37 +1427,345 @@ await test('21e popups are drawn after the banner plate and text (a popup crossi
   ok(iBanner >= 0 && iPop > iBanner, 'popup text drawn after the banner text: ' + r.order.join('|'));
 });
 
+
+// =================================================================================================
+// 22. v2 "Abyss Glow" presentation (SPEC_V2 sec. 1 + 4): options, photosensitivity, reduced motion, bounds, trails, cost, fallbacks
+// =================================================================================================
+const REAL_MODE = !!process.env.REAL;
+
+await test('22a Game.setOptions: defaults, partial updates, clamping, persists across start(), callable before any game', async () => {
+  const r = await ev(() => {
+    const out = {};
+    out.def = Game.debug.options ? Game.setOptions({}) : null;
+    out.afterQ = Game.setOptions({ quality: 1 }); out.afterRM = Game.setOptions({ reducedMotion: true });
+    out.clampHi = Game.setOptions({ quality: 7 }).quality; out.clampLo = Game.setOptions({ quality: -3 }).quality; out.round = Game.setOptions({ quality: 1.4 }).quality;
+    out.nan = Game.setOptions({ quality: NaN }).quality; out.junk = Game.setOptions(null) && Game.setOptions(undefined) && Game.setOptions('x');
+    Game.setOptions({ reducedMotion: false, quality: 2 });
+    const T = __t; T.start({ players: 1, level: 1, seed: 1 }); Game.setOptions({ reducedMotion: true, quality: 0 }); T.start({ players: 1, level: 1, seed: 2 });
+    out.persist = Game.debug.options();
+    Game.setOptions({ reducedMotion: false, quality: 2 });
+    return out;
+  });
+  eq(r.def.quality, 2, 'default quality 2'); eq(r.def.reducedMotion, false, 'default reducedMotion false');
+  eq(r.afterQ.quality, 1); eq(r.afterQ.reducedMotion, false, 'partial update keeps the other option'); eq(r.afterRM.quality, 1); eq(r.afterRM.reducedMotion, true);
+  eq(r.clampHi, 2, 'quality clamps to 2'); eq(r.clampLo, 0, 'quality clamps to 0'); eq(r.round, 1, 'quality rounds'); eq(r.nan, 1, 'NaN is ignored (keeps the previous value)');
+  eq(JSON.stringify(r.persist), JSON.stringify({ reducedMotion: true, quality: 0 }), 'options survive Game.start()');
+});
+
+// one worst-case flash scenario, run in the page: thunder chain + chained kills + repeated bombs + boss-style flash spam; records the rendered flash every frame
+const FLASH_SCENARIO = () => {
+  const T = __t; T.arena({ level: 5, empty: false }); Game.debug.god(true); Game.debug.noClear(true); Game.debug.clearEnemies();
+  const S = T.S(), p = S.players[0], log = [];
+  const rec = () => { const f = Game.debug.flash(); log.push([f.alpha, f.t]); };
+  for (let i = 0; i < 8; i++) Game.debug.spawn('thunder', 100 + i * 9, 60);
+  S.bubbles.forEach((b) => { b.age = 0; b.att = null; }); p.x = 100; p.y = 60; p.inv = 9999;
+  for (let f = 0; f < 120; f++) { T.step(1); rec(); }
+  for (let f = 0; f < 150; f++) {                                              // bombs every 5 frames, each killing a fresh frozen crowd (chain light), plus direct flash spam
+    if (f % 5 === 0) { for (let i = 0; i < 6; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop'][i % 3], 60 + i * 14, 120); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; } Game.debug.give(0, 'bomb'); }
+    if (f % 3 === 0) Game.debug._fx('flash', 0, 0, 0.9);
+    T.step(1); rec();
+  }
+  for (let f = 0; f < 60; f++) { T.step(1); rec(); }
+  return log;
+};
+const flashStats = (log) => {
+  let max = 0, onsets = [], prevT = 0;
+  log.forEach(([a, t], i) => { max = Math.max(max, a); if (t > prevT) onsets.push(i); prevT = t; });
+  let worstWindow = 0;
+  for (let i = 0; i < log.length; i++) worstWindow = Math.max(worstWindow, onsets.filter((o) => o >= i && o < i + 60).length);
+  return { max, onsets: onsets.length, worstWindow, minGap: onsets.length > 1 ? Math.min(...onsets.slice(1).map((o, k) => o - onsets[k])) : 999 };
+};
+
+await test('22b photosensitivity: full-screen flash alpha <= 12 %, onsets >= 20 frames apart (<= 3 per second) in the worst case (thunder chain, bomb spam, chain light)', async () => {
+  const log = await ev(FLASH_SCENARIO);
+  const st = flashStats(log);
+  console.log('        flash: max alpha ' + st.max.toFixed(3) + ', onsets ' + st.onsets + ', worst 60-frame window ' + st.worstWindow + ', min gap ' + st.minGap + ' frames');
+  ok(st.max > 0.05, 'the chain light / thunder / bomb flashes exist (max ' + st.max + ')');
+  ok(st.max <= 0.12 + 1e-9, 'flash alpha capped at 0.12, got ' + st.max);
+  ok(st.worstWindow <= 3, 'at most 3 flash onsets in any 60 frames, got ' + st.worstWindow);
+  ok(st.minGap >= 20, 'onsets at least 20 frames apart, got ' + st.minGap);
+  ok(st.onsets >= 5, 'the scenario really fires many requests (' + st.onsets + ' onsets)');
+});
+
+await test('22b2 photosensitivity (rendered): whole-frame luminance never jumps by the WCAG general-flash threshold (0.1) and rises >= 0.02 at most 3x per second', async function () {
+  if (!REAL_MODE) { console.log('        (skipped without REAL=1: the stub art has no light model)'); return; }
+  const r = await ev(() => {
+    const T = __t, cv = T.canvas, tmp = document.createElement('canvas'); tmp.width = 64; tmp.height = 56; const g = tmp.getContext('2d', { willReadFrequently: true });
+    const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    const Y = () => { g.drawImage(cv, 0, 0, tmp.width, tmp.height); const d = g.getImageData(0, 0, 64, 56).data; let s = 0; for (let i = 0; i < d.length; i += 4) s += 0.2126 * lin(d[i]) + 0.7152 * lin(d[i + 1]) + 0.0722 * lin(d[i + 2]); return s / (d.length / 4); };
+    T.arena({ level: 5, empty: false }); Game.debug.god(true); Game.debug.noClear(true); Game.debug.clearEnemies();
+    const S = T.S(), p = S.players[0]; p.inv = 9999; p.x = 100; p.y = 60;
+    for (let i = 0; i < 8; i++) Game.debug.spawn('thunder', 100 + i * 9, 60);
+    S.bubbles.forEach((b) => { b.age = 0; b.att = null; });
+    const ys = [];
+    for (let f = 0; f < 420; f++) {
+      if (f > 120 && f % 7 === 0) { for (let i = 0; i < 6; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop'][i % 3], 60 + i * 14, 120); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; } Game.debug.give(0, 'bomb'); }
+      T.step(1); ys.push(Y());
+    }
+    let maxD = 0, rises = [];
+    for (let i = 1; i < ys.length; i++) { const d = ys[i] - ys[i - 1]; maxD = Math.max(maxD, Math.abs(d)); if (d >= 0.02) rises.push(i); }
+    let worst = 0; for (let i = 0; i < ys.length; i++) worst = Math.max(worst, rises.filter((o) => o >= i && o < i + 60).length);
+    return { maxD, worst, mean: ys.reduce((a, b) => a + b, 0) / ys.length, max: Math.max(...ys) };
+  });
+  console.log('        rendered luminance: max frame-to-frame delta ' + r.maxD.toFixed(4) + ', worst rises >= 0.02 per second ' + r.worst + ', mean Y ' + r.mean.toFixed(3) + ', peak Y ' + r.max.toFixed(3));
+  ok(r.maxD < 0.1, 'frame-to-frame relative luminance delta < 0.1 (WCAG general flash), got ' + r.maxD);
+  ok(r.worst <= 3, 'luminance rises >= 0.02 at most 3 per second, got ' + r.worst);
+});
+
+await test('22c reduced motion: no flashes, no trails, half the ambient particles, steady (non-blinking) cues; mechanics unchanged', async () => {
+  const r = await ev((scenarioSrc) => {
+    const T = __t, out = {};
+    Game.setOptions({ reducedMotion: true, quality: 2 });
+    const log = (0, eval)('(' + scenarioSrc + ')')();
+    out.flashMax = Math.max(...log.map((l) => l[0])); out.flashT = Math.max(...log.map((l) => l[1]));
+    // ambient
+    T.arena({ level: 3, empty: true }); T.render(); out.ambientReduced = Game.debug.fxStats().drawn.ambient; out.ambientStatReduced = Game.debug.fxStats().ambient;
+    Game.setOptions({ reducedMotion: false }); T.render(); out.ambientFull = Game.debug.fxStats().drawn.ambient;
+    // trails: a player running and jumping
+    const runTrail = () => { T.arena({ level: 3, empty: true }); Game.debug.god(true); const p = T.S().players[0]; p.inv = 0; let g = 0; T.step(1, [{ jump: true, right: true }]); for (let i = 0; i < 40; i++) { T.step(1, [{ right: true }]); g = Math.max(g, Game.debug.fxStats().drawn.ghosts); } return g; };
+    Game.setOptions({ reducedMotion: true }); out.ghostsReduced = runTrail();
+    Game.setOptions({ reducedMotion: false }); out.ghostsFull = runTrail();
+    Game.setOptions({ quality: 0 }); out.ghostsQ0 = runTrail(); Game.setOptions({ quality: 2 });
+    // blinking cues: invulnerable player alpha, HURRY UP text
+    const alphas = (reduced) => {
+      Game.setOptions({ reducedMotion: reduced }); T.arena({ level: 3, empty: true }); const p = T.S().players[0]; p.inv = 9999; const seen = []; const o = GFX.draw;
+      GFX.draw = (c, n, f, x, y, opt) => { if (n.startsWith('p1_')) seen.push(opt && opt.alpha !== undefined ? opt.alpha : 1); return o.call(GFX, c, n, f, x, y, opt); };
+      for (let i = 0; i < 30; i++) T.step(1); GFX.draw = o; return { n: seen.length, distinct: [...new Set(seen)].length, min: Math.min(...seen) };
+    };
+    out.invReduced = alphas(true); out.invNormal = alphas(false);
+    const hurry = (reduced) => {
+      Game.setOptions({ reducedMotion: reduced }); T.arena({ level: 3, empty: true }); const S = T.S(); let n = 0; const o = GFX.text; S.hurryBanner = 100;
+      GFX.text = (c, str, ...rest) => { if (str === 'HURRY UP!') n++; return o.call(GFX, c, str, ...rest); };
+      for (let i = 0; i < 60; i++) T.step(1); GFX.text = o; return n;
+    };
+    out.hurryReduced = hurry(true); out.hurryNormal = hurry(false);
+    Game.setOptions({ reducedMotion: false, quality: 2 });
+    return out;
+  }, FLASH_SCENARIO.toString());
+  eq(r.flashMax, 0, 'no full-screen flash under reduced motion'); eq(r.flashT, 0);
+  eq(r.ambientStatReduced, 40, 'ambient count halved (80 -> 40)'); eq(r.ambientReduced, 40, 'ambient drawn halved'); eq(r.ambientFull, 80, 'full ambient count is 80 at quality 2');
+  eq(r.ghostsReduced, 0, 'no trails under reduced motion'); ok(r.ghostsFull > 0, 'trails exist at quality 2 (' + r.ghostsFull + ')'); eq(r.ghostsQ0, 0, 'no trails at quality 0');
+  ok(r.invReduced.distinct === 1 && r.invReduced.min > 0.4, 'invulnerable player: steady alpha under reduced motion ' + JSON.stringify(r.invReduced)); ok(r.invNormal.distinct > 1, 'invulnerable player blinks normally ' + JSON.stringify(r.invNormal));
+  eq(r.hurryReduced, 60, 'HURRY UP! text is steady under reduced motion (every frame)'); ok(r.hurryNormal > 0 && r.hurryNormal < 60, 'HURRY UP! blinks normally (' + r.hurryNormal + ' of 60 frames)');
+});
+
+await test('22d quality levels: ambient 40 / 56 / 80, trails and motes only at quality >= 1, particle cap per level, bounds hold under chain spam', async () => {
+  const r = await ev(() => {
+    const T = __t, out = {};
+    for (const q of [0, 1, 2]) for (const rm of [false, true]) {
+      Game.setOptions({ quality: q, reducedMotion: rm });
+      T.arena({ level: 5, empty: false }); Game.debug.god(true); Game.debug.noClear(true); const S = T.S(), p = S.players[0]; p.inv = 9999;
+      T.render(); const amb = Game.debug.fxStats().drawn.ambient;
+      let maxParts = 0, maxFx = 0, maxPop = 0, cap = 0, flashMax = 0;
+      for (let f = 0; f < 900; f++) {
+        if (f % 12 === 0) for (let i = 0; i < 5; i++) Game.debug.spawn(['thunder', 'fire', 'water'][(f + i) % 3], 60 + i * 20, 80 + (f % 5) * 12);
+        if (f % 40 === 0) { for (let i = 0; i < 7; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer'][i % 5], 40 + i * 15, 100); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; } Game.debug.give(0, 'bomb'); }
+        S.bubbles.forEach((b) => { if (b.kind !== 'trapped') b.att = null; });
+        p.x = 100 + (f % 50); p.y = 80 + (f % 7);
+        T.tick(1); if (f % 4 === 0) T.render();
+        const fs = Game.debug.fxStats(); maxParts = Math.max(maxParts, fs.parts); maxFx = Math.max(maxFx, fs.fx); maxPop = Math.max(maxPop, fs.popups); cap = fs.partCap; flashMax = Math.max(flashMax, Game.debug.flash().alpha);
+      }
+      out[q + (rm ? 'r' : '')] = { amb, maxParts, maxFx, maxPop, cap, flashMax, motes: Game.debug.fxStats().drawn.motes };
+    }
+    Game.setOptions({ quality: 2, reducedMotion: false });
+    return out;
+  });
+  eq(r['0'].amb, 40, 'q0 ambient'); eq(r['1'].amb, 56, 'q1 ambient'); eq(r['2'].amb, 80, 'q2 ambient'); eq(r['0r'].amb, 20); eq(r['1r'].amb, 28); eq(r['2r'].amb, 40);
+  for (const k of Object.keys(r)) {
+    ok(r[k].maxParts <= r[k].cap, k + ': particles bounded by the cap ' + r[k].cap + ' (max ' + r[k].maxParts + ')'); ok(r[k].maxFx <= 160 && r[k].maxPop <= 60, k + ': fx / popups bounded');
+    ok(r[k].flashMax <= 0.12 + 1e-9, k + ': flash cap');
+  }
+  eq(r['0'].cap, 80); eq(r['1'].cap, 140); eq(r['2'].cap, 220);
+  ok(r['2'].maxParts > 60, 'the chain spam really fills the particle pool (' + r['2'].maxParts + ')'); eq(r['0'].motes, 0, 'no motes at quality 0'); eq(r['2r'].flashMax, 0, 'reduced: no flash');
+});
+
+await test('22e cosmetic effects: every pop gets a shockwave ring, kills get spark bursts, trails only while moving, no K4 aura, frozen = tint + sparkles', async () => {
+  const r = await ev(() => {
+    const T = __t, out = {}; Game.setOptions({ quality: 2, reducedMotion: false });
+    T.arena({ level: 3, empty: true }); Game.debug.god(true); let S = T.S(); const p = S.players[0]; p.inv = 0;
+    Game.debug.spawn('thunder', 60, 100); const b = S.bubbles[S.bubbles.length - 1]; b.att = null; b.age = 0; p.x = b.x; p.y = b.y + 8; p.vy = 0; p.noPopT = 0;
+    const rings0 = S.parts.filter((q) => q.k === 'ring').length; T.step(1);
+    out.ringsAfterPop = S.parts.filter((q) => q.k === 'ring').length - rings0; out.bubbleDead = b.dead;
+    // kill burst
+    T.arena({ level: 3, empty: true }); Game.debug.god(true); S = T.S(); Game.debug.spawn('crabbit', 100, 120); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; S.parts.length = 0;
+    Game.debug.give(0, 'bomb'); T.step(1); out.burstParts = S.parts.length; out.kinds = [...new Set(S.parts.map((q) => q.k))].sort().join();
+    // standing still: no ghosts; running: ghosts
+    T.arena({ level: 3, empty: true }); Game.debug.god(true); S = T.S(); S.players[0].inv = 0; T.step(30); out.ghostsStill = Game.debug.fxStats().drawn.ghosts;
+    T.step(1, [{ jump: true, right: true }]); let g = 0; for (let i = 0; i < 20; i++) { T.step(1, [{ right: true }]); g = Math.max(g, Game.debug.fxStats().drawn.ghosts); } out.ghostsMoving = g;
+    // angry enemy: ONE sprite draw, no white silhouette copies (the K4 aura is removed), no draw with white:true
+    T.arena({ level: 22, empty: true }); Game.debug.god(true); S = T.S(); Game.debug.spawn('crabbit', 120, 100); const c = S.enemies[S.enemies.length - 1]; c.angry = true; c.vx = 0; c.vy = 0; c.animT = 0;
+    const calls = []; const o = GFX.draw; GFX.draw = (cx, n, f, x, y, opt) => { if (n.startsWith('crabbit')) calls.push({ n, white: !!(opt && opt.white), alpha: opt && opt.alpha }); return o.call(GFX, cx, n, f, x, y, opt); };
+    T.render(); GFX.draw = o; out.angryCalls = calls;
+    // frozen: GFX.draw gets a tint, sparkles come from GFX.particle('spark')
+    T.arena({ level: 12, empty: true }); S = T.S(); Game.debug.spawn('jellop', 120, 100); const j = S.enemies[S.enemies.length - 1]; j.state = 'frozen'; j.freezeT = 200;
+    const tints = [], sparks = []; const o2 = GFX.draw, p2 = GFX.particle;
+    GFX.draw = (cx, n, f, x, y, opt) => { if (n.startsWith('jellop') && opt && opt.tint) tints.push(opt.tint); return o2.call(GFX, cx, n, f, x, y, opt); };
+    GFX.particle = (cx, kind, ...rest) => { if (kind === 'spark') sparks.push(1); return p2.call(GFX, cx, kind, ...rest); };
+    for (let i = 0; i < 10; i++) T.step(1); GFX.draw = o2; GFX.particle = p2;
+    out.tints = tints.length; out.tintColour = tints[0]; out.sparks = sparks.length;
+    return out;
+  });
+  ok(r.bubbleDead && r.ringsAfterPop >= 1, 'a popped bubble spawns a shockwave ring (' + r.ringsAfterPop + ')');
+  ok(r.burstParts >= 8 && /dot/.test(r.kinds) && /ring/.test(r.kinds) && /spark/.test(r.kinds), 'a kill spawns a ring + spark / dot burst: ' + r.burstParts + ' parts (' + r.kinds + ')');
+  eq(r.ghostsStill, 0, 'no trail ghosts while standing still'); ok(r.ghostsMoving > 0, 'trail ghosts while moving (' + r.ghostsMoving + ')');
+  eq(r.angryCalls.length, 1, 'angry crabbit: one sprite draw, no aura copies: ' + JSON.stringify(r.angryCalls)); ok(!r.angryCalls[0].white, 'and no white silhouette');
+  ok(r.tints >= 8 && /^#[0-9a-f]{6}$/i.test(r.tintColour), 'frozen enemy drawn with a #rrggbb tint (' + r.tints + ' draws, ' + r.tintColour + ')'); ok(r.sparks >= 8, 'frozen sparkles via GFX.particle spark (' + r.sparks + ')');
+});
+
+await test('22f item glow pulse: food / power-ups get a pulsing glow (alpha varies), the pearl too', async () => {
+  const r = await ev(() => {
+    const T = __t; Game.setOptions({ quality: 2, reducedMotion: false }); T.arena({ level: 3, empty: true });
+    Game.debug.spawn('food_2', 100, 168); Game.debug.spawn('pu_shoes', 60, 168);
+    const rec = { food: [], pu: [] }; const o = GFX.particle;
+    GFX.particle = (cx, kind, x, y, size, col, a, rot) => { if (kind === 'dot') { if (Math.abs(x - 108) < 0.01) rec.food.push(a); if (Math.abs(x - 68) < 0.01) rec.pu.push(a); } return o.call(GFX, cx, kind, x, y, size, col, a, rot); };
+    for (let i = 0; i < 60; i++) T.step(1); GFX.particle = o;
+    return { food: [Math.min(...rec.food), Math.max(...rec.food), rec.food.length], pu: [Math.min(...rec.pu), Math.max(...rec.pu), rec.pu.length] };
+  });
+  ok(r.food[2] >= 50 && r.food[1] - r.food[0] > 0.08, 'food glow pulses: alpha ' + r.food[0].toFixed(2) + ' .. ' + r.food[1].toFixed(2)); ok(r.pu[2] >= 50 && r.pu[1] - r.pu[0] > 0.08, 'power-up glow pulses');
+});
+
+await test('22g HUD: lives = pearls (lives - 1), lit EXTEND letters are ringed, round number thin, no opaque plates; boss gauge only while fighting', async () => {
+  const r = await ev(() => {
+    const T = __t; Game.setOptions({ quality: 2, reducedMotion: false }); T.arena({ players: 2, level: 7, empty: true }); const S = T.S();
+    S.players[0].lives = 4; S.players[1].lives = 2; S.players[0].letters = [true, true, false, true, false, false];
+    const pearls = [0, 0], rings = [0, 0], texts = []; const op = GFX.particle, ot = GFX.text, of = CanvasRenderingContext2D.prototype.fillRect; let bigRects = 0;
+    GFX.particle = (cx, kind, x, y, size, col, a, rot) => { if (kind === 'dot' && Math.abs(size - 1.35) < 1e-6) pearls[x < 128 ? 0 : 1]++; if (kind === 'ring' && Math.abs(size - 3.7) < 1e-6) rings[x < 128 ? 0 : 1]++; return op.call(GFX, cx, kind, x, y, size, col, a, rot); };
+    GFX.text = (cx, s, ...rest) => { texts.push(String(s)); return ot.call(GFX, cx, s, ...rest); };
+    CanvasRenderingContext2D.prototype.fillRect = function (x, y, w, h) { const t = this.getTransform(); if (w >= 14 && h >= 10 && this.fillStyle !== '#02040a' && typeof this.fillStyle === 'string' && /^rgba\(\d+,\d+,\d+,(0\.[5-9]|1)\)$/.test(this.fillStyle) && y >= 16) bigRects++; return of.call(this, x, y, w, h); };
+    T.render(); GFX.particle = op; GFX.text = ot; CanvasRenderingContext2D.prototype.fillRect = of;
+    return { pearls, rings, texts, bigRects, round: texts.includes('07') };
+  });
+  eq(r.pearls[0], 3, 'P1: 4 lives -> 3 reserve pearls'); eq(r.pearls[1], 1, 'P2: 2 lives -> 1 reserve pearl'); eq(r.rings[0], 3, 'P1: three lit EXTEND letters are ringed'); eq(r.rings[1], 0);
+  ok(r.round, 'round number drawn as text'); eq(r.bigRects, 0, 'no opaque rectangles in the HUD');
+});
+
+await test('22h chain light: a long chain of kills adds light pools and rate-limited tinted washes, never more than the caps', async () => {
+  const r = await ev(() => {
+    const T = __t; Game.setOptions({ quality: 2, reducedMotion: false }); T.arena({ level: 3, empty: true }); Game.debug.god(true); const S = T.S();
+    for (let i = 0; i < 8; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer'][i % 5], 40 + i * 20, 110); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; }
+    Game.debug.give(0, 'bomb'); T.step(1);
+    const pools = S.parts.filter((q) => q.k === 'dot' && q.s0 >= 2.5 && q.vx === 0 && q.vy === 0).length;
+    const f = Game.debug.flash();
+    return { pools, alpha: f.alpha, col: f.col, cool: f.cool };
+  });
+  ok(r.pools >= 1, 'chain kills spawn light pools (' + r.pools + ')'); ok(r.alpha > 0 && r.alpha <= 0.12 + 1e-9, 'a faint wash (' + r.alpha + ')'); ok(r.cool > 0 && r.cool <= 20, 'flash cooldown armed (' + r.cool + ')');
+});
+
+await test('22i fallbacks: without GFX.particle / levelGlints / tint support the game still renders everything (no throw)', async () => {
+  const r = await ev(() => {
+    const T = __t; delete GFX.particle; GFX.levelGlints = undefined; Game.setOptions({ quality: 2, reducedMotion: false });
+    T.start({ players: 2, level: 5, seed: 4 }); T.step(100); Game.debug.god(true); const S = T.S();
+    Game.debug.spawn('thunder', 100, 60); Game.debug.spawn('bomb', 100, 100); Game.debug.give(0, 'clock'); Game.debug.give(0, 'bomb');
+    for (let i = 0; i < 80; i++) T.step(1);
+    T.start({ players: 1, level: 30, seed: 4 }); for (let i = 0; i < 200; i++) T.step(1);
+    return { parts: Game.debug.fxStats().parts };
+  });
+  ok(r.parts >= 0, 'rendered without GFX.particle');
+});
+
+await test('22j render + update cost in a busy scene (40 bubbles, 8 enemies, chain): update stays tiny; render is within the budget of this (CPU-raster) machine', async () => {
+  const r = await ev(() => {
+    const T = __t; Game.setOptions({ quality: 2, reducedMotion: false });
+    T.start({ players: 2, level: 8, seed: 5 }); Game.debug.skipIntro(); Game.debug.god(true); const S = T.S(); Game.debug.clearEnemies();
+    for (let i = 0; i < 8; i++) Game.debug.spawn(['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer', 'nibbler', 'crabbit', 'jellop'][i], 30 + i * 24, 60 + (i % 3) * 40);
+    for (let i = 0; i < 38; i++) Game.debug.spawn(['thunder', 'fire', 'water'][i % 3], 24 + (i % 10) * 20, 40 + Math.floor(i / 10) * 30);
+    for (const b of S.bubbles) { b.att = null; b.life = 1e9; }
+    S.players[0].inv = 0; S.players[1].inv = 0; Game.debug.noClear(true);
+    const inputs = [{ right: true }, { left: true }], ctx = T.ctx, K = T.K;
+    const frame = () => { ctx.setTransform(K, 0, 0, K, 0, 0); Game.render(ctx); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.getImageData(0, 0, 1, 1); };   // readback = the raster work really finishes
+    for (let i = 0; i < 30; i++) { T.tick(1, inputs); frame(); }
+    const med = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)];
+    const out = {};
+    const run = (label, n, chain) => {                         // two passes, the quieter one counts (the machine is shared with other jobs)
+      let best = null;
+      for (let pass = 0; pass < 2; pass++) {
+        const tu = [], tr = [];
+        for (let i = 0; i < n; i++) {
+          if (chain && i % 12 === 0) { for (let k = 0; k < 6; k++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop'][k % 3], 60 + k * 14, 120); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; } Game.debug.give(0, 'bomb'); }
+          const t0 = performance.now(); T.tick(1, inputs); const t1 = performance.now(); frame(); const t2 = performance.now(); tu.push(t1 - t0); tr.push(t2 - t1);
+        }
+        const o = { upd: +(tu.reduce((a, b) => a + b, 0) / n).toFixed(3), rend: +(tr.reduce((a, b) => a + b, 0) / n).toFixed(2), rendMed: +med(tr).toFixed(2), rendMax: +Math.max(...tr).toFixed(1) };
+        if (!best || o.rendMed < best.rendMed) best = o;
+      }
+      out[label] = best;
+    };
+    run('busy q2', 100, false);
+    Game.setOptions({ quality: 1 }); run('busy q1', 100, false); Game.setOptions({ quality: 0 }); run('busy q0', 100, false); Game.setOptions({ quality: 2 });
+    run('busy+chain q2', 100, true);
+    out.stats = Game.debug.fxStats();
+    return out;
+  });
+  for (const k of ['busy q2', 'busy q1', 'busy q0', 'busy+chain q2']) console.log('        ' + k.padEnd(14) + 'update ' + r[k].upd + ' ms, render avg ' + r[k].rend + ' ms (median ' + r[k].rendMed + ', max ' + r[k].rendMax + ')  [k=' + (REAL_MODE ? 3 : 1) + ', software raster]');
+  ok(r['busy q2'].upd < 0.6, 'update avg ' + r['busy q2'].upd + ' ms (< 0.6)');
+  // the render gate only means something with the real art at k=3; the budget is for THIS container's CPU rasteriser (SPEC_V2 sec. 5 gates the full frame on real hardware)
+  if (REAL_MODE) { ok(r['busy q2'].rendMed <= 6, 'busy render median ' + r['busy q2'].rendMed + ' ms (<= 6 on the CPU raster)'); ok(r['busy+chain q2'].rendMed <= 14, 'busy + chain render median ' + r['busy+chain q2'].rendMed + ' ms (<= 14)'); ok(r['busy q1'].rendMed <= r['busy q2'].rendMed + 1 && r['busy q0'].rendMed <= r['busy q1'].rendMed + 1, 'lower quality is not slower'); }
+});
+
+await test('22k render fuzz: every phase (intro, play, clear, transition, extend, gameover, victory, boss fight / trapped / pearl) x quality 0-2 x reduced motion renders every frame without errors', async () => {
+  const r = await ev(() => {
+    const T = __t; let frames = 0; const phases = new Set();
+    const rnd = (() => { let s = 4242; return () => { s = (Math.imul(s, 1103515245) + 12345) >>> 0; return s / 4294967296; }; })();
+    for (const q of [0, 1, 2]) for (const rm of [false, true]) {
+      Game.setOptions({ quality: q, reducedMotion: rm });
+      for (const lvl of [2, 9, 17, 30]) {
+        T.start({ players: 2, level: lvl, seed: 31 + lvl + q }); const S = T.S(); phases.add(S.phase);
+        for (let f = 0; f < 700; f++) {
+          if (f === 160) { Game.debug.god(true); }
+          if (f % 90 === 40) { const kind = ['thunder', 'fire', 'water', 'letter', 'bomb', 'clock', 'nibbler', 'crabbit', 'glimmer', 'bonefin', 'food_5', 'pu_blue', 'pu_parasol'][Math.floor(rnd() * 13)]; Game.debug.spawn(kind, 40 + rnd() * 160, 40 + rnd() * 150); }
+          if (f === 300) { S.players[0].letters = [true, true, true, true, true, false]; Game.debug.spawn('letter', S.players[0].x, S.players[0].y); }
+          if (f === 420 && lvl !== 30) Game.debug.killAll();
+          if (f === 420 && lvl === 30) { S.enemies[0].hp = 1; Game.debug.spawn('thunder', S.enemies[0].x + 20, S.enemies[0].y + 20); }
+          if (f === 520 && lvl === 30 && S.bossBubble) { S.players[0].x = S.bossBubble.x + 24; S.players[0].y = S.bossBubble.y + 24; }
+          if (f === 600) { Game.debug.god(false); for (const p of S.players) p.lives = 1; Game.debug.spawn('nibbler', S.players[0].x, S.players[0].y); }
+          T.step(1, [{ right: f % 50 < 25, jump: f % 70 === 0, fire: f % 9 === 0 }, { left: f % 60 < 30, fire: f % 11 === 0 }]);
+          phases.add(S.phase); frames++;
+          if (Game.isOver()) break;
+        }
+        // victory + gameover screens explicitly
+        const S2 = T.S(); if (S2) { S2.phase = 'victory'; S2.phaseT = 5; S2.bossBubble = null; for (let k = 0; k < 6; k++) T.step(1); S2.phase = 'gameover'; S2.phaseT = 5; for (let k = 0; k < 6; k++) T.step(1); phases.add('victory'); phases.add('gameover'); }
+      }
+    }
+    Game.setOptions({ quality: 2, reducedMotion: false });
+    return { frames, phases: [...phases].sort() };
+  });
+  ok(r.frames > 8000, 'rendered ' + r.frames + ' frames'); ok(['extend', 'gameover', 'intro', 'play', 'transition', 'victory'].concat(REAL_MODE ? ['clear'] : []).every((p) => r.phases.includes(p)), 'phases covered: ' + r.phases.join(','));
+});
+
 // =================================================================================================
 // 11. Soak
 // =================================================================================================
-await test('11 soak: 20000 frames of random input over many rounds, god mode: no errors, bounded counts, fast', async () => {
+await test('11 soak: 20000 frames of random input over many rounds, god mode: no errors, bounded counts (incl. cosmetic particles), fast', async () => {
   const r = await ev(() => {
     const T = __t; T.start({ players: 2, level: 1, seed: 99 }); Game.debug.god(true);
     let s = 12345; const rnd = () => { s = (Math.imul(s, 1103515245) + 12345) >>> 0; return s / 4294967296; };
     const held = [{ left: false, right: false, jump: false, fire: false }, { left: false, right: false, jump: false, fire: false }];
-    const max = { enemies: 0, bubbles: 0, proj: 0, fx: 0, popups: 0, items: 0, flames: 0, streams: 0, bolts: 0 };
-    let tUpd = 0, tMax = 0, rounds = new Set(), phases = {}; let kills = 0;
+    const max = { enemies: 0, bubbles: 0, proj: 0, fx: 0, popups: 0, items: 0, flames: 0, streams: 0, bolts: 0, parts: 0 };
+    let tUpd = 0, tMax = 0, tRend = 0, nRend = 0, rMax = 0, rounds = new Set(), phases = {}; let kills = 0, flashMax = 0, partCap = 0;
     for (let f = 0; f < 20000; f++) {
       for (const h of held) for (const k of ['left', 'right', 'jump', 'fire']) if (rnd() < 0.06) h[k] = !h[k];
       if (f % 900 === 450) Game.debug.killAll();
       if (f % 3500 === 3000) Game.debug.setLevel(1 + Math.floor(rnd() * 30));
       if (f % 700 === 100) { const kind = ['thunder', 'fire', 'water', 'letter', 'bomb', 'clock', 'shoes', 'pink', 'blue', 'gold', 'nibbler', 'crabbit', 'jellop', 'springle', 'glimmer', 'bonefin'][Math.floor(rnd() * 16)]; Game.debug.spawn(kind, 40 + rnd() * 160, 40 + rnd() * 150); }
       const t0 = performance.now();
-      T.step(1, held);
+      T.tick(1, held);
       const dt = performance.now() - t0; tUpd += dt; tMax = Math.max(tMax, dt);
+      if (f % 25 === 0) { const r0 = performance.now(); T.render(); const dr = performance.now() - r0; tRend += dr; nRend++; rMax = Math.max(rMax, dr); }     // the real frame (renders every 25th update)
       const S = T.S(); phases[S.phase] = (phases[S.phase] || 0) + 1; rounds.add(S.level);
       max.enemies = Math.max(max.enemies, S.enemies.length); max.bubbles = Math.max(max.bubbles, S.bubbles.length); max.proj = Math.max(max.proj, S.proj.length);
       max.fx = Math.max(max.fx, S.fx.length); max.popups = Math.max(max.popups, S.popups.length); max.items = Math.max(max.items, S.items.length);
-      max.flames = Math.max(max.flames, S.flames.length); max.streams = Math.max(max.streams, S.streams.length); max.bolts = Math.max(max.bolts, S.bolts.length);
+      max.flames = Math.max(max.flames, S.flames.length); max.streams = Math.max(max.streams, S.streams.length); max.bolts = Math.max(max.bolts, S.bolts.length); max.parts = Math.max(max.parts, S.parts.length);
+      flashMax = Math.max(flashMax, Game.debug.flash().alpha); partCap = Game.debug.fxStats().partCap;
       if (Game.isOver()) { T.start({ players: 2, level: 1 + Math.floor(rnd() * 30), seed: f }); Game.debug.god(true); }
     }
     const st = T.state();
-    return { avg: tUpd / 20000, tMax, max, rounds: [...rounds].length, phases, nan: [st.players.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y)), st.enemies.some((e) => !Number.isFinite(e.x) || !Number.isFinite(e.y))] };
+    return { avg: tUpd / 20000, tMax, rend: tRend / nRend, rMax, max, flashMax, partCap, rounds: [...rounds].length, phases, nan: [st.players.some((p) => !Number.isFinite(p.x) || !Number.isFinite(p.y)), st.enemies.some((e) => !Number.isFinite(e.x) || !Number.isFinite(e.y))] };
   });
-  console.log('        soak: avg step+render ' + r.avg.toFixed(3) + ' ms, max ' + r.tMax.toFixed(2) + ' ms, rounds seen ' + r.rounds + ', max counts ' + JSON.stringify(r.max) + ', phases ' + JSON.stringify(r.phases));
+  console.log('        soak: avg update ' + r.avg.toFixed(3) + ' ms (max ' + r.tMax.toFixed(2) + '), sampled render avg ' + r.rend.toFixed(2) + ' ms (max ' + r.rMax.toFixed(1) + '), rounds seen ' + r.rounds + ', max counts ' + JSON.stringify(r.max) + ', flash max ' + r.flashMax.toFixed(3) + ', phases ' + JSON.stringify(r.phases));
   ok(r.max.bubbles <= 60, 'bubbles bounded ' + r.max.bubbles); ok(r.max.enemies <= 20, 'enemies bounded ' + r.max.enemies);
-  ok(r.max.proj <= 80 && r.max.fx <= 160 && r.max.popups <= 60, 'proj/fx/popups bounded');
-  ok(r.avg < 1.5, 'avg frame time ' + r.avg);
+  ok(r.max.proj <= 80 && r.max.fx <= 160 && r.max.popups <= 60, 'proj/fx/popups bounded'); ok(r.max.parts <= r.partCap, 'cosmetic particles bounded ' + r.max.parts + ' <= ' + r.partCap);
+  ok(r.flashMax <= 0.12 + 1e-9, 'flash cap held for 20000 frames');
+  ok(r.avg < 0.6, 'avg update time ' + r.avg);
+  if (REAL_MODE) ok(r.rend < 9, 'sampled render avg ' + r.rend + ' ms (CPU raster, k=3)'); else ok(r.rend < 3, 'sampled render avg ' + r.rend);
   ok(!r.nan[0] && !r.nan[1], 'no NaN positions');
   const u = await ev(() => __t.unknown());
   ok(!u.sprites.length && !u.sfx.length && !u.music.length, 'only contract names used: ' + JSON.stringify(u));

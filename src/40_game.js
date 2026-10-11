@@ -53,10 +53,18 @@
  *    Phase 2 (< 50 % HP) = angry + music tempo 1.1; hurry in the boss round = tempo 1.15. When HP is 0 the boss bubble
  *    (`kraken_trapped`) floats upward at 0.3 px/frame and is popped by touch: boss_die at once, clear_boss fanfare 60 frames
  *    later with the ending music queued behind it. Beating the Kraken clears Bonefin / HURRY UP for good.
- *  - Presentation: every centred banner sits on a dark translucent band across the playfield; round number, lives and
- *    EXTEND panel have dark plates; chain popups stack 9 px apart; the next round's level canvas / backdrop are built
- *    during the clear phase. The backdrop comes from GFX.bgCanvas when the GFX module has it (feature-detected), and
- *    GFX.text gets {outline} (older GFX ignores it).
+ *  - Presentation (v2 "Abyss Glow", SPEC_V2 sec. 1 and 4): chain popups stack 9 px apart; the next round's level canvas / backdrop
+ *    are built during the clear phase and drawn at 256 x 208 logical px (GFX returns k x resolution canvases). Everything the
+ *    player sees beyond the sprites is COSMETIC and lives in separate state (S.parts, S.vrng, the trail buffers) that no mechanic
+ *    reads: ambient plankton + light motes (stateless, a function of S.frame), motion trails (ghost blits of the baked sprite),
+ *    shockwave rings on every pop, spark bursts on kills / pickups, glow pulse on items, chain light (a tinted wash, see flash()),
+ *    HUD of thin glowing numbers + pearls, neon banners on a soft dark gradient band, boss gauge = thin neon bar with a crown.
+ *    The cosmetic RNG is its own stream (S.vrng): the game's S.rng is never consumed by effects, so every seed plays out exactly as
+ *    before. Photosensitivity (binding): full-screen flashes are <= 12 % alpha and their onsets >= 20 frames apart (<= 3 per second).
+ *    Game.setOptions({reducedMotion, quality}): reducedMotion = no flashes, no trails, half the ambient particles, steady instead of
+ *    blinking cues; quality 0 / 1 / 2 scales ambient count, particle cap and burst size (trails need quality >= 1).
+ *    GFX.particle / GFX.draw {tint, glow} are feature-detected (typeof GFX.particle === 'function'); without them simple canvas
+ *    fallbacks are drawn. The banner text asks for {outline}.
  *  - Debug extras (non-contract): debug._S(), skipIntro(), clearEnemies(), noClear(on), setPlayer(),
  *    setHurryTimer(), give(), addScore(). `spawn` also accepts 'bonefin', 'kraken', 'letter', 'food_N',
  *    'pu_xxx' (or just 'shoes'...), 'moonpearl'.
@@ -112,7 +120,6 @@ const Game = (() => {
 
   // enemies
   const ENTER_FRAMES = 90, ENTER_STAGGER = 6;
-  const THUNDER_FLASH_COOL = 20;             // frames between thunder screen flashes (<= 3 per second)
   const DYING_MIN = 40, DYING_MAX = 900;
   const FOOD_POINTS = [500, 700, 1000, 1500, 2000, 3000, 5000, 8000];
   const FOOD_LIFE = 600, FOOD_BLINK = 120;
@@ -152,7 +159,20 @@ const Game = (() => {
   // caps (keep entity counts bounded)
   const FX_CAP = 160, POPUP_CAP = 60, PROJ_CAP = 80, POPUP_STACK = 9;
 
-  const PLAYER_COLOR = ['#ff6fae', '#6fd8ff'];
+  // v2 presentation (cosmetic only; see the header). Quality-indexed tables are [0, 1, 2].
+  const FLASH_MAX = 0.12, FLASH_COOL = 20;          // photosensitivity: full-screen flash <= 12 % alpha, onsets >= 20 frames apart (<= 3 / s)
+  const PART_CAP = [80, 140, 220];                   // live cosmetic particles
+  const AMBIENT_N = [40, 56, 80];                    // drifting plankton specks (halved under reduced motion)
+  const MOTE_MAX = 14;                               // slow light motes orbiting floating bubbles
+  const TRAIL_N = 8, TRAIL_BACK = [3, 6], TRAIL_A = [0.24, 0.12];   // trail ring buffer, ghost offsets (frames back), ghost alpha
+
+  const PLAYER_COLOR = ['#ff3ea5', '#3cf2ff'], PLAYER_HOT = ['#ffd9ee', '#d9fcff'];
+  const HUE = { cyan: '#3cf2ff', magenta: '#ff3ea5', lime: '#b6ff3b', amber: '#ffb23e', violet: '#8a5cff', white: '#eaffff', ember: '#ff6a3d',
+                cobalt: '#3d7bff', crimson: '#ff2a2a', purple: '#bb4fd9', gold: '#ffd23f', ice: '#aef0ff', mint: '#7dffb0' };
+  const ENEMY_HUE = { nibbler: HUE.amber, crabbit: HUE.ember, jellop: HUE.violet, springle: HUE.lime, glimmer: HUE.cobalt, kraken: HUE.purple };
+  const FOOD_HUE = [HUE.amber, '#ff9a5a', '#ffe27a', HUE.ember, HUE.magenta, HUE.lime, HUE.cyan, HUE.white];
+  const PU_HUE = { shoes: HUE.cyan, pink: HUE.magenta, blue: HUE.cobalt, gold: HUE.gold, parasol: HUE.violet, clock: '#9cecff', bomb: HUE.ember, heart: '#ff4a7a' };
+  const OPT = { reducedMotion: false, quality: 2 };
   const ENEMY_TYPES = ['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer', 'kraken'];
   const NO_INPUT = Object.freeze({ left: false, right: false, jump: false, fire: false, jumpPressed: false, firePressed: false });
 
@@ -321,7 +341,7 @@ const Game = (() => {
     }
     S.popups.push({ x, y: yy, text, color: color || '#fff', t: 0 });
   }
-  const popupColor = (pts) => (pts >= 4000 ? '#ff7a5e' : pts >= 2000 ? '#ffb347' : pts >= 1000 ? '#ffe36b' : '#ffffff');
+  const popupColor = (pts) => (pts >= 4000 ? '#ff7a5e' : pts >= 2000 ? '#ffb23e' : pts >= 1000 ? '#ffe27a' : '#eaffff');
 
   function addFx(sprite, x, y, dur, tick, o) {
     if (S.fx.length >= FX_CAP) S.fx.shift();
@@ -329,6 +349,124 @@ const Game = (() => {
   }
   const poof = (x, y) => addFx('poof', x, y, 18, 6);
   const sparkle = (x, y) => addFx('sparkle', x, y, 16, 4);
+
+  // ---- v2 cosmetic effects: particles, rings, bursts, flash, trail buffers ---------------------------------------------------
+  // Nothing in here is read by a mechanic. Spawning happens in update (fixed step) and uses ONLY the cosmetic stream S.vrng.
+  const qScale = () => [0.4, 0.7, 1][OPT.quality] * (OPT.reducedMotion ? 0.6 : 1);
+
+  function addPart(p) {
+    const L = S.parts, cap = PART_CAP[OPT.quality];
+    while (L.length >= cap) L.shift();                                      // oldest goes first (also trims the pool after a quality drop)
+    p.t = 0; p.dead = false;
+    L.push(p);
+  }
+  /** Expanding (r1 > r0) or imploding (r1 < r0) neon ring: the shockwave of a pop. */
+  function ring(x, y, col, r0, r1, dur, a) {
+    addPart({ k: 'ring', x, y, vx: 0, vy: 0, g: 0, dur, s0: r0, s1: r1, col, a: a === undefined ? 0.85 : a, rot: 0 });
+  }
+  /** A soft additive light pool (chain light) that swells and fades. */
+  function pool(x, y, col, size, dur, a) {
+    addPart({ k: 'dot', x, y, vx: 0, vy: 0, g: 0, dur, s0: size, s1: size * 1.25, col, a, rot: 0 });
+  }
+  /** n sparks / droplets / streaks flying out of (x, y); n is scaled by quality and reduced motion. */
+  function burst(x, y, col, n, speed, o) {
+    n = Math.round(n * qScale());
+    n = Math.min(n, Math.max(3, S.burstBudget));                              // a mass kill (bomb, long chain) must not blow the frame out to white
+    S.burstBudget -= n;
+    if (n <= 0) return;
+    const R = S.vrng, g = o && o.g !== undefined ? o.g : 0.035, sz = (o && o.size) || 1.5, life = (o && o.life) || 28;
+    for (let i = 0; i < n; i++) {
+      const a = R.float(0, Math.PI * 2), sp = speed * R.float(0.45, 1), m = i % 3;
+      addPart({
+        k: m === 0 ? 'spark' : m === 1 ? 'dot' : 'streak', x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 0.15, g,
+        dur: Math.max(6, Math.round(life * R.float(0.7, 1.2))), s0: m === 0 ? sz : m === 1 ? sz * 0.55 : sz * 3.4, s1: m === 0 ? sz * 0.35 : m === 1 ? sz * 0.3 : sz * 1.4,
+        col: i % 5 === 0 ? HUE.white : col, a: 0.85, rot: R.float(0, 6.28),
+      });
+    }
+  }
+  /** A single ember / mote drifting up (flames, bolts, drops). */
+  function ember(x, y, col, vx, vy, life, size) {
+    if (OPT.quality < 1) return;
+    addPart({ k: 'dot', x, y, vx, vy, g: -0.004, dur: life, s0: size, s1: size * 0.4, col, a: 0.85, rot: 0 });
+  }
+  function updateParts() {
+    const L = S.parts;
+    for (let i = 0; i < L.length; i++) {
+      const p = L[i];
+      p.t++; p.x += p.vx; p.y += p.vy; p.vy += p.g;
+      if (p.t >= p.dur) p.dead = true;
+    }
+    prune(L);
+  }
+
+  /** Full-screen flash: `dur` frames, fading from peak alpha `a` (a stronger flash already running wins).
+   *  Photosensitivity (SPEC_V2 sec. 1): never above FLASH_MAX (12 %), onsets at least FLASH_COOL (20) frames apart whoever asks
+   *  (thunder, bomb, chain light, boss death) = at most 3 per second, none at all under reduced motion. */
+  function flash(dur, a, col) {
+    if (!S || OPT.reducedMotion || !(a > 0)) return;
+    a = Math.min(a, FLASH_MAX);
+    if (S.flashCool > 0) return;
+    if (S.flashT > 0 && S.flashA * (S.flashT / S.flashDur) >= a) return;
+    S.flashT = dur; S.flashDur = dur; S.flashA = a; S.flashCol = col || '#ffffff'; S.flashCool = FLASH_COOL;
+  }
+  const flashAlpha = () => (S && S.flashT > 0 ? S.flashA * Math.min(1, S.flashT / S.flashDur) : 0);
+
+  /** Colour of a bubble's shockwave. */
+  function bubbleHue(b) {
+    switch (b.kind) {
+      case 'thunder': return HUE.amber;
+      case 'fire': return HUE.ember;
+      case 'water': return HUE.cobalt;
+      case 'letter': return HUE.white;
+      case 'trapped': { const f = b.trapTime ? b.trapT / b.trapTime : 0; return f < 0.5 ? HUE.cyan : f < 0.8 ? HUE.amber : HUE.crimson; }
+      default: return HUE.cyan;
+    }
+  }
+  /** Shockwave rings (+ droplets) for a popped bubble; `quiet` = it just expired / was released (smaller, dimmer). */
+  function popFx(b, quiet) {
+    if (!S) return;
+    const x = b.x + 8, y = b.y + 8, col = bubbleHue(b), big = b.kind === 'thunder' ? 1.6 : b.kind === 'empty' ? 1 : 1.25;
+    ring(x, y, col, 4, (quiet ? 10 : 15) * big, quiet ? 11 : 15, quiet ? 0.4 : 0.9);
+    if (quiet) return;
+    ring(x, y, HUE.white, 3, 9 * big, 10, 0.5);
+    burst(x, y, col, 7, 1.15, { size: 1.0, life: 20, g: 0.02 });
+  }
+  /** Chain light: a soft coloured pool at the kill + a faint full-screen wash (<= 12 %, rate-limited by flash()). */
+  function chainLight(x, y, col, n) {
+    if (!(n & 1)) pool(x, y, col, 2.0 + Math.min(n, 7) * 0.25, 12, 0.17);             // every other kill: pools cost fill rate
+    flash(10, 0.045 + 0.012 * n, col);
+  }
+  function killFx(e, k) {
+    if (!S) return;
+    const x = e.x + 8, y = e.y + 8, hue = e.angry ? HUE.crimson : (ENEMY_HUE[e.t] || HUE.white);
+    ring(x, y, hue, 3, 21, 16, 0.8);
+    burst(x, y, hue, 8 + Math.min(k, 4) * 2, 2.1, { size: 1.6, life: 34 });
+    if (k >= 2) chainLight(x, y, hue, k + 1);
+  }
+  const itemHue = (kind) => (kind.startsWith('pu_') ? PU_HUE[kind.slice(3)] || HUE.cyan : kind === 'moonpearl' ? HUE.white : FOOD_HUE[+kind.slice(5)] || HUE.amber);
+
+  // trail ring buffers: positions of a moving entity, one sample per update frame (WeakMap: cosmetic, entities stay plain objects)
+  const TRAILS = new WeakMap();
+  function trailPush(e) {
+    let t = TRAILS.get(e);
+    if (!t) { t = { b: new Float32Array(2 * TRAIL_N), h: 0, n: 0 }; TRAILS.set(e, t); }
+    t.h = (t.h + 1) % TRAIL_N; t.b[2 * t.h] = e.x; t.b[2 * t.h + 1] = e.y;
+    if (t.n < TRAIL_N) t.n++;
+  }
+  const TP = [0, 0];
+  /** Position `back` samples ago into TP; false when the buffer is not that deep. */
+  function trailAt(e, back) {
+    const t = TRAILS.get(e);
+    if (!t || back >= t.n) return false;
+    const i = (t.h - back + 4 * TRAIL_N) % TRAIL_N;
+    TP[0] = t.b[2 * i]; TP[1] = t.b[2 * i + 1];
+    return true;
+  }
+  function sampleTrails() {
+    if (OPT.reducedMotion || OPT.quality < 1) return;
+    for (const p of S.players) if (p.state === 'normal') trailPush(p);
+    for (const e of S.enemies) if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'dying')) trailPush(e);
+  }
 
   function addScore(pi, pts) {
     const p = S.players[pi];
@@ -418,7 +556,8 @@ const Game = (() => {
     S.bubbles = []; S.proj = []; S.bolts = []; S.drops = []; S.flames = []; S.streams = [];
     S.items = []; S.fx = []; S.popups = [];
     S.ghost = null; S.bossBubble = null; S.bossPhase = L.boss ? 'fight' : ''; S.bossPhase2 = false; S.fanfareT = 0;
-    S.hurry = false; S.hurryT = 0; S.hurryBanner = 0; S.flashT = 0; S.flashDur = 14; S.flashA = 0.85; S.thunderFlashCool = 0;
+    S.hurry = false; S.hurryT = 0; S.hurryBanner = 0; S.flashT = 0; S.flashDur = 14; S.flashA = 0; S.flashCool = 0; S.flashCol = '#ffffff';
+    S.parts = [];
     S.specialT = S.rng.int(SPECIAL_MIN, SPECIAL_MAX);
     S.thunderT = BOSS_THUNDER_PERIOD;
     S.letterT = LETTER_PERIOD;
@@ -510,6 +649,8 @@ const Game = (() => {
     p.lives = Math.max(0, p.lives - 1);
     p.power = { shoes: false, pink: false, blue: false, gold: false };
     sfx('death');
+    ring(p.x + 8, p.y + 8, PLAYER_COLOR[p.i], 4, 28, 20, 0.9);
+    burst(p.x + 8, p.y + 8, PLAYER_COLOR[p.i], 14, 2.6, { size: 1.7, life: 38 });
     resetHurry();
     return true;
   }
@@ -553,6 +694,7 @@ const Game = (() => {
   function silentPop(b) {
     b.dead = true;
     addFx('bubble_pop', b.x, b.y, POP_ANIM_FRAMES, 3);
+    popFx(b, true);
   }
 
   function capBubbles() {
@@ -585,6 +727,7 @@ const Game = (() => {
     e.state = 'trapped'; e.bubble = b; e.vx = 0; e.vy = 0;
     pickAttractor(b);
     sfx('trap');
+    ring(b.x + 8, b.y + 8, HUE.cyan, 17, 8, 10, 0.8);                    // the bubble closes around its captive
   }
 
   function releaseEnemy(b) {
@@ -707,6 +850,7 @@ const Game = (() => {
     if (b.dead) return;
     b.dead = true;
     addFx('bubble_pop', b.x, b.y, POP_ANIM_FRAMES, 3);
+    popFx(b, false);
     const cx = b.x + 8;
     switch (b.kind) {
       case 'empty':
@@ -743,6 +887,7 @@ const Game = (() => {
     e.vx = (S.rng.chance(0.5) ? 1 : -1) * S.rng.float(1.5, 2.5);
     e.vy = -3.5; e.onGround = false;
     sfx('kill', { pitch: Math.min(2 * k, 12) });                 // the chain is audible: each kill rings higher
+    killFx(e, k);
     if (chain.kills === CHAIN_LETTER_KILLS) spawnLetterBubble(chain.owner, e.x, e.y);
   }
 
@@ -806,12 +951,6 @@ const Game = (() => {
   // ================================================================================================
   // Specials: thunder / fire / water (SPEC §4.4)
   // ================================================================================================
-  /** Screen flash: `dur` frames, fading from peak alpha `a` (a stronger flash already running wins). */
-  function flash(dur, a) {
-    if (S.flashT > 0 && S.flashA * (S.flashT / S.flashDur) >= a) return;
-    S.flashT = dur; S.flashDur = dur; S.flashA = a;
-  }
-
   const activeBoss = () => S.enemies.find((e) => e.t === 'kraken' && !e.dead && e.state === 'active') || null;
 
   /** Direction a water stream should flow: toward the nearest enemy (preferring the platform it will land on),
@@ -834,7 +973,7 @@ const Game = (() => {
     const owner = S.players[chain.owner];
     if (b.kind === 'thunder') {
       sfx('thunder');
-      if (S.thunderFlashCool <= 0) { flash(3, 0.32); S.thunderFlashCool = THUNDER_FLASH_COOL; }   // chained thunder pops must not strobe the screen
+      flash(9, FLASH_MAX, '#ffe9b8');                              // chained thunder pops must not strobe the screen: flash() rate-limits every flash
       const ch = newChain(chain.owner);                            // both bolts of one pop score as one chain
       const boss = lvDef().boss ? activeBoss() : null;
       let dirs;
@@ -873,6 +1012,7 @@ const Game = (() => {
       bo.age++;
       bo.x += bo.dir * BOLT_SPEED;
       if (bo.seek) seekBoss(bo);
+      if (bo.age % 3 === 0) ember(bo.x + 8 - bo.dir * 6, bo.y + 4, HUE.amber, S.vrng.float(-0.2, 0.2), S.vrng.float(-0.25, 0.1), 12, 1.1);
       if (bo.dir > 0 ? bo.x + 16 >= C.INNER_R : bo.x <= C.INNER_L) { bo.dead = true; continue; }
       const br = [bo.x, bo.y, 16, 8];
       for (const e of S.enemies) {
@@ -890,6 +1030,7 @@ const Game = (() => {
       const d = S.drops[i];
       if (d.dead) continue;
       d.age++;
+      if (d.age % 4 === 0) ember(d.x + 4, d.y, HUE.ember, S.vrng.float(-0.15, 0.15), -0.2, 14, 1.0);
       const y0 = d.y;
       d.y += DROP_SPEED;
       const top = landingY(d.x, d.x + 8, y0 + 8, d.y + 8);
@@ -912,6 +1053,7 @@ const Game = (() => {
       const f = S.flames[i];
       if (f.dead) continue;
       if (++f.t >= FLAME_FRAMES) { f.dead = true; continue; }
+      if ((f.t + (f.x >> 3) * 5) % 18 === 0) ember(f.x + 4 + S.vrng.float(-2, 2), f.y + 6, f.t % 2 ? HUE.ember : HUE.amber, S.vrng.float(-0.1, 0.1), -0.32, 28, 0.9);
       const fr = [f.x + 1, f.y + 2, 6, 14];
       for (const e of S.enemies) {
         if (!e.dead && e.t !== 'kraken' && (e.state === 'active' || e.state === 'frozen') && hits(fr, foeRect(e))) killEnemy(e, f.chain);
@@ -1338,6 +1480,8 @@ const Game = (() => {
     e.flashT = BOSS_FLASH;
     addScore(owner, BOSS_HIT_POINTS);
     sfx('boss_hit');
+    ring(e.x + 24, e.y + 24, HUE.purple, 10, 34, 14, 0.7);
+    burst(e.x + 24, e.y + 24, HUE.purple, 8, 2.2, { size: 1.7, life: 30 });
     if (e.hp <= 0) defeatBoss(e);
   }
 
@@ -1350,6 +1494,8 @@ const Game = (() => {
     S.bossBubble = { x: e.x + 24 - 32, y: e.y + 24 - 32, age: 0 };
     sfx('trap');
     for (let i = 0; i < 8; i++) sparkle(e.x + S.rng.int(0, 40), e.y + S.rng.int(0, 40));
+    ring(e.x + 24, e.y + 24, HUE.purple, 8, 52, 22, 0.8);
+    burst(e.x + 24, e.y + 24, HUE.purple, 16, 2.6, { size: 1.9, life: 40 });
   }
 
   function updateBossBubble() {
@@ -1376,6 +1522,11 @@ const Game = (() => {
       addFx('sparkle', bb.x + 28, bb.y + 28, S.rng.int(30, 60), 4, { vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, g: 0.02 });
     }
     addFx('bubble_pop', bb.x + 24, bb.y + 24, POP_ANIM_FRAMES, 3);
+    ring(bb.x + 32, bb.y + 32, HUE.white, 8, 70, 24, 0.9);
+    ring(bb.x + 32, bb.y + 32, HUE.purple, 6, 120, 34, 0.7);
+    ring(bb.x + 32, bb.y + 32, HUE.gold, 4, 170, 44, 0.5);
+    burst(bb.x + 32, bb.y + 32, HUE.gold, 30, 3.0, { size: 1.9, life: 50 });
+    flash(16, FLASH_MAX, '#fff1d0');
     S.items.push({ kind: 'moonpearl', x: U.clamp(bb.x + 16, C.INNER_L, C.INNER_R - 32), y: PLAY_TOP, age: 0, life: 1e9, vy: 0, dead: false });
   }
 
@@ -1430,6 +1581,9 @@ const Game = (() => {
 
   function collectItem(it, p) {
     it.dead = true;
+    const ih = itemHue(it.kind), big = it.kind === 'moonpearl' ? 16 : 8;
+    ring(it.x + big, it.y + big, ih, 3, 4 + big * 1.6, 14, 0.8);
+    burst(it.x + big, it.y + big, ih, it.kind === 'moonpearl' ? 18 : 7, 1.6, { size: 1.4, life: 26 });
     if (it.kind === 'moonpearl') {
       addScore(p.i, PEARL_POINTS);
       popup(it.x + 16, it.y, PEARL_POINTS, '#ffe36b');
@@ -1462,13 +1616,19 @@ const Game = (() => {
   function freezeEnemies() {
     sfx('freeze');
     for (const e of S.enemies) {
-      if (!e.dead && e.state === 'active' && e.t !== 'kraken') { e.state = 'frozen'; e.freezeT = FREEZE_FRAMES; }
+      if (!e.dead && e.state === 'active' && e.t !== 'kraken') {
+        e.state = 'frozen'; e.freezeT = FREEZE_FRAMES;
+        ring(e.x + 8, e.y + 8, HUE.ice, 3, 17, 14, 0.8);
+        burst(e.x + 8, e.y + 8, HUE.ice, 5, 1.0, { size: 1.3, life: 24, g: 0.01 });
+      }
     }
   }
 
   function bomb(p) {
     sfx('bomb');
-    flash(14, 0.85);
+    flash(14, FLASH_MAX, '#ffd9b0');
+    ring(p.x + 8, p.y + 8, HUE.ember, 6, 160, 26, 0.7);
+    ring(p.x + 8, p.y + 8, HUE.white, 4, 100, 20, 0.5);
     const chain = newChain(p.i);
     for (const e of S.enemies) {
       if (e.dead || e.t === 'kraken') continue;
@@ -1659,8 +1819,7 @@ const Game = (() => {
     updateItems();
     updateFx();
     if (S.hurryBanner > 0) S.hurryBanner--;
-    if (S.flashT > 0) S.flashT--;
-    if (S.thunderFlashCool > 0) S.thunderFlashCool--;
+    sampleTrails();
     compact();
     checkGameOver();
   }
@@ -1675,6 +1834,10 @@ const Game = (() => {
     if (!S || S.over) return;
     const ins = [(inputs && inputs[0]) || NO_INPUT, (inputs && inputs[1]) || NO_INPUT];
     S.frame++; S.phaseT++;
+    S.burstBudget = 28;
+    if (S.flashT > 0) S.flashT--;                              // cosmetic timers run in every phase
+    if (S.flashCool > 0) S.flashCool--;
+    updateParts();
     if (S.fanfareT > 0 && --S.fanfareT === 0) {                // boss down: fanfare after the explosion, ending music queued behind it
       AUDIO.jingle('clear_boss');
       AUDIO.music('ending');
@@ -1698,85 +1861,154 @@ const Game = (() => {
   }
 
   // ================================================================================================
-  // Rendering
+  // Rendering (v2 "Abyss Glow": resolution independent, everything in logical 256 x 224 units)
   // ================================================================================================
-  const tintCache = new Map();
-  /** Cached single-colour silhouette of a sprite frame (frozen enemies get a blue tint over the sprite). */
-  function tinted(name, frame, flip, color) {
-    const key = name + '|' + frame + '|' + (flip ? 1 : 0) + '|' + color;
-    let cv = tintCache.get(key);
-    if (cv === undefined) {
-      cv = null;
-      const sz = GFX.size(name);
-      if (typeof document !== 'undefined' && sz.w > 0 && sz.h > 0) {
-        cv = document.createElement('canvas');
-        cv.width = sz.w; cv.height = sz.h;
-        const g = cv.getContext('2d');
-        GFX.draw(g, name, frame, 0, 0, { flip, white: true });
-        g.globalCompositeOperation = 'source-in';
-        g.fillStyle = color;
-        g.fillRect(0, 0, sz.w, sz.h);
-      }
-      tintCache.set(key, cv);
+  const OUTLINE = '#02040a';
+  const TAU = Math.PI * 2;
+  const RSTAT = { ghosts: 0, ambient: 0, motes: 0, parts: 0, calls: 0 };          // what the last render() drew (debug.fxStats)
+  const rgba = (hex, a) => { const n = parseInt(hex.slice(1), 16); return 'rgba(' + (n >> 16) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; };
+  const hasV2 = () => typeof GFX.particle === 'function';
+
+  /** Additive cached particle ('dot' | 'ring' | 'spark' | 'streak'), with a plain canvas fallback when the GFX module has no particle cache. */
+  function P(ctx, kind, x, y, size, col, a, rot) {
+    if (!(a > 0.004) || !(size > 0)) return;
+    if (typeof GFX.particle === 'function') { GFX.particle(ctx, kind, x, y, size, col, a > 1 ? 1 : a, rot); return; }
+    const ga = ctx.globalAlpha, go = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = ga * (a > 1 ? 1 : a);
+    if (kind === 'ring') { ctx.strokeStyle = col; ctx.lineWidth = 0.9; ctx.beginPath(); ctx.arc(x, y, size, 0, TAU); ctx.stroke(); }
+    else { ctx.fillStyle = col; ctx.beginPath(); ctx.arc(x, y, kind === 'dot' ? size * 1.8 : kind === 'streak' ? size * 0.35 : size, 0, TAU); ctx.fill(); }
+    ctx.globalCompositeOperation = go; ctx.globalAlpha = ga;
+  }
+
+  /** Soft dark pool (radial, feathered): keeps HUD glyphs legible on bright wall looks without an opaque plate. */
+  function softDark(ctx, cx, cy, rx, ry, a) {
+    ctx.save(); ctx.translate(cx, cy); ctx.scale(1, ry / rx);
+    const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+    g.addColorStop(0, 'rgba(2,4,10,' + a + ')'); g.addColorStop(0.62, 'rgba(2,4,10,' + (a * 0.72).toFixed(3) + ')'); g.addColorStop(1, 'rgba(2,4,10,0)');
+    ctx.fillStyle = g; ctx.fillRect(-rx, -rx, 2 * rx, 2 * rx);
+    ctx.restore();
+  }
+
+  /** Dark translucent band across the whole canvas width with feathered top / bottom edges (no opaque rectangle) behind a centred
+   *  banner; optional accent hairlines fading out toward the sides. */
+  function band(ctx, y0, y1, accent, a, feather) {
+    a = a === undefined ? 0.74 : a;
+    const f = feather === undefined ? 8 : feather, h = y1 - y0 + 2 * f, s = f / h;
+    const g = ctx.createLinearGradient(0, y0 - f, 0, y1 + f);
+    g.addColorStop(0, 'rgba(2,5,12,0)'); g.addColorStop(s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1 - s, 'rgba(2,5,12,' + a + ')'); g.addColorStop(1, 'rgba(2,5,12,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, y0 - f, C.W, h);
+    if (accent) {
+      const hl = ctx.createLinearGradient(0, 0, C.W, 0);
+      hl.addColorStop(0, rgba(accent, 0)); hl.addColorStop(0.18, rgba(accent, 0.55)); hl.addColorStop(0.5, rgba(accent, 0.8)); hl.addColorStop(0.82, rgba(accent, 0.55)); hl.addColorStop(1, rgba(accent, 0));
+      const go = ctx.globalCompositeOperation;
+      ctx.globalCompositeOperation = 'lighter'; ctx.fillStyle = hl;
+      ctx.fillRect(0, y0, C.W, 0.7); ctx.fillRect(0, y1 - 0.7, C.W, 0.7);
+      ctx.globalCompositeOperation = go;
     }
-    return cv;
   }
 
-  function drawTinted(ctx, name, frame, x, y, flip, color, alpha) {
-    const cv = tinted(name, frame, flip, color);
-    if (!cv) { GFX.draw(ctx, name, frame, x, y, { flip, white: true, alpha }); return; }
-    const prev = ctx.globalAlpha;
-    ctx.globalAlpha = prev * alpha;
-    ctx.drawImage(cv, Math.round(x), Math.round(y));
-    ctx.globalAlpha = prev;
-  }
-
-  const auraCache = new Map();
-  const AURA_RING = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
-  /** Cached warm-orange silhouette of a sprite frame grown by 1 px in all 8 directions (one canvas, so the pulse alpha is
-   *  uniform along the whole ring), 2 px larger than the sprite: draw it at (x - 1, y - 1). */
-  function aura(name, frame, flip) {
-    const key = name + '|' + frame + '|' + (flip ? 1 : 0);
-    let cv = auraCache.get(key);
-    if (cv === undefined) {
-      cv = null;
-      const sil = tinted(name, frame, flip, '#ffa21f');
-      if (sil) {
-        cv = document.createElement('canvas');
-        cv.width = sil.width + 2; cv.height = sil.height + 2;
-        const g = cv.getContext('2d');
-        for (const [dx, dy] of AURA_RING) g.drawImage(sil, 1 + dx, 1 + dy);
-      }
-      auraCache.set(key, cv);
+  // ---- ambient: drifting plankton (stateless: a pure function of S.frame, so freeze / pause / step all stay consistent) --------------
+  const AMB = (() => {
+    let s = 0x2545f491;
+    const rnd = () => { s = (Math.imul(s, 1664525) + 1013904223) >>> 0; return s / 4294967296; };
+    const out = [];
+    for (let i = 0; i < 80; i++) out.push({ x: rnd() * 224, y: rnd() * 208, vy: 0.03 + rnd() * 0.1, dx: (rnd() - 0.5) * 0.04, ph: rnd() * TAU, sz: 0.32 + rnd() * 0.4, w: 0.012 + rnd() * 0.03, c: i % 6 });
+    return out;
+  })();
+  function drawAmbient(ctx, level) {
+    const n = AMBIENT_N[OPT.quality] >> (OPT.reducedMotion ? 1 : 0), f = S.frame;
+    RSTAT.ambient = n;
+    const th = typeof GFX.theme === 'function' ? GFX.theme(level) : null;
+    const cols = th ? [th.glow || HUE.cyan, '#bfe8ff', th.accent || HUE.cyan, th.glow || HUE.cyan, '#d9f4ff', th.accent2 || HUE.violet] : [HUE.cyan, '#bfe8ff', HUE.cyan, HUE.cyan, '#d9f4ff', HUE.violet];
+    const plain = OPT.quality < 1;                                          // quality 0: plain additive specks instead of cached glow dots
+    const go = ctx.globalCompositeOperation;
+    if (plain) ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < n; i++) {
+      const a = AMB[i];
+      const x = C.INNER_L + (((a.x + f * a.dx + Math.sin(f * a.w + a.ph) * 4) % 224) + 224) % 224;
+      const y = MAP_Y + (((a.y - f * a.vy) % MAP_H) + MAP_H) % MAP_H;
+      const al = 0.14 + 0.32 * (0.5 + 0.5 * Math.sin(f * 0.035 + a.ph * 3));
+      if (plain) { ctx.fillStyle = rgba(cols[a.c], (al * 0.8).toFixed(2)); ctx.fillRect(x - 0.45, y - 0.45, 0.9, 0.9); }
+      else P(ctx, 'dot', x, y, a.sz, cols[a.c], al);
     }
-    return cv;
+    if (plain) ctx.globalCompositeOperation = go;
+  }
+  /** Slow light motes orbiting floating bubbles. */
+  function drawMotes(ctx) {
+    RSTAT.motes = 0;
+    if (OPT.quality < 1) return;
+    const cap = MOTE_MAX >> (OPT.reducedMotion ? 1 : 0);
+    let n = 0;
+    for (const b of S.bubbles) {
+      if (b.dead || b.state === 'shot') continue;
+      if (n++ >= cap) break;
+      RSTAT.motes = n;
+      const a = b.age * 0.035 + n * 2.1, r = 9.5 + 1.5 * Math.sin(b.age * 0.05 + n);
+      P(ctx, 'dot', b.x + 8 + Math.cos(a) * r, b.y + 8 + Math.sin(a) * r * 0.85, 0.6, bubbleHue(b), 0.5);
+    }
+  }
+  /** Shockwaves are stroked directly (crisp at any radius, and cheap: cost ~ circumference instead of the sprite's whole bounding box). */
+  function bigRing(ctx, x, y, r, col, a) {
+    const go = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.beginPath(); ctx.arc(x, y, r, 0, TAU);
+    ctx.lineWidth = 3.2; ctx.strokeStyle = rgba(col, (0.16 * a).toFixed(3)); ctx.stroke();
+    ctx.lineWidth = 1.3; ctx.strokeStyle = rgba(col, (0.55 * a).toFixed(3)); ctx.stroke();
+    ctx.lineWidth = 0.55; ctx.strokeStyle = 'rgba(255,255,255,' + (0.6 * a).toFixed(3) + ')'; ctx.stroke();
+    ctx.globalCompositeOperation = go;
+  }
+  function drawParts(ctx) {
+    RSTAT.parts = S.parts.length;
+    for (const p of S.parts) {
+      const u = p.t / p.dur, k = 1 - u;
+      switch (p.k) {
+        case 'ring': {
+          const r = p.s0 + (p.s1 - p.s0) * (1 - k * k), a = p.a * k * Math.sqrt(k);
+          if (r >= 5) bigRing(ctx, p.x, p.y, r, p.col, a); else P(ctx, 'ring', p.x, p.y, r, p.col, a);     // direct strokes: a ring sprite's blit costs its whole bounding box
+          break;
+        }
+        case 'dot': P(ctx, 'dot', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * k); break;
+        case 'spark': P(ctx, 'spark', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * Math.min(1, k * 2.2) * (0.75 + 0.25 * Math.sin(p.t * 1.9 + p.rot * 5)), p.rot + p.t * 0.12); break;
+        default: P(ctx, 'streak', p.x, p.y, p.s0 + (p.s1 - p.s0) * u, p.col, p.a * k, Math.atan2(p.vy, p.vx)); break;
+      }
+    }
   }
 
-  /** Angry enemies (hurry up) get a pulsing yellow-orange rim behind the sprite so they stay readable
-   *  on red / crimson tiles and against their own crimson body colour. Alpha pulses 0.35 .. 0.70 (period 40 frames). */
-  function drawAngryAura(ctx, name, frame, x, y, flip) {
-    const cv = aura(name, frame, flip);
-    if (!cv) return;
-    const prev = ctx.globalAlpha;
-    ctx.globalAlpha = prev * (0.525 + 0.175 * Math.sin((S.frame * Math.PI * 2) / 40));
-    ctx.drawImage(cv, Math.round(x) - 1, Math.round(y) - 1);
-    ctx.globalAlpha = prev;
+  // ---- sprites -------------------------------------------------------------------------------------------------------------------
+  /** Motion trail: faint additive ghosts of the baked sprite at its earlier positions (only while it really moves). */
+  function drawGhosts(ctx, e, name, frame, flip) {
+    if (OPT.reducedMotion || OPT.quality < 1) return;
+    const n = OPT.quality >= 2 ? 2 : 1;
+    let on = false, go = '';
+    for (let g = 0; g < n; g++) {
+      if (!trailAt(e, TRAIL_BACK[g])) break;
+      const dx = TP[0] - e.x, dy = TP[1] - e.y;
+      if (dx * dx + dy * dy < 4 + g * 2) continue;
+      if (!on) { go = ctx.globalCompositeOperation; ctx.globalCompositeOperation = 'lighter'; on = true; }
+      RSTAT.ghosts++;
+      GFX.draw(ctx, name, frame, TP[0], TP[1], { flip, alpha: TRAIL_A[g] });
+    }
+    if (on) ctx.globalCompositeOperation = go;
   }
 
   function drawPlayer(ctx, p) {
     if (p.state === 'out') return;
     const pre = 'p' + (p.i + 1);
-    let name, frame = 0;
+    let name, frame = 0, alpha = 1;
     if (p.state === 'dying') { name = pre + '_die'; frame = Math.floor(p.dieT / 6) % 4; }
     else {
-      if (p.inv > 0 && Math.floor(p.inv / 3) % 2 === 0) return;               // blink while invulnerable
+      if (p.inv > 0) {                                                          // invulnerable: blink (steady half-bright under reduced motion)
+        if (OPT.reducedMotion) alpha = 0.55; else if (Math.floor(p.inv / 3) % 2 === 0) alpha = 0.3;
+      }
       if (p.stunT > 0) { name = pre + '_stun'; frame = Math.floor(p.animT / 8) % 2; }
       else if (p.shootT > 0) { name = pre + '_shoot'; frame = p.shootT > 4 ? 1 : 0; }
       else if (!p.onGround) name = pre + (p.vy < 0 ? '_jump' : '_fall');
       else if (p.vx !== 0) { name = pre + '_walk'; frame = Math.floor(p.animT / 5) % 4; }
       else { name = pre + '_idle'; frame = p.animT % 180 >= 172 ? 1 : 0; }
+      drawGhosts(ctx, p, name, frame, p.face < 0);
+      if (OPT.quality >= 2) P(ctx, 'dot', p.x + 8, p.y + 9, 2.6, PLAYER_COLOR[p.i], 0.14 * alpha);        // the twin lights the water around it
     }
-    GFX.draw(ctx, name, frame, p.x, p.y, { flip: p.face < 0 });
+    GFX.draw(ctx, name, frame, p.x, p.y, alpha === 1 ? { flip: p.face < 0 } : { flip: p.face < 0, alpha });
   }
 
   function actionPose(base, e) { return e.angry && GFX.has(base + '_angry') ? base + '_angry' : base; }
@@ -1789,31 +2021,42 @@ const Game = (() => {
     let name, frame = 0;
     if (e.state === 'dying') { name = e.t + '_die'; frame = Math.floor(e.dieT / 5) % 4; o.flip = false; }
     else if (e.state === 'carried') { name = e.t + '_trapped'; frame = Math.floor(S.frame / 6) % 2; }
-    // action poses have *_angry twins (GFX wave 3) so the angry cue never drops out; the twin is looked up only for these three
+    // action poses have *_angry twins so the angry cue never drops out; the twin is looked up only for these three
     else if (e.t === 'crabbit' && e.pauseT > 0) name = actionPose('crabbit_throw', e);
     else if (e.t === 'springle' && e.onGround && e.sqT > 0) name = actionPose('springle_squash', e);
     else if (e.t === 'glimmer' && e.poseT > 0) name = actionPose('glimmer_fire', e);
     else { name = e.t + (e.angry ? '_angry' : '_move'); frame = Math.floor(e.animT / 6) % 4; }
     if (e.state === 'enter') o.alpha = Math.min(1, Math.max(0, e.enterT) / 30);
     if (e.state === 'frozen') { frame = 0; drawFrozen(ctx, e, name, frame, o.flip); return; }
-    if (e.angry && e.state === 'active') drawAngryAura(ctx, name, frame, e.x, e.y, o.flip);
+    if (e.state === 'active' || e.state === 'dying') drawGhosts(ctx, e, name, frame, o.flip);
+    // the angry look (crimson contour, steam, brows, pulsing heat halo) is baked into the *_angry frames (the K4 aura is gone); Game adds only a faint steady red light pool
+    if (e.angry && e.state === 'active' && OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.2, HUE.crimson, 0.1);                   // steady (not pulsing: no K4 aura)
     GFX.draw(ctx, name, frame, e.x, e.y, o);
   }
 
-  const FROZEN_EDGE = [[-1, 0], [1, 0], [0, -1], [0, 1]];
-  /** Ice look for the clock power-up: pale-cyan 1 px outline (silhouette offset +-1), a white-blue wash over the
-   *  sprite (so even the blue Glimmer changes) and twinkling pixels. Blinks off during the last second.
-   *  The twinkle positions come from an integer hash of the frame: rendering never touches the game RNG. */
+  /** Ice look for the clock power-up: the sprite tinted icy cyan (GFX tint), a cold light pool and twinkling sparks. Blinks off during
+   *  the last second (a steady fade under reduced motion). Twinkle positions come from an integer hash of the frame: render never
+   *  touches any RNG. Without GFX.particle: a white silhouette wash instead. */
   function drawFrozen(ctx, e, name, frame, flip) {
-    if (e.freezeT <= 60 && Math.floor(e.freezeT / 4) % 2 === 1) { GFX.draw(ctx, name, frame, e.x, e.y, { flip }); return; }
-    for (const [dx, dy] of FROZEN_EDGE) drawTinted(ctx, name, frame, e.x + dx, e.y + dy, flip, '#aef0ff', 1);
-    GFX.draw(ctx, name, frame, e.x, e.y, { flip });
-    drawTinted(ctx, name, frame, e.x, e.y, flip, '#e4f6ff', 0.7);
-    const k = Math.floor(S.frame / 5);
-    for (let i = 0; i < 3; i++) {
-      const h = (Math.imul(k + i * 31 + (e.sx | 0), 2654435761) >>> 0);
-      ctx.fillStyle = (k + i) % 2 ? '#ffffff' : '#8fe6ff';
-      ctx.fillRect(Math.round(e.x) + 2 + (h % 12), Math.round(e.y) + 2 + ((h >>> 8) % 12), 1, 1);
+    const last = e.freezeT <= 60;
+    if (last && !OPT.reducedMotion && Math.floor(e.freezeT / 4) % 2 === 1) { GFX.draw(ctx, name, frame, e.x, e.y, { flip }); return; }
+    if (!hasV2()) {
+      GFX.draw(ctx, name, frame, e.x, e.y, { flip });
+      GFX.draw(ctx, name, frame, e.x, e.y, { flip, white: true, alpha: 0.5 });
+      return;
+    }
+    if (OPT.quality >= 2) P(ctx, 'dot', e.x + 8, e.y + 9, 3.0, HUE.ice, 0.18);
+    const fa = last && OPT.reducedMotion ? 0.7 : 1;
+    GFX.draw(ctx, name, frame, e.x, e.y, { flip, tint: '#4fc8ff', alpha: fa });   // icy cyan body ...
+    const go = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = 'lighter';
+    GFX.draw(ctx, name, frame, e.x, e.y, { flip, white: true, alpha: (e.t === 'glimmer' ? 0.24 : 0.1) * fa });                         // ... with a frosty white sheen on top (integrator: 0.2 -> 0.1: the colour-blend tint keeps its detail; with the bloom a stronger sheen blew the light bodies out to white)
+    ctx.globalCompositeOperation = go;
+    const step = OPT.reducedMotion ? 15 : 5, k = Math.floor(S.frame / step), ns = OPT.quality >= 1 ? 3 : 1;
+    const u = (S.frame % step) / step;
+    for (let i = 0; i < ns; i++) {
+      const h = Math.imul(k + i * 31 + (e.sx | 0), 2654435761) >>> 0;
+      P(ctx, 'spark', e.x + 1 + (h % 14), e.y + 1 + ((h >>> 8) % 14), 1.0 + 0.7 * Math.sin(u * Math.PI), (k + i) % 2 ? '#ffffff' : '#8fe6ff', 0.4 + 0.55 * Math.sin(u * Math.PI));
     }
   }
 
@@ -1822,9 +2065,13 @@ const Game = (() => {
     const name = e.angry || wind ? 'kraken_angry' : 'kraken';
     const fr = Math.floor(e.animT / 14) % 2;
     const o = { flip: false, alpha: e.state === 'enter' ? Math.min(1, Math.max(0, e.enterT) / 30) : 1 };
+    if (OPT.quality >= 2) P(ctx, 'dot', e.x + 24, e.y + 26, 6, e.angry ? HUE.crimson : HUE.purple, 0.12);
     GFX.draw(ctx, name, fr, e.x, e.y, o);
     if (e.flashT > 0) GFX.draw(ctx, name, fr, e.x, e.y, { white: true });
-    else if (wind && Math.floor(e.inkT / 3) % 2 === 0) GFX.draw(ctx, name, fr, e.x, e.y, { white: true, alpha: 0.55 });
+    else if (wind) {
+      if (OPT.reducedMotion) GFX.draw(ctx, name, fr, e.x, e.y, { white: true, alpha: 0.3 });
+      else if (Math.floor(e.inkT / 3) % 2 === 0) GFX.draw(ctx, name, fr, e.x, e.y, { white: true, alpha: 0.55 });
+    }
   }
 
   function drawBubble(ctx, b) {
@@ -1834,6 +2081,8 @@ const Game = (() => {
       GFX.draw(ctx, 'bubble_shot', Math.min(2, Math.floor((b.dist / b.range) * 3)), b.x, b.y);
       return;
     }
+    // end-of-life warning of special / letter bubbles: blink (steady half-bright under reduced motion)
+    const dying = b.life - b.age < 90, fade = !dying ? 1 : OPT.reducedMotion ? 0.7 : Math.floor(t / 4) % 2 ? 0.5 : 1;
     switch (b.kind) {
       case 'trapped': {
         const e = b.enemy;
@@ -1848,21 +2097,28 @@ const Game = (() => {
         else GFX.draw(ctx, 'bubble', Math.floor(t / 16) % 2, b.x, b.y);
         break;
       case 'letter':
-        GFX.draw(ctx, 'bubble_letter', Math.floor(t / 12) % 2, b.x, b.y, { alpha: b.life - b.age < 90 && Math.floor(t / 4) % 2 ? 0.5 : 1 });
-        GFX.text(ctx, b.letter, b.x + 8, b.y + 4, '#ffffff', { align: 'center' });
+        GFX.draw(ctx, 'bubble_letter', Math.floor(t / 12) % 2, b.x, b.y, { alpha: fade });
+        // integrator: SPEC_V2 documents only {align, scale, shadow, outline, glow} for GFX.text -> fade through ctx.globalAlpha (GFX.text multiplies it)
+        { const ga = ctx.globalAlpha; ctx.globalAlpha = ga * fade; GFX.text(ctx, b.letter, b.x + 8, b.y + 4, '#ffffff', { align: 'center' }); ctx.globalAlpha = ga; }
         break;
       default:
-        GFX.draw(ctx, 'bubble_' + b.kind, Math.floor(t / 12) % 2, b.x, b.y, { alpha: b.life - b.age < 90 && Math.floor(t / 4) % 2 ? 0.5 : 1 });
+        GFX.draw(ctx, 'bubble_' + b.kind, Math.floor(t / 12) % 2, b.x, b.y, { alpha: fade });
     }
   }
 
   function drawItem(ctx, it) {
     if (it.dead) return;
-    if (it.kind === 'moonpearl') { GFX.draw(ctx, 'moonpearl', Math.floor(it.age / 10) % 2, it.x, it.y); return; }
+    const pearl = it.kind === 'moonpearl';
     const left = it.life - it.age;
-    if (left < FOOD_BLINK && Math.floor(left / 4) % 2) return;
+    let a = 1;
+    if (!pearl && left < FOOD_BLINK) a = OPT.reducedMotion ? 0.7 : 0.3 + 0.7 * (0.5 + 0.5 * Math.cos(left * Math.PI / 12));    // expiry cue: smooth pulse, never a hard strobe
     const bob = it.kind.startsWith('pu_') ? Math.round(Math.sin(it.age / 10) * 1.5) : 0;
-    GFX.draw(ctx, it.kind, 0, it.x, it.y + bob);
+    const pulse = 0.5 + 0.5 * Math.sin(it.age * 0.11 + it.x * 0.05), hue = itemHue(it.kind);
+    if (pearl) P(ctx, 'dot', it.x + 16, it.y + 17, 4.6 + pulse * 0.8, hue, (0.16 + 0.16 * pulse) * a);
+    else P(ctx, 'dot', it.x + 8, it.y + 9 + bob, 2.6 + pulse * 0.6, hue, (0.2 + 0.22 * pulse) * a);        // glow pulse
+    const gl = 0.5 + 0.5 * pulse;                                                                       // the sprite's own halo breathes with the pulse (GFX {glow}; plain draw without v2 GFX)
+    if (pearl) GFX.draw(ctx, 'moonpearl', Math.floor(it.age / 10) % 2, it.x, it.y, { glow: gl });
+    else GFX.draw(ctx, it.kind, 0, it.x, it.y + bob, a === 1 ? { glow: gl } : { alpha: a, glow: gl });
   }
 
   function drawFx(ctx, f) {
@@ -1895,22 +2151,25 @@ const Game = (() => {
     for (const q of S.proj) GFX.draw(ctx, q.type, Math.floor(q.age / 4) % 2, q.x, q.y);
     for (const bo of S.bolts) {                                           // bolt with two fading afterimages
       const fr = Math.floor(bo.age / 2) % 2, flip = bo.dir < 0;
+      if (OPT.quality >= 1) P(ctx, 'dot', bo.x + 8, bo.y + 4, 2.4, HUE.amber, 0.2);
       GFX.draw(ctx, 'bolt', fr, bo.x - bo.dir * 12, bo.y, { flip, alpha: 0.25 });
       GFX.draw(ctx, 'bolt', fr, bo.x - bo.dir * 6, bo.y, { flip, alpha: 0.5 });
       GFX.draw(ctx, 'bolt', fr, bo.x, bo.y, { flip });
     }
-    for (const d of S.drops) GFX.draw(ctx, 'fire_drop', Math.floor(d.age / 3) % 2, d.x, d.y);
+    for (const d of S.drops) { P(ctx, 'dot', d.x + 4, d.y + 4, 1.8, HUE.ember, 0.2); GFX.draw(ctx, 'fire_drop', Math.floor(d.age / 3) % 2, d.x, d.y); }
     for (const f of S.fx) drawFx(ctx, f);
-    if (S.flashT > 0) {
-      ctx.globalAlpha = S.flashA * Math.min(1, S.flashT / S.flashDur);
-      ctx.fillStyle = '#ffffff';
+    drawMotes(ctx);
+    drawParts(ctx);
+    if (S.flashT > 0) {                                                    // chain / thunder / bomb light: a faint tinted wash, <= FLASH_MAX
+      ctx.globalAlpha = flashAlpha();
+      ctx.fillStyle = S.flashCol;
       ctx.fillRect(0, MAP_Y, C.W, MAP_H);
       ctx.globalAlpha = 1;
     }
   }
 
-  /** Score / life popups, drawn after the banner plates (renderOverlays) so a popup rising through a banner band stays
-   *  fully bright and unsliced. Clipped to the playfield. */
+  /** Score / life popups, drawn after the banner bands (renderOverlays) so a popup rising through a band stays fully bright.
+   *  Clipped to the playfield; fades out over its last 12 frames. */
   function drawPopups(ctx) {
     if (!S.popups.length) return;
     ctx.save();
@@ -1919,32 +2178,37 @@ const Game = (() => {
     ctx.clip();
     for (const q of S.popups) {
       const x = U.clamp(q.x, 16 + (q.text.length * 4), 240 - q.text.length * 4);
-      GFX.text(ctx, q.text, x, q.y, q.color, { align: 'center', outline: OUTLINE });
+      const a = q.t > 28 ? Math.max(0, (40 - q.t) / 12) : 1;
+      if (OPT.quality >= 2) P(ctx, 'dot', x, q.y + 4.5, 1.9, q.color, 0.14 * a);
+      { const ga = ctx.globalAlpha; if (a !== 1) ctx.globalAlpha = ga * a;      // integrator: fade via globalAlpha (contract: no `alpha` text option)
+        GFX.text(ctx, q.text, x, q.y, q.color, { align: 'center', outline: OUTLINE }); ctx.globalAlpha = ga; }
     }
     ctx.restore();
   }
 
-  const PLATE = 'rgba(6,4,20,0.72)', HUD_PLATE = 'rgba(14,6,28,0.78)', OUTLINE = '#1b1033';
-
-  /** Round number on the left wall: white on a dark plate with a theme-coloured underline (legible on every wall look). */
+  /** Round number on the left wall: thin glowing digits on a soft dark pool (legible on every wall look). */
   function drawRoundNumber(ctx, n, y) {
-    ctx.fillStyle = HUD_PLATE;
-    ctx.fillRect(0, y - 2, 16, 12);
-    ctx.fillStyle = GFX.theme(n - 1).accent2;
-    ctx.fillRect(1, y + 9, 14, 1);
-    GFX.text(ctx, String(n).padStart(2, '0'), 0, y, '#ffffff');
+    softDark(ctx, 8, y + 4, 12, 9, 0.66);
+    GFX.text(ctx, String(n).padStart(2, '0'), 0, y, '#cffaff', { outline: OUTLINE });
+    const go = ctx.globalCompositeOperation;
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.fillStyle = rgba(GFX.theme(n - 1).accent2, 0.6);
+    ctx.fillRect(2, y + 9.2, 12, 0.6);
+    ctx.globalCompositeOperation = go;
   }
 
-  /** Round backdrop: GFX.bgCanvas (subtle themed art) when the GFX module has it, else the flat theme colour. */
+  /** Round backdrop: GFX.bgCanvas (drawn at 256 x 208 logical px, whatever its backing size) when the GFX module has it, else the flat theme colour. */
   function drawBackdrop(ctx, levelIndex, y) {
-    if (typeof GFX.bgCanvas === 'function') { ctx.drawImage(GFX.bgCanvas(levelIndex), 0, y); return; }
+    if (typeof GFX.bgCanvas === 'function') { ctx.drawImage(GFX.bgCanvas(levelIndex), 0, y, C.W, MAP_H); return; }
     ctx.fillStyle = GFX.theme(levelIndex).bg;
     ctx.fillRect(0, y, C.W, MAP_H);
   }
 
   function renderPlayfield(ctx) {
     drawBackdrop(ctx, S.level - 1, MAP_Y);
-    ctx.drawImage(GFX.levelCanvas(S.level - 1, S.map), 0, MAP_Y);
+    drawAmbient(ctx, S.level - 1);
+    ctx.drawImage(GFX.levelCanvas(S.level - 1, S.map), 0, MAP_Y, C.W, MAP_H);
+    if (OPT.quality >= 2 && typeof GFX.levelGlints === 'function') GFX.levelGlints(ctx, S.level - 1, S.map, S.frame / 60);   // travelling glints on the lit top faces
     drawWorldEntities(ctx);
   }
 
@@ -1954,13 +2218,14 @@ const Game = (() => {
     const off = Math.round(k * MAP_H);
     const from = LEVELS[tr.from - 1], to = LEVELS[tr.to - 1];
     drawBackdrop(ctx, tr.from - 1, MAP_Y - off);
-    ctx.drawImage(GFX.levelCanvas(tr.from - 1, from.map), 0, MAP_Y - off);
+    ctx.drawImage(GFX.levelCanvas(tr.from - 1, from.map), 0, MAP_Y - off, C.W, MAP_H);
     drawBackdrop(ctx, tr.to - 1, MAP_Y + MAP_H - off);
-    ctx.drawImage(GFX.levelCanvas(tr.to - 1, to.map), 0, MAP_Y + MAP_H - off);
+    ctx.drawImage(GFX.levelCanvas(tr.to - 1, to.map), 0, MAP_Y + MAP_H - off, C.W, MAP_H);
     drawRoundNumber(ctx, tr.from, MAP_Y + 4 - off);
     drawRoundNumber(ctx, tr.to, MAP_Y + 4 + MAP_H - off);
     for (const p of S.players) {                                           // players ride bubbles to their spawn
       if (p.state !== 'normal') continue;
+      P(ctx, 'dot', p.x + 8, p.y + 9, 3.0, PLAYER_COLOR[p.i], 0.13);
       GFX.draw(ctx, 'p' + (p.i + 1) + '_idle', 0, p.x, p.y, { flip: p.face < 0 });
       GFX.draw(ctx, 'bubble', Math.floor(tr.t / 12) % 2, p.x, p.y);
     }
@@ -1968,116 +2233,141 @@ const Game = (() => {
 
   const pad6 = (n) => String(Math.max(0, Math.floor(n))).padStart(6, '0');
 
+  /** A life pearl: glowing core + faint ring in the player's colour. */
+  function drawPearl(ctx, x, y, i) {
+    const br = 0.9 + 0.1 * Math.sin(S.frame / 28 + y * 0.3);
+    P(ctx, 'ring', x, y, 2.9, PLAYER_COLOR[i], 0.65 * br);
+    P(ctx, 'dot', x, y, 1.35, PLAYER_HOT[i], 0.95 * br);
+  }
+
   function renderHud(ctx) {
     const p1 = S.players[0], p2 = S.players[1];
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = '#02040a';
     ctx.fillRect(0, 0, C.W, MAP_Y);
     GFX.text(ctx, '1UP', 16, 0, PLAYER_COLOR[0]);
-    GFX.text(ctx, 'HI SCORE', 128, 0, '#ff6a5e', { align: 'center' });
-    if (p2) GFX.text(ctx, '2UP', 240, 0, PLAYER_COLOR[1], { align: 'right' });
+    GFX.text(ctx, 'HI SCORE', 128, 0, HUE.amber, { align: 'center' });
+    P(ctx, 'dot', 12.2, 4.2, 0.7, PLAYER_COLOR[0], 0.9);
+    if (p2) { GFX.text(ctx, '2UP', 240, 0, PLAYER_COLOR[1], { align: 'right' }); P(ctx, 'dot', 243.8, 4.2, 0.7, PLAYER_COLOR[1], 0.9); }
     else if (S.joinHint && Math.floor(S.frame / 30) % 2 === 0) GFX.text(ctx, S.joinHint, 240, 0, PLAYER_COLOR[1], { align: 'right' });
-    GFX.text(ctx, pad6(p1.score), 64, 8, '#ffffff', { align: 'right' });
-    GFX.text(ctx, pad6(Math.max(S.hiScore, p1.score, p2 ? p2.score : 0)), 152, 8, '#ffffff', { align: 'right' });
-    if (p2) GFX.text(ctx, pad6(p2.score), 240, 8, '#ffffff', { align: 'right' });
+    GFX.text(ctx, pad6(p1.score), 64, 8, PLAYER_HOT[0], { align: 'right' });
+    GFX.text(ctx, pad6(Math.max(S.hiScore, p1.score, p2 ? p2.score : 0)), 152, 8, '#fff1d6', { align: 'right' });
+    if (p2) GFX.text(ctx, pad6(p2.score), 240, 8, PLAYER_HOT[1], { align: 'right' });
     if (S.phase !== 'transition') drawRoundNumber(ctx, S.level, MAP_Y + 4);
     S.players.forEach((p, i) => {
-      const x = i === 0 ? 4 : 244;
+      const x = i === 0 ? 8 : 248;
       const reserve = Math.min(8, Math.max(0, p.lives - 1));
-      if (reserve > 0) {                                                    // lives column on a dark plate
-        ctx.fillStyle = HUD_PLATE;
-        ctx.fillRect(i === 0 ? 1 : 241, 204 - (reserve - 1) * 10 - 2, 14, (reserve - 1) * 10 + 12);
+      if (reserve > 0) {                                                    // lives: small glowing pearls up the foot of the wall
+        softDark(ctx, x, 207 - (reserve - 1) * 3.5, 8, (reserve * 7 + 6) / 2, 0.5);
+        for (let k = 0; k < reserve; k++) drawPearl(ctx, x, 207 - k * 7, i);
       }
-      for (let k = 0; k < reserve; k++) GFX.draw(ctx, 'p' + (i + 1) + '_icon', 0, x, 204 - k * 10);
-      ctx.fillStyle = HUD_PLATE;                                            // EXTEND letters down the side walls
-      ctx.fillRect(i === 0 ? 1 : 241, MAP_Y + 4 * T - 1, 14, 6 * T + 2);
-      const extending = S.phase === 'extend' && S.extend && S.extend.pi === i;   // all six lit and flashing
-      const lit = extending && Math.floor(S.phaseT / 4) % 2 === 0 ? '#ffffff' : PLAYER_COLOR[i];
+      softDark(ctx, x, MAP_Y + 4 * T + 3 * T - 1, 9, 31, 0.5);              // EXTEND letters down the side walls: lit = ringed + glowing, dim = faint
+      const extending = S.phase === 'extend' && S.extend && S.extend.pi === i;   // all six lit and pulsing (slowly; steady under reduced motion)
+      const hotNow = extending && !OPT.reducedMotion && Math.floor(S.phaseT / 14) % 2 === 0;
       for (let k = 0; k < 6; k++) {
-        const y = MAP_Y + (4 + k) * T, cx = i === 0 ? 8 : 248;
-        if (p.letters[k]) GFX.text(ctx, LETTERS[k], cx, y, lit, { align: 'center' });
-        else GFX.text(ctx, LETTERS[k], cx, y, 'rgba(255,255,255,0.5)', { align: 'center', shadow: false });
+        const y = MAP_Y + (4 + k) * T;
+        if (p.letters[k]) {
+          P(ctx, 'dot', x, y + 4, 3.4, PLAYER_COLOR[i], 0.2);
+          P(ctx, 'ring', x, y + 4, 3.7, PLAYER_COLOR[i], 0.55);
+          GFX.text(ctx, LETTERS[k], x, y, hotNow ? '#ffffff' : PLAYER_HOT[i], { align: 'center' });
+        } else GFX.text(ctx, LETTERS[k], x, y, 'rgba(120,205,230,0.36)', { align: 'center', shadow: false, glow: false });
       }
     });
   }
 
-  /** Framed boss gauge on a dark plate in the ceiling row: crown icon, gold frame, quarter ticks, white flash on a hit.
-   *  Hidden during the intro. */
+  /** Boss gauge: a thin neon bar in the ceiling row with a glowing crown glyph; white flash on a hit. Hidden during the intro. */
+  function crownGlyph(ctx, x, y, col) {
+    const pts = [[0, 5.5], [0, 1.2], [2.6, 3.4], [5, 0], [7.4, 3.4], [10, 1.2], [10, 5.5]];
+    ctx.save();
+    ctx.translate(x, y); ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]); for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]); ctx.closePath();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.strokeStyle = rgba(col, 0.2); ctx.lineWidth = 3.4; ctx.stroke();
+    ctx.strokeStyle = rgba(col, 0.55); ctx.lineWidth = 1.7; ctx.stroke();
+    ctx.strokeStyle = 'rgba(255,248,225,0.95)'; ctx.lineWidth = 0.7; ctx.stroke();
+    ctx.restore();
+    for (const j of [[0, 1.2], [5, 0], [10, 1.2]]) P(ctx, 'dot', x + j[0], y + j[1], 0.7, HUE.white, 0.9);
+  }
   function renderBossBar(ctx) {
     const boss = S.enemies.find((e) => e.t === 'kraken' && !e.dead);
     if (!boss || S.phase === 'intro' || boss.state === 'enter') return;
     const hit = boss.flashT > 0;
-    ctx.fillStyle = 'rgba(6,4,20,0.92)';
-    ctx.fillRect(54, MAP_Y, 148, 10);
-    const crown = [[0, 0], [4, 0], [8, 0], [0, 1], [1, 1], [3, 1], [4, 1], [5, 1], [7, 1], [8, 1]];   // 9x4 crown, 3 points
-    ctx.fillStyle = '#ffd24a';
-    for (const [cx, cy] of crown) ctx.fillRect(58 + cx, MAP_Y + 3 + cy, 1, 1);
-    ctx.fillRect(58, MAP_Y + 5, 9, 1);
-    ctx.fillStyle = '#c9892a';
-    ctx.fillRect(58, MAP_Y + 6, 9, 1);
-    ctx.fillStyle = '#ff4a6a';
-    ctx.fillRect(62, MAP_Y + 5, 1, 1);
-    const x = 70, y = MAP_Y + 2, w = 128, h = 5;                            // gauge interior at (x+1, y+1), frame around it
-    ctx.fillStyle = hit ? '#ffffff' : '#ffd24a';
-    ctx.fillRect(x, y, w + 2, 1); ctx.fillRect(x, y + h + 1, w + 2, 1); ctx.fillRect(x, y, 1, h + 2); ctx.fillRect(x + w + 1, y, 1, h + 2);
-    ctx.fillStyle = '#1b1033';
-    ctx.fillRect(x + 1, y + 1, w, h);
-    const fw = Math.round((w * Math.max(0, boss.hp)) / S.bossMax);
-    ctx.fillStyle = hit ? '#ffffff' : boss.angry ? '#ff3b5c' : '#c05cff';
-    ctx.fillRect(x + 1, y + 1, fw, h);
-    ctx.fillStyle = hit ? '#ffffff' : boss.angry ? '#ff9aa8' : '#e6b8ff';   // top highlight row
-    ctx.fillRect(x + 1, y + 1, fw, 1);
-    ctx.fillStyle = 'rgba(27,16,51,0.7)';
-    for (let q = 1; q <= 3; q++) ctx.fillRect(x + 1 + Math.round((w * q) / 4), y + 1, 1, h);
+    const x0 = 74, x1 = 198, y = MAP_Y + 5.5;
+    softDark(ctx, 128, y, 84, 9, 0.5);
+    const frac = U.clamp(boss.hp / S.bossMax, 0, 1);
+    const col = hit ? '#ffffff' : boss.angry ? '#ff3b5c' : '#c05cff', core = hit ? '#ffffff' : boss.angry ? '#ffc4cc' : '#f2dcff';
+    const seg = (xa, xb) => { ctx.beginPath(); ctx.moveTo(xa, y); ctx.lineTo(xb, y); ctx.stroke(); };
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(150,170,230,0.32)'; ctx.lineWidth = 3.4; seg(x0, x1);                  // track: hairline rim ...
+    ctx.strokeStyle = 'rgba(3,6,16,0.85)'; ctx.lineWidth = 2.3; seg(x0, x1);                         // ... around a dark core
+    if (frac > 0) {
+      const xf = x0 + (x1 - x0) * frac;
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.strokeStyle = rgba(col, 0.2); ctx.lineWidth = 6.5; seg(x0, xf);
+      ctx.strokeStyle = rgba(col, 0.62); ctx.lineWidth = 2.3; seg(x0, xf);
+      ctx.strokeStyle = core; ctx.lineWidth = 0.9; seg(x0, xf);
+      ctx.globalCompositeOperation = 'source-over';
+      P(ctx, 'dot', xf, y, 1.3, core, 0.9);
+    }
+    ctx.fillStyle = 'rgba(3,6,16,0.8)';                                                              // quarter ticks
+    for (let q = 1; q <= 3; q++) ctx.fillRect(x0 + ((x1 - x0) * q) / 4 - 0.3, y - 1.4, 0.6, 2.8);
+    ctx.restore();
+    crownGlyph(ctx, 59, MAP_Y + 2.5, hit ? '#ffffff' : HUE.gold);
   }
 
-  /** Dark translucent band across the whole inner width behind a centred banner (optional 1 px accent edges). */
-  function bannerPlate(ctx, y0, y1, accent) {
-    ctx.fillStyle = PLATE;
-    ctx.fillRect(C.INNER_L, y0, C.INNER_R - C.INNER_L, y1 - y0);
-    if (accent) {
-      ctx.fillStyle = accent;
-      ctx.fillRect(C.INNER_L, y0, C.INNER_R - C.INNER_L, 1);
-      ctx.fillRect(C.INNER_L, y1 - 1, C.INNER_R - C.INNER_L, 1);
-    }
-  }
+  const EXTEND_COLS = [HUE.magenta, HUE.amber, '#ffe27a', HUE.lime, HUE.cyan, HUE.violet];
 
   function renderOverlays(ctx) {
     const th = GFX.theme(S.level - 1);
     const center = (str, y, color, scale) => GFX.text(ctx, str, 128, y, color, { align: 'center', scale: scale || 1, outline: OUTLINE });
     if (S.phase === 'intro') {
       const boss = S.level === 30;
-      bannerPlate(ctx, 78, boss ? 140 : 124, th.accent2);
-      center('ROUND ' + S.level, 84, '#ffffff', 2);
+      band(ctx, 78, boss ? 140 : 124, th.accent2);
+      center('ROUND ' + S.level, 84, '#eaffff', 2);
       if (boss) center('THE KRAKEN KING!', 108, '#ffa090');
-      if (S.phaseT > 60 && Math.floor(S.phaseT / 8) % 4 !== 3) center('READY!', boss ? 124 : 108, '#fff2b0');
+      if (S.phaseT > 60 && (OPT.reducedMotion || Math.floor(S.phaseT / 8) % 4 !== 3)) center('READY!', boss ? 124 : 108, '#fff2b0');
     }
-    if (S.hurryBanner > 0 && Math.floor(S.hurryBanner / 5) % 2 === 0) {
-      // hostile moment (every enemy turns angry): outlined text on a faint plate just as wide as the text and only while the
-      // text is lit, so enemies, pebbles and ink in the rows behind it stay readable
-      ctx.fillStyle = 'rgba(6,4,20,0.3)';
-      ctx.fillRect(48, 93, 160, 22);
-      center('HURRY UP!', 96, '#ff7a6a', 2);
+    if (S.hurryBanner > 0 && (OPT.reducedMotion || Math.floor(S.hurryBanner / 5) % 2 === 0)) {
+      // hostile moment (every enemy turns angry): outlined text on a faint soft band, so enemies, pebbles and ink in the rows behind stay readable
+      band(ctx, 96, 112, null, 0.34, 6);
+      center('HURRY UP!', 96, '#ff6a5e', 2);
     }
     if (S.phase === 'extend') {
-      const hue = (S.frame * 12) % 360;
-      bannerPlate(ctx, 84, 134);
-      center('EXTEND!', 92, `hsl(${hue},100%,70%)`, 2);
+      band(ctx, 84, 134);
+      center('EXTEND!', 92, EXTEND_COLS[Math.floor(S.frame / 14) % 6], 2);
       center('1UP', 116, '#9dffa8');
     }
-    if (S.phase === 'gameover') { bannerPlate(ctx, 88, 120); center('GAME OVER', 96, '#ffffff', 2); }
+    if (S.phase === 'gameover') { band(ctx, 88, 120); center('GAME OVER', 96, '#eaffff', 2); }
     if (S.phase === 'victory') {
-      bannerPlate(ctx, 68, 138, '#ffe36b');
-      center('THE MOON', 76, '#ffe36b', 2);
-      center('PEARL IS', 96, '#ffe36b', 2);
+      band(ctx, 68, 138, '#ffe27a');
+      center('THE MOON', 76, '#ffe27a', 2);
+      center('PEARL IS', 96, '#ffe27a', 2);
       center('SAFE!', 116, '#ffffff', 2);
     }
     drawPopups(ctx);
     if (lvDef().boss && S.bossPhase === 'fight') renderBossBar(ctx);
   }
 
+  // ---- warm-up: bake the glyph tiles of the popup colours and the particle sprites of every effect hue during the first frames of a game
+  // (drawn far outside the canvas: only the cache fill matters), so the first chain does not hitch on first-use bakes ---------------
+  const WARM_TEXT = ['#ff7a5e', '#ffb23e', '#ffe27a', '#eaffff', '#7dff8a', '#ffe36b'];
+  const WARM_HUES = [HUE.cyan, HUE.amber, HUE.ember, HUE.crimson, HUE.white, HUE.violet, HUE.lime, HUE.cobalt, HUE.purple, HUE.gold, HUE.ice, HUE.magenta, HUE.mint];
+  function warmFx(ctx) {
+    const i = S.warm++;
+    if (i < WARM_TEXT.length * 2) {
+      GFX.text(ctx, i & 1 ? '1UPEXTND' : '0123456789', -300, -300, WARM_TEXT[i >> 1], { outline: OUTLINE });
+    } else if (i < WARM_TEXT.length * 2 + WARM_HUES.length) {
+      const h = WARM_HUES[i - WARM_TEXT.length * 2];
+      P(ctx, 'dot', -300, -300, 0.9, h, 0.5); P(ctx, 'dot', -300, -300, 1.9, h, 0.5); P(ctx, 'ring', -300, -300, 3, h, 0.5);
+      P(ctx, 'spark', -300, -300, 1.6, h, 0.5); P(ctx, 'streak', -300, -300, 5.4, h, 0.5, 0);
+    }
+  }
+
   function render(ctx) {
     if (!S) { ctx.fillStyle = '#000'; ctx.fillRect(0, 0, C.W, C.H); return; }
-    ctx.fillStyle = '#000';
+    RSTAT.ghosts = 0;
+    if (S.warm < 40 && OPT.quality >= 1 && hasV2()) warmFx(ctx);
+    ctx.fillStyle = '#02040a';
     ctx.fillRect(0, 0, C.W, C.H);
     ctx.save();
     ctx.beginPath();
@@ -2092,6 +2382,18 @@ const Game = (() => {
   // ================================================================================================
   // Public API
   // ================================================================================================
+  /** Presentation options (SPEC_V2 sec. 1 / 4): reducedMotion (no flashes, no trails, half the ambient particles, steady instead of blinking cues)
+   *  and quality 0 / 1 / 2 (2 = full; 1 = fewer ambient specks and smaller bursts; 0 = minimal, no trails / motes). Callable at any time, also
+   *  before start(); the values persist across games. Returns the active options. Purely cosmetic: no mechanic reads them. */
+  function setOptions(o) {
+    if (o && typeof o === 'object') {
+      if (o.reducedMotion !== undefined) OPT.reducedMotion = !!o.reducedMotion;
+      if (o.quality !== undefined) { const q = Math.round(+o.quality); if (q === q) OPT.quality = q < 0 ? 0 : q > 2 ? 2 : q; }
+    }
+    if (S && OPT.reducedMotion) { S.flashT = 0; S.flashCool = 0; }
+    return { reducedMotion: OPT.reducedMotion, quality: OPT.quality };
+  }
+
   function start(opts) {
     const o = opts || {};
     const n = o.players === 2 ? 2 : 1;
@@ -2101,7 +2403,8 @@ const Game = (() => {
       pendingJoin: false, joinHint: o.joinHint === undefined ? 'PUSH Q' : String(o.joinHint),
       players: [], enemies: [], bubbles: [], proj: [], bolts: [], drops: [], flames: [], streams: [], items: [], fx: [], popups: [],
       ghost: null, bossBubble: null, bossPhase: '', bossPhase2: false, fanfareT: 0, hurry: false, hurryT: 0, hurryBanner: 0,
-      flashT: 0, flashDur: 14, flashA: 0.85, thunderFlashCool: 0,
+      flashT: 0, flashDur: 14, flashA: 0, flashCool: 0, flashCol: '#ffffff', parts: [], burstBudget: 28, warm: 0,
+      vrng: U.rng(((o.seed === undefined ? 12345 : o.seed) ^ 0x5bd1e995) >>> 0),          // cosmetic stream: effects never consume S.rng
       specialT: 0, thunderT: 0, letterT: 0, puT: 0, skipTo: 0, tr: null, clearT: 0, idleT: 0,
       extend: null, map: null, solid: null, gaps: [], spots: [], bossMax: BOSS_HP_1P,
     };
@@ -2195,7 +2498,22 @@ const Game = (() => {
     setHurryTimer(frames) { if (S) S.hurryT = frames; },
     give(i, kind) { if (S && S.players[i]) applyPower(S.players[i], kind); },
     addScore(i, pts) { if (S) addScore(i, pts); },
+    // ---- presentation probes (v2 tests; non-contract) ----------------------------------------------------------------
+    options() { return { reducedMotion: OPT.reducedMotion, quality: OPT.quality }; },
+    /** Current full-screen flash alpha as rendered this frame (0 = none) and the frames until the next flash may start. */
+    flash() { return S ? { alpha: flashAlpha(), t: S.flashT, cool: S.flashCool, col: S.flashCol, max: FLASH_MAX, cooldown: FLASH_COOL } : { alpha: 0, t: 0, cool: 0, col: '#fff', max: FLASH_MAX, cooldown: FLASH_COOL }; },
+    /** Live cosmetic counts and the caps they must respect. */
+    fxStats() { return S ? { parts: S.parts.length, partCap: PART_CAP[OPT.quality], ambient: AMBIENT_N[OPT.quality] >> (OPT.reducedMotion ? 1 : 0), fx: S.fx.length, fxCap: FX_CAP, popups: S.popups.length, popupCap: POPUP_CAP,
+      drawn: { ghosts: RSTAT.ghosts, ambient: RSTAT.ambient, motes: RSTAT.motes, parts: RSTAT.parts } } : null; },
+    /** Spawn a cosmetic effect by name (visual tests only): 'ring' | 'burst' | 'chain' | 'flash'. */
+    _fx(kind, x, y, arg) {
+      if (!S) return;
+      if (kind === 'ring') ring(x, y, arg || HUE.cyan, 4, 18, 15, 0.9);
+      else if (kind === 'burst') burst(x, y, arg || HUE.amber, 12, 2.2, { size: 1.6, life: 34 });
+      else if (kind === 'chain') chainLight(x, y, arg || HUE.cyan, 6);
+      else if (kind === 'flash') flash(10, arg || FLASH_MAX);
+    },
   };
 
-  return { start, update, render, join, isOver, result, debug };
+  return { start, update, render, join, isOver, result, setOptions, debug };
 })();

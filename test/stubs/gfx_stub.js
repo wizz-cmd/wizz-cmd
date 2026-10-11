@@ -5,6 +5,10 @@
  * the right edge so flipping is visible. Text is drawn with ctx.fillText in a monospace font on an
  * 8px grid (monospace advance exactly 8*scale). No art quality here — only API faithfulness.
  *
+ * v2 additions (additive, SPEC_V2 sec. 2): setScale(k), define(), draw opts tint / glow (the tint is a flat coloured wash over the placeholder),
+ * particle(ctx, kind, x, y, size, color, alpha, rot) (additive dot / ring / spark / streak drawn with plain canvas paths), postFX(ctx, q) (no-op),
+ * text opts glow (ignored), theme().glow / .edge. The stub still draws at the transform it is given (logical units under setTransform(k) as well).
+ *
  * Stub-only extras (NOT part of the contract, do not rely on them in production code):
  *   GFX._registry() -> [{name, w, h, frames}] — every sprite of the SPEC §3.1 table.
  */
@@ -60,11 +64,11 @@ const GFX = (() => {
   const warned = {};
   const mkCanvas = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
 
-  function build(name, frame, flip, white) {
+  function build(name, frame, flip, white, tint) {
     const { w, h } = REG[name];
     const cv = mkCanvas(w, h);
     const g = cv.getContext('2d');
-    g.fillStyle = white ? '#fff' : baseColor(name);
+    g.fillStyle = white ? '#fff' : tint || baseColor(name);
     g.fillRect(0, 0, w, h);
     if (!white) {
       g.strokeStyle = 'rgba(20,10,40,0.9)';
@@ -81,9 +85,9 @@ const GFX = (() => {
     return out;
   }
 
-  function getSprite(name, frame, flip, white) {
-    const k = name + '|' + frame + '|' + (flip ? 1 : 0) + '|' + (white ? 1 : 0);
-    return sprites[k] || (sprites[k] = build(name, frame, flip, white));
+  function getSprite(name, frame, flip, white, tint) {
+    const k = name + '|' + frame + '|' + (flip ? 1 : 0) + '|' + (white ? 1 : 0) + '|' + (tint || '');
+    return sprites[k] || (sprites[k] = build(name, frame, flip, white, tint));
   }
 
   // ---- public API ------------------------------------------------------------------------------
@@ -100,7 +104,7 @@ const GFX = (() => {
     }
     const o = opts || {};
     const f = ((Math.floor(frame) % REG[name].frames) + REG[name].frames) % REG[name].frames;
-    const cv = getSprite(name, f, !!o.flip, !!o.white);
+    const cv = getSprite(name, f, !!o.flip, !!o.white, o.tint);
     const a = o.alpha === undefined ? 1 : o.alpha;
     if (a !== 1) { const prev = ctx.globalAlpha; ctx.globalAlpha = prev * a; ctx.drawImage(cv, Math.round(x), Math.round(y)); ctx.globalAlpha = prev; }
     else ctx.drawImage(cv, Math.round(x), Math.round(y));
@@ -137,12 +141,12 @@ const GFX = (() => {
   }
 
   const THEMES = [
-    { bg: '#14080f', accent: '#ff7a8a', accent2: '#ffb347', name: 'Coral Reef' },
-    { bg: '#07140d', accent: '#4fbf6b', accent2: '#b7c94a', name: 'Kelp Forest' },
-    { bg: '#120d08', accent: '#b5793f', accent2: '#e0b84a', name: 'Sunken Ship' },
-    { bg: '#08101c', accent: '#4fd8f0', accent2: '#a779ff', name: 'Crystal Caves' },
-    { bg: '#120808', accent: '#e0502a', accent2: '#ffb02e', name: 'Volcanic Vents' },
-    { bg: '#060a1c', accent: '#3b58c8', accent2: '#e8c04a', name: 'Abyss Temple' },
+    { bg: '#14080f', accent: '#ff7a8a', accent2: '#ffb347', glow: '#ff6f9c', edge: '#ff9db8', name: 'Coral Reef' },
+    { bg: '#07140d', accent: '#4fbf6b', accent2: '#b7c94a', glow: '#2fe0a4', edge: '#7fe8c0', name: 'Kelp Forest' },
+    { bg: '#120d08', accent: '#b5793f', accent2: '#e0b84a', glow: '#d6a24c', edge: '#f4dc9c', name: 'Sunken Ship' },
+    { bg: '#08101c', accent: '#4fd8f0', accent2: '#a779ff', glow: '#3cf2ff', edge: '#9cecff', name: 'Crystal Caves' },
+    { bg: '#120808', accent: '#e0502a', accent2: '#ffb02e', glow: '#ff6a3d', edge: '#ffb08a', name: 'Volcanic Vents' },
+    { bg: '#060a1c', accent: '#3b58c8', accent2: '#e8c04a', glow: '#8a5cff', edge: '#c8b4ff', name: 'Abyss Temple' },
   ];
   const theme = (levelIndex) => THEMES[Math.max(0, Math.min(5, Math.floor(levelIndex / 5)))];
 
@@ -206,7 +210,24 @@ const GFX = (() => {
     return cv;
   }
 
+  // ---- v2 additions ---------------------------------------------------------------------------------------------------------
+  let SCALE = 1;
+  const setScale = (k) => { SCALE = k; };
+  const defined = {};
+  function define(name, spec) { if (!name || !spec || typeof spec.draw !== 'function') return false; defined[name] = spec; return true; }
+  function particle(ctx, kind, x, y, size, color, alpha) {
+    alpha = alpha === undefined ? 1 : alpha;
+    if (!(alpha > 0.003) || !(size > 0)) return;
+    const gco = ctx.globalCompositeOperation, ga = ctx.globalAlpha;
+    ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = ga * Math.min(1, alpha);
+    ctx.fillStyle = color || '#fff'; ctx.strokeStyle = color || '#fff';
+    if (kind === 'ring') { ctx.lineWidth = 0.8; ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2); ctx.stroke(); }
+    else { ctx.beginPath(); ctx.arc(x, y, kind === 'dot' ? size * 1.6 : kind === 'streak' ? size * 0.3 : size, 0, Math.PI * 2); ctx.fill(); }
+    ctx.globalCompositeOperation = gco; ctx.globalAlpha = ga;
+  }
+  function postFX() { /* the stub has no post pass */ }
+
   const _registry = () => names.map((n) => ({ name: n, w: REG[n].w, h: REG[n].h, frames: REG[n].frames }));
 
-  return { init, draw, frames, size, has, text, textWidth, levelCanvas, theme, drawLogo, sheet, _registry };
+  return { init, draw, frames, size, has, text, textWidth, levelCanvas, theme, drawLogo, sheet, setScale, define, particle, postFX, _registry };
 })();

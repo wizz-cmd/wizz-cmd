@@ -9,7 +9,7 @@ const page = buildMainPage(real);
 const OUT = process.env.SHOTS_OUT || path.join(PROJECT, "out", "main", real ? "real" : "stubs");
 const t = await launch({ html: page, viewport: { width: 1280, height: 800 } });
 const g = fp(t.page);
-const shot = (name) => canvasShot(t.page, path.join(OUT, name + '.png'), { scale: 3 });
+const shot = (name) => canvasShot(t.page, path.join(OUT, name + '.png'), { scale: 1 });
 await g.freeze(true);
 
 await g.goto('title'); await g.step(30); await shot('title');

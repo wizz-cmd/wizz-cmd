@@ -29,12 +29,13 @@ function verify(label, m, touch) {
   check(`${label}: zero scroll`, m.sw <= m.iw && m.sh <= m.ih + 1, JSON.stringify({ sw: m.sw, iw: m.iw, sh: m.sh, ih: m.ih }));
   check(`${label}: picture inside the viewport with 16px gutters (8px in the translucent-pad fallback)`, c.x >= (L.mode === 'over' ? 7.5 : 15.5) && c.r <= m.iw - (L.mode === 'over' ? 7.5 : 15.5) && c.y >= 0 && c.b <= m.ih + 0.5, JSON.stringify(c));
   check(`${label}: 8:7 aspect`, Math.abs(c.w / c.h - 256 / 224) < 0.01);
-  const exp = L.sharp ? 'auto' : 'pixelated';
-  check(`${label}: image-rendering ${exp}; backing store ${L.m}x`, m.ir === exp && m.cw === 256 * L.m, JSON.stringify({ ir: m.ir, cw: m.cw, L }));
-  if (!L.sharp) {                                              // crisp: a whole number of device pixels per game pixel
+  // v2: resolution independent. Backing store = 256k x 224k, k on a 0.25 step in 1..8, image-rendering auto (never pixelated); when the
+  // layout snapped to a whole step the backing store is mapped 1:1 onto the device pixels (crisp), otherwise the browser resamples smoothly.
+  check(`${label}: image-rendering auto; backing store 256k x 224k, k = ${L.k}`, m.ir === 'auto' && m.cw === 256 * L.k && Math.abs(L.k * 4 - Math.round(L.k * 4)) < 1e-9 && L.k >= 1 && L.k <= 8 && L.k === L.m && !L.sharp, JSON.stringify({ ir: m.ir, cw: m.cw, L }));
+  if (L.snapped) {                                             // crisp: one backing pixel per device pixel
     const dev = (c.w * L.dpr) / 256;
-    check(`${label}: whole device pixels per game pixel (${dev.toFixed(3)})`, Math.abs(dev - Math.round(dev)) < 0.01 && dev >= 1, String(dev));
-  }
+    check(`${label}: crisp, ${dev.toFixed(3)} device px per logical px = k ${L.k}`, Math.abs(dev - L.k) < 0.02 * L.k, String(dev));
+  } else check(`${label}: not snapped: smooth resample from k ${L.k} (device px per logical px ${((c.w * L.dpr) / 256).toFixed(3)}, within 8 % unless k is capped at 8)`, Math.abs(((c.w * L.dpr) / 256) / L.k - 1) < 0.08 || L.k === 8, String(((c.w * L.dpr) / 256) / L.k));
   if (touch) {
     check(`${label}: touch UI visible, legend hidden`, m.touch.vis && !(m.legend && m.legend.vis && m.legend.h > 0));
     const big = m.btns.filter((b) => ['left', 'right', 'jump', 'fire'].includes(b.k)), pills = m.btns.filter((b) => b.k === 'pause' || b.k === 'sound');
@@ -66,7 +67,7 @@ for (const [w, h, touch] of VIEWPORTS) {
     await t.page.waitForTimeout(150);
     const m = await t.page.evaluate(measure);
     verify(label, m, touch);
-    results.push(`${label}: ${m.lay.mode} x${m.lay.scale.toFixed(3)} ${m.lay.sharp ? 'sharp m=' + m.lay.m : 'crisp'}${m.lay.legend ? ' +legend' : ''}`);
+    results.push(`${label}: ${m.lay.mode} x${m.lay.scale.toFixed(3)} k=${m.lay.k} ${m.lay.snapped ? 'crisp' : 'smooth'}${m.lay.legend ? ' +legend' : ''}`);
     await pageShot(t.page, path.join(OUT, `${w}x${h}_d${dpr}${touch ? '_touch' : ''}_title.png`));
     // and in the middle of a game
     await g.start(1, 6, 3); await g.step(240);

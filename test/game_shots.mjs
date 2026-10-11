@@ -1,18 +1,20 @@
-// FIZZ & POP — Game screenshots of representative moments (x3 nearest-neighbour) -> out/game/*.png
+// FIZZ & POP v2 — Game screenshots of representative moments (canvas k = 3 = 768 x 672, post FX on) -> out/v2/game/shots/*.png
 //   node test/game_shots.mjs            real GFX/AUDIO + stub LEVELS (stable boss arena)
 //   MODE=1 node test/game_shots.mjs     everything real (whatever the other modules currently hold)
-//   BASE=../out/fix/game_priv/src node ...   take the real modules from another directory (snapshot of the wave-1 modules)
-//   OUT=out/fix/game_shots node ...          output directory (default out/game)
+//   BASE=../out/fix/game_priv/src node ...   take the real modules from another directory (snapshot)
+//   OUT=out/v2/game/shots node ...           output directory (default out/v2/game/shots)
+//   POST=0|1|2 node ...                      GFX.postFX level (default 2)   K=2 node ...   canvas scale (default 3)
 import { launch, canvasShot, PROJECT } from '../tools/harness.mjs';
 import path from 'path';
 
 const mode = process.env.MODE || 'gfx';
-const t = await launch({ html: path.join(PROJECT, 'test', 'game_harness.html') + '?real=' + mode + (process.env.BASE ? '&base=' + process.env.BASE : '') });
+const K = +(process.env.K || 3);
+const t = await launch({ html: path.join(PROJECT, 'test', 'game_harness.html') + '?real=' + mode + '&k=' + K + '&post=' + (process.env.POST || 2) + (process.env.BASE ? '&base=' + process.env.BASE : '') });
 const page = t.page;
-const OUT = path.join(PROJECT, process.env.OUT || 'out/game');
+const OUT = path.join(PROJECT, process.env.OUT || 'out/v2/game/shots');
 const ev = (fn, arg) => page.evaluate(fn, arg);
 await ev(() => __t.freeze(true));
-const shot = (name) => canvasShot(page, path.join(OUT, name + '.png'), { scale: 3 });
+const shot = (name) => canvasShot(page, path.join(OUT, name + '.png'), { scale: 1 });
 
 // 1. 2P play with bubbles, popups, HUD
 await ev(() => {
@@ -162,6 +164,29 @@ await ev(() => {
   Game.debug.spawn('nibbler', p.x, p.y); T.step(1); Game.debug.clearEnemies(); T.step(130);
 });
 await shot('08c_gameover');
+
+// 9. v2 effects: pop shockwaves + bursts, chain light, trails, reduced motion
+await ev(() => {
+  const T = __t; T.start({ players: 2, level: 4, seed: 6 }); T.step(160); Game.debug.god(true); Game.debug.noClear(true); Game.debug.clearEnemies();
+  const S = T.S(), p = S.players[0]; p.inv = 0; S.players[1].inv = 0;
+  for (let i = 0; i < 8; i++) { Game.debug.spawn(['nibbler', 'crabbit', 'jellop', 'springle', 'glimmer'][i % 5], 50 + i * 20, 120); const e = S.enemies[S.enemies.length - 1]; e.state = 'frozen'; e.freezeT = 1e9; }
+  for (let i = 0; i < 6; i++) Game.debug.spawn('thunder', 70 + i * 16, 70);
+  S.bubbles.forEach((b) => { b.att = null; b.age = 0; });
+  p.x = 70; p.y = 70; Game.debug.give(0, 'bomb'); T.step(6);
+});
+await shot('09a_chain_light');
+await ev(() => { __t.step(10); });
+await shot('09b_chain_after');
+await ev(() => {
+  const T = __t; T.arena({ level: 11, empty: true }); Game.debug.god(true); const p = T.S().players[0]; p.inv = 0; T.step(1, [{ jump: true, right: true }]); T.step(16, [{ right: true }]);
+});
+await shot('09c_trail_jump');
+await ev(() => {
+  const T = __t; T.opts({ reducedMotion: true }); T.start({ players: 2, level: 4, seed: 6 }); T.step(160); Game.debug.god(true);
+  const S = T.S(); Game.debug.spawn('thunder', 90, 120); S.bubbles[S.bubbles.length - 1].att = null; S.players[0].x = 90; S.players[0].y = 124; T.step(5);
+});
+await shot('09d_reduced_motion_pop');
+await ev(() => { __t.opts({ reducedMotion: false }); });
 
 console.log('errors:', t.errors.length ? t.errors : 'none');
 await t.close();

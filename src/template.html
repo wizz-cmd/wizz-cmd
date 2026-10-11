@@ -5,63 +5,67 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1">
 <title>Fizz &amp; Pop</title>
 <style>
-  /* Page chrome colours are tokens on :root. The game canvas itself is always dark; only the
-     page around it follows the light/dark theme (SPEC 2.5). Dark values are declared twice on
-     purpose: once for the OS preference (unless the host forces light) and once for a forced dark.
-     color-scheme follows the tokens: light on :root, dark inside both dark blocks (Ut3). */
+  /* ABYSS GLOW page chrome (v2). Colours are tokens on :root. The game canvas itself is always near-black; the page around it follows
+     the light/dark theme (SPEC 2.5): dark = the abyss palette (void, cyan hairlines, soft glow), light = a pale page around the dark
+     canvas with dark-navy ink on the buttons. Dark values are declared twice on purpose: once for the OS preference (unless the host
+     forces light) and once for a forced dark. color-scheme follows the tokens: light on :root, dark inside both dark blocks (Ut3). */
   :root {
     --page-bg: #e9eef6;
-    --page-fg: #1b1033;
-    --page-muted: #566080;
-    --frame: #1b1033;
-    --frame-glow: rgba(27, 16, 51, 0.28);
+    --page-fg: #0b1a33;
+    --page-muted: #4a5a7a;
+    --frame: #0b1a33;
+    --frame-glow: rgba(11, 26, 51, 0.30);
     --key-bg: #ffffff;
-    --key-fg: #1b1033;
-    --key-edge: #b4bcd6;
+    --key-fg: #0b1a33;
+    --key-edge: #aeb9d2;
     --btn-bg: #ffffff;
-    --btn-fg: #1b1033;
-    --btn-edge: #98a2c6;
-    --btn-on: #ff6fae;
-    --btn-on-fg: #1b1033;
-    --veil: rgba(8, 6, 22, 0.46);
-    --veil-fg: #ffffff;
+    --btn-fg: #0b1a33;
+    --btn-edge: #7d8fb6;
+    --btn-glow: rgba(11, 26, 51, 0.0);
+    --btn-on: #3cf2ff;
+    --btn-on-fg: #04101f;
+    --cta-edge: rgba(60, 242, 255, 0.9);
+    --veil: rgba(2, 4, 12, 0.5);
+    --veil-fg: #eaffff;
     --btn: min(68px, calc((100vw - 96px) / 4));   /* fallback before Main's fit() sets --btn-w/--btn-h */
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
-      --page-bg: #0b0a14;
-      --page-fg: #e8e6ff;
-      --page-muted: #9d9bc0;
-      --frame: #26214f;
-      --frame-glow: rgba(120, 104, 255, 0.28);
-      --key-bg: #1b1933;
-      --key-fg: #e8e6ff;
-      --key-edge: #3c3868;
-      --btn-bg: #1b1933;
-      --btn-fg: #e8e6ff;
-      --btn-edge: #4a4680;
-      --btn-on: #ff6fae;
-      --btn-on-fg: #1b1033;
-      --veil: rgba(4, 3, 14, 0.5);
+      --page-bg: #05070f;
+      --page-fg: #d6f6ff;
+      --page-muted: #7fb0c6;
+      --frame: rgba(60, 242, 255, 0.42);
+      --frame-glow: rgba(60, 242, 255, 0.16);
+      --key-bg: rgba(9, 20, 38, 0.92);
+      --key-fg: #bff4ff;
+      --key-edge: rgba(60, 242, 255, 0.34);
+      --btn-bg: rgba(6, 14, 30, 0.84);
+      --btn-fg: #bff4ff;
+      --btn-edge: rgba(60, 242, 255, 0.5);
+      --btn-glow: rgba(60, 242, 255, 0.22);
+      --btn-on: rgba(60, 242, 255, 0.26);
+      --btn-on-fg: #ffffff;
+      --veil: rgba(2, 4, 12, 0.5);
       color-scheme: dark;
     }
   }
   :root[data-theme="dark"] {
-    --page-bg: #0b0a14;
-    --page-fg: #e8e6ff;
-    --page-muted: #9d9bc0;
-    --frame: #26214f;
-    --frame-glow: rgba(120, 104, 255, 0.28);
-    --key-bg: #1b1933;
-    --key-fg: #e8e6ff;
-    --key-edge: #3c3868;
-    --btn-bg: #1b1933;
-    --btn-fg: #e8e6ff;
-    --btn-edge: #4a4680;
-    --btn-on: #ff6fae;
-    --btn-on-fg: #1b1033;
-    --veil: rgba(4, 3, 14, 0.5);
+    --page-bg: #05070f;
+    --page-fg: #d6f6ff;
+    --page-muted: #7fb0c6;
+    --frame: rgba(60, 242, 255, 0.42);
+    --frame-glow: rgba(60, 242, 255, 0.16);
+    --key-bg: rgba(9, 20, 38, 0.92);
+    --key-fg: #bff4ff;
+    --key-edge: rgba(60, 242, 255, 0.34);
+    --btn-bg: rgba(6, 14, 30, 0.84);
+    --btn-fg: #bff4ff;
+    --btn-edge: rgba(60, 242, 255, 0.5);
+    --btn-glow: rgba(60, 242, 255, 0.22);
+    --btn-on: rgba(60, 242, 255, 0.26);
+    --btn-on-fg: #ffffff;
+    --veil: rgba(2, 4, 12, 0.5);
     color-scheme: dark;
   }
   :root[data-theme="light"] { color-scheme: light; }
@@ -98,16 +102,17 @@
   html.touch:not(.land) #stage { flex: 1 1 auto; margin-block: 0; }
   html.touch:not(.land) #frame { margin-block: auto; }
   #frame { position: relative; line-height: 0; max-width: 100%; }
+  /* The canvas is resolution independent (v2): Main sizes its backing store to css size x devicePixelRatio and draws every frame at that
+     scale, so it is displayed 1:1 (or very nearly) with smooth sampling, never pixelated. */
   #screen {
     display: block;
     /* Safe default before Main's fit() sets explicit px sizes: never wider than the page. */
     width: min(100%, 768px); height: auto; aspect-ratio: 256 / 224;
     background: #000;
-    image-rendering: crisp-edges;
-    image-rendering: pixelated;       /* Main switches to auto (sharp-bilinear) when the scale is not a whole device-pixel multiple */
-    border-radius: 3px;
-    outline: 4px solid var(--frame);
-    box-shadow: 0 10px 34px var(--frame-glow);
+    image-rendering: auto;
+    border-radius: 2px;
+    outline: 1px solid var(--frame);
+    box-shadow: 0 0 44px var(--frame-glow);
     touch-action: none;
     -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
@@ -118,35 +123,37 @@
     position: absolute; inset: 0;
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
     background: var(--veil); color: var(--veil-fg);
-    border-radius: 3px; cursor: pointer; text-align: center; line-height: 1.3;
-    font-weight: 800; letter-spacing: 0.14em; font-size: clamp(16px, 4.4vw, 30px);
+    border-radius: 2px; cursor: pointer; text-align: center; line-height: 1.3;
+    font-weight: 500; letter-spacing: 0.34em; font-size: clamp(15px, 4.2vw, 28px);
     outline: none; -webkit-tap-highlight-color: transparent;
   }
   #focus .cta {
-    padding: 0.35em 1.1em; border-radius: 999px;
-    background: rgba(8, 6, 22, 0.78); border: 2px solid rgba(255, 255, 255, 0.85);
-    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.45);
-    animation: pulse 1.4s ease-in-out infinite;
+    padding: 0.4em 1.2em 0.4em 1.5em; border-radius: 999px;
+    background: rgba(3, 7, 18, 0.74); border: 1px solid var(--cta-edge);
+    text-shadow: 0 0 10px rgba(60, 242, 255, 0.85), 0 0 2px #eaffff;
+    box-shadow: 0 0 22px rgba(60, 242, 255, 0.4), inset 0 0 14px rgba(60, 242, 255, 0.16);
+    animation: pulse 1.8s ease-in-out infinite;
   }
   #focus small {
-    font-weight: 600; letter-spacing: 0.03em; font-size: clamp(11px, 2.4vw, 14px);
-    padding: 3px 10px; border-radius: 8px; background: rgba(8, 6, 22, 0.6); max-width: 92%;
+    font-weight: 400; letter-spacing: 0.08em; font-size: clamp(11px, 2.4vw, 14px);
+    padding: 3px 12px; border-radius: 8px; background: rgba(3, 7, 18, 0.62); max-width: 92%;
+    text-shadow: 0 0 6px rgba(60, 242, 255, 0.5);
   }
-  @keyframes pulse { 50% { opacity: 0.55; } }
+  @keyframes pulse { 50% { opacity: 0.6; } }
   @media (prefers-reduced-motion: reduce) { #focus .cta { animation: none; } }
 
-  /* compact controls legend (desktop only; Main hides it when it would cost the picture a scale step) */
+  /* compact controls legend (desktop only; Main hides it when it would cost the picture too much) */
   #legend {
     margin: 12px 0 0; max-width: 940px; text-align: center;
-    color: var(--page-muted); font-size: 12px; line-height: 1.9;
+    color: var(--page-muted); font-size: 12px; line-height: 1.9; letter-spacing: 0.03em;
   }
   #legend .grp { display: inline-block; margin: 0 8px; white-space: nowrap; }
-  #legend b { color: var(--page-fg); margin-right: 3px; }
+  #legend b { color: var(--page-fg); margin-right: 3px; font-weight: 600; letter-spacing: 0.12em; }
   #legend kbd {
     display: inline-block; min-width: 1.6em; padding: 0 5px; margin: 0 1px; text-align: center;
-    font: 600 11px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font: 500 11px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
     color: var(--key-fg); background: var(--key-bg);
-    border: 1px solid var(--key-edge); border-bottom-width: 2px; border-radius: 4px;
+    border: 1px solid var(--key-edge); border-radius: 4px;
   }
 
   /* ---- touch controls: shown for (pointer: coarse) or after the first touch (class .touch on the root element).
@@ -163,19 +170,22 @@
   #touch .pads { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; }
   #touch .grp { display: flex; gap: 8px; align-items: flex-start; }
   #touch .mid { order: -1; justify-content: center; align-items: center; gap: 16px; }
+  /* glass buttons: a dark translucent body, a 1 px lit rim and a soft glow; pressed = the light comes on */
   #touch button {
     appearance: none; -webkit-appearance: none; margin: 0; padding: 0;
     width: var(--btn-w, var(--btn)); height: var(--btn-h, var(--btn)); border-radius: 50%;
-    font: 800 12px/1 system-ui, sans-serif; letter-spacing: 0;
+    font: 500 12px/1 system-ui, sans-serif; letter-spacing: 0.12em;
     color: var(--btn-fg); background: var(--btn-bg);
-    border: 2px solid var(--btn-edge); box-shadow: 0 3px 0 var(--btn-edge);
+    border: 1px solid var(--btn-edge);
+    box-shadow: 0 0 14px var(--btn-glow), inset 0 0 12px var(--btn-glow);
+    transition: box-shadow 0.08s, background-color 0.08s;
     touch-action: none; -webkit-user-select: none; user-select: none;
     -webkit-touch-callout: none; -webkit-tap-highlight-color: transparent;
   }
   html:not(.land) #touch .pads button { border-radius: 24px; }
-  #touch button[data-k="left"], #touch button[data-k="right"] { font-size: 28px; }
-  #touch button.on { background: var(--btn-on); color: var(--btn-on-fg); transform: translateY(2px); box-shadow: 0 1px 0 var(--btn-edge); }
-  #touch button.sm { width: auto; min-width: 96px; height: 44px; padding: 0 18px; border-radius: 22px; font-size: 12px; letter-spacing: 0.04em; }
+  #touch button[data-k="left"], #touch button[data-k="right"] { font-size: 26px; letter-spacing: 0; }
+  #touch button.on { background: var(--btn-on); color: var(--btn-on-fg); border-color: #eaffff; box-shadow: 0 0 22px rgba(60, 242, 255, 0.55), inset 0 0 16px rgba(60, 242, 255, 0.35); }
+  #touch button.sm { width: auto; min-width: 96px; height: 44px; padding: 0 18px; border-radius: 22px; font-size: 12px; letter-spacing: 0.2em; }
   #touch button[data-k="sound"][data-muted="1"] { text-decoration: line-through; opacity: 0.7; }
 
   /* landscape + overlay: the groups are fixed to the screen sides so they never push the picture around */

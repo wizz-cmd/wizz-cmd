@@ -11,11 +11,11 @@ export const MAIN_PAGE = MAIN_STUB_PAGE;
 export const MAIN_REAL_PAGE = path.join(ROOT, 'test', 'out', 'main_real.html');
 
 /** Build the page. real=false: stubs for src/10..40 (default, what the tests use);
- *  real=true: the actual src/10..40 modules (read-only visual check; writes test/out/main_real.html, never dist/). */
+ *  real=true: the actual src/09..40 modules (v2: NEON, GFX, GFX_CAST, AUDIO, LEVELS, Game) (read-only visual check; writes test/out/main_real.html, never dist/). */
 export function buildMainPage(real = false) {
   const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
   const files = real
-    ? ['src/00_shared.js', 'src/10_gfx.js', 'src/20_audio.js', 'src/30_levels.js', 'src/40_game.js', 'src/50_main.js']
+    ? ['src/00_shared.js', 'src/09_neon.js', 'src/10_gfx.js', 'src/11_gfx_cast.js', 'src/20_audio.js', 'src/30_levels.js', 'src/40_game.js', 'src/50_main.js']
     : ['src/00_shared.js', 'test/stubs/gfx_stub.js', 'test/stubs/audio_stub.js', 'test/stubs/levels_stub.js',
       'test/stubs/game_stub.js', 'src/50_main.js'];
   const MAIN_PAGE = real ? MAIN_REAL_PAGE : MAIN_STUB_PAGE;

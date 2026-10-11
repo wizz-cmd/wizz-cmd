@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NEON test page</title>
+<!--
+  NEON (src/09_neon.js) test page, owned by the "neonlib" role. Loads src/00_shared.js (only for U.rng parity) and src/09_neon.js as
+  classic scripts and draws a few primitives at scales 1, 2 and 4 under ctx.setTransform(k,0,0,k,0,0): the same 160 x 64 unit scene
+  on three canvases, so crispness / stroke weight / glow at each bake scale can be compared by eye.
+  Helpers on window.T (driven by test/v2_neon_test.mjs):
+    T.drawScene(L, ctx, k, {parity})   draw the scene with library L (NEON or the reference port of the mockup)
+    T.scene(k, L, opt) / T.bloomed(k, bloomOpts, L, opt) / T.glyphs(k)   -> canvas
+    T.loadRef(code)                    build the reference library from the mockup source text (see test script)
+-->
+<style>
+  html, body { margin: 0; background: #05070f; color: #9fd; font: 12px monospace; }
+  .row { display: flex; gap: 12px; align-items: flex-start; padding: 8px; flex-wrap: wrap; }
+  canvas { display: block; background: #000; }
+</style>
+</head>
+<body>
+<div class="row">
+  <div><div>k = 1 (160 x 64 px)</div><canvas id="c1"></canvas></div>
+  <div><div>k = 2 (320 x 128 px)</div><canvas id="c2"></canvas></div>
+</div>
+<div class="row">
+  <div><div>k = 4 (640 x 256 px)</div><canvas id="c4"></canvas></div>
+</div>
+<script src="../src/00_shared.js"></script>
+<script src="../src/09_neon.js"></script>
+<script>
+(() => {
+  const T = window.T = {};
+  const SW = 160, SH = 64;
+
+  /* the scene: 16-unit sprite boxes in a row, then text rows, then placeSprite (output-px) rows. L = library (NEON or reference) */
+  function drawScene(L, ctx, k, opt) {
+    opt = opt || {};
+    const { neon, body, glow, dot, sparkle, starPath, spline, poly, arcPts, quadPts, circlePath, ellipsePath, sampleSpline, taper, spinePath,
+      filmGradient, lwFor, rgba, mixc, hot, RGB, WHITE, eyeBall, brow, steam, heat, gearPath, drawText, TAU } = L;
+    const W = SW * k, H = SH * k;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over';
+    const bg = ctx.createLinearGradient(0, 0, 0, H);
+    bg.addColorStop(0, '#060d22'); bg.addColorStop(0.5, '#03070f'); bg.addColorStop(1, '#02040a');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+    ctx.setTransform(k, 0, 0, k, 0, 0);
+    const w = lwFor(k);                                   // stroke width in units for this bake scale
+    const bx = (i) => i * 16;                             // box i origin x
+
+    // 0: neon circle + centre dot
+    neon(ctx, circlePath(bx(0) + 8, 8, 5.5), RGB.cyan, w);
+    dot(ctx, bx(0) + 8, 8, 1.3, RGB.cyan);
+    // 1: neon star, closed
+    neon(ctx, starPath(bx(1) + 8, 8, 6.8, 0.36), RGB.magenta, w);
+    // 2: closed spline leaf with grad
+    neon(ctx, spline([[bx(2) + 2, 14], [bx(2) + 4, 5], [bx(2) + 8, 1.5], [bx(2) + 12, 5], [bx(2) + 14, 14], [bx(2) + 8, 12]], true), RGB.lime, w, { grad: [bx(2) + 2, 2, bx(2) + 14, 14] });
+    // 3: luminous body (the heroes' material): dark occluder + tint + hl + core + rim, then neon contour
+    {
+      const p = ellipsePath(bx(3) + 8, 8.5, 5.6, 5.0);
+      body(ctx, p, RGB.amber, w, { hl: [bx(3) + 5.5, 5.5, 6, 0.5], core: [bx(3) + 8, 10, 5, 0.55], y0: 3, y1: 14 });
+      neon(ctx, p, RGB.amber, w);
+      eyeBall(ctx, bx(3) + 6.2, 7, 1.5, RGB.amber, [0.4, 0.1]);
+      eyeBall(ctx, bx(3) + 10.2, 7, 1.5, RGB.amber, [0.4, 0.1]);
+    }
+    // 4: three overlapping glow pools (additive), one squashed
+    glow(ctx, bx(4) + 5, 6, 7, RGB.magenta, 0.8); glow(ctx, bx(4) + 10, 6, 7, RGB.cyan, 0.8); glow(ctx, bx(4) + 8, 11, 6, RGB.lime, 1.4, 0.6);
+    // 5: sparkles
+    sparkle(ctx, bx(5) + 4, 5, 2.2, RGB.cyan, 1); sparkle(ctx, bx(5) + 11, 8, 3.4, RGB.amber, 1, 0.5); sparkle(ctx, bx(5) + 6, 12, 1.6, RGB.magenta, 0.9);
+    // 6: tapered ribbon (gill / tail) with neon outline and a vein
+    {
+      const sp = sampleSpline([[bx(6) + 2, 13], [bx(6) + 6, 9], [bx(6) + 10, 6], [bx(6) + 14, 2]], 8);
+      const rb = taper(sp, (u) => 2.4 * Math.sin(Math.PI * Math.pow(u, 0.7)) + 0.2);
+      ctx.save(); ctx.fillStyle = 'rgba(4,6,14,0.7)'; ctx.fill(rb); ctx.restore();
+      neon(ctx, rb, RGB.violet, w * 0.8);
+      neon(ctx, spinePath(sp.slice(2, -2)), hot(RGB.violet, 0.2), w * 0.4, { halo: 0 });
+    }
+    // 7: thin-film ring (soap bubble rim)
+    {
+      ctx.save(); ctx.globalCompositeOperation = 'lighter';
+      ctx.lineWidth = w * 3.2; ctx.strokeStyle = filmGradient(ctx, bx(7) + 8, 8, 0.4, 0.14); ctx.beginPath(); ctx.arc(bx(7) + 8, 8, 6, 0, TAU); ctx.stroke();
+      ctx.lineWidth = w * 1.1; ctx.strokeStyle = filmGradient(ctx, bx(7) + 8, 8, 0.4, 0.8); ctx.stroke();
+      ctx.restore();
+    }
+    // 8: angry eye + brow + steam + heat
+    heat(ctx, 0.3, RGB.crimson, bx(8) + 8, 9, 9);
+    eyeBall(ctx, bx(8) + 5.5, 9, 1.8, RGB.crimson, [0, 0.3]); eyeBall(ctx, bx(8) + 11, 9, 1.8, RGB.crimson, [0, 0.3], { slit: true });
+    brow(ctx, bx(8) + 5.5, 9, 1.8, 1, w, RGB.crimson); brow(ctx, bx(8) + 11, 9, 1.8, -1, w, RGB.crimson);
+    steam(ctx, bx(8) + 8, 5, 0.37, w, RGB.crimson, 3);
+    // 9: cog
+    neon(ctx, gearPath(bx(9) + 8, 8, 6, 4.6, 9, 0.2), RGB.cobalt, w);
+    neon(ctx, circlePath(bx(9) + 8, 8, 1.6), RGB.cobalt, w * 0.8);
+
+    // text rows (stroke font)
+    const cap = 6;
+    drawText(ctx, 'FIZZ & POP', 4, 19, 7, { col: RGB.magenta, track: 0.5, lw: w * 1.2 });
+    drawText(ctx, 'ROUND 12  HI SCORE', 75, 19.5, 3.4, { col: RGB.amber, track: 0.62, lw: w * 0.8 });
+    drawText(ctx, opt.parity ? '0123456789 !?.,:-+=&\'/()*#' : '0123456789 !?.,:;-+=&\'"/()%*#<>_', 4, 30, 4.4, { col: mixc(RGB.cyan, WHITE, 0.4), track: 0.38, lw: w * 0.9 });
+    drawText(ctx, 'THE SUNKEN TOWER', 4, 38, 4.4, { col: RGB.cyan, track: 0.7, lw: w * 0.8 });
+    drawText(ctx, '012300', 156, 38, 4.4, { col: mixc(RGB.magenta, WHITE, 0.5), track: 0.3, lw: w, mono: !opt.parity, align: 'right' });
+    if (!opt.parity) {
+      // new glyphs + fixed-advance (8 units/glyph = 8/cap em) text
+      drawText(ctx, '© ♥ ★ ← →', 4, 46, 4.4, { col: RGB.lime, track: 0.5, lw: w * 0.9 });
+      drawText(ctx, 'SCORE 012300', 4, 53, 5, { col: RGB.cyan, adv: 8 / 5, lw: w * 0.9 });
+    }
+    if (typeof L.placeSprite === 'function') {          // placeSprite works in OUTPUT px: reset the transform
+      ctx.restore(); ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      const sprite = () => {                             // 16-unit box, asymmetric (pennant on the right)
+        const lw = lwFor(k);
+        neon(ctx, poly([[2, 14], [2, 4], [12, 4], [15, 8], [12, 12], [2, 12]], true), RGB.cyan, lw);
+        neon(ctx, poly([[4, 8], [9, 8]]), RGB.magenta, lw);
+        dot(ctx, 12, 8, 0.9, WHITE);
+      };
+      L.placeSprite(ctx, { x: 100 * k, y: 48 * k, k, face: 1 }, 16, sprite);
+      L.placeSprite(ctx, { x: 118 * k, y: 48 * k, k, face: -1 }, 16, sprite);
+      L.placeSprite(ctx, { x: 136 * k, y: 48 * k, k, face: 1, a: 0.5 }, 16, sprite);
+    }
+    ctx.restore();
+  }
+
+  function mk(w, h) { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; }
+  T.drawScene = drawScene;
+  T.scene = (k, L, opt) => { const c = mk(SW * k, SH * k); drawScene(L || NEON, c.getContext('2d'), k, opt); return c; };
+  T.bloomed = (k, o, L, opt) => { L = L || NEON; const c = T.scene(k, L, opt); L.bloom(c.getContext('2d'), c.width, c.height, o); return c; };
+
+  /* every glyph of the stroke font in a grid, with cap / baseline guides and the advance box */
+  T.glyphs = (k) => {
+    const keys = Object.keys(NEON.GLYPH).filter((c) => c !== ' ');
+    const cols = 16, cw = 11, ch = 15, rows = Math.ceil(keys.length / cols);
+    const c = mk(cols * cw * k, rows * ch * k), ctx = c.getContext('2d');
+    ctx.fillStyle = '#04060d'; ctx.fillRect(0, 0, c.width, c.height);
+    ctx.setTransform(k, 0, 0, k, 0, 0);
+    const cap = 7, lw = NEON.lwFor(k) * 1.1;
+    keys.forEach((key, i) => {
+      const x = (i % cols) * cw, y = Math.floor(i / cols) * ch;
+      ctx.strokeStyle = 'rgba(60,242,255,0.18)'; ctx.lineWidth = 0.15;
+      ctx.strokeRect(x + 0.5, y + 0.5, cw - 1, ch - 1);
+      ctx.beginPath(); ctx.moveTo(x + 0.5, y + 3); ctx.lineTo(x + cw - 0.5, y + 3); ctx.moveTo(x + 0.5, y + 3 + cap); ctx.lineTo(x + cw - 0.5, y + 3 + cap); ctx.stroke();
+      const g = NEON.glyphPaths(key), gw = Math.max(g[0], 0) * cap;
+      NEON.drawText(ctx, key, x + cw / 2, y + 3, cap, { align: 'center', lw, col: i % 2 ? NEON.RGB.cyan : NEON.RGB.magenta, track: 0, halo: 0.6 });
+    });
+    return c;
+  };
+
+  /* reference library: the mockup's own functions, evaluated from source text (parts/00_core.js + three small slices) */
+  T.loadRef = (code) => {
+    const names = 'TAU clamp lerp sstep hex PAL RGB mixc rgba WHITE hot rng scratch neon body glowSprite glow dot starPath sparkle spline poly arcPts quadPts circlePath ellipsePath sampleSpline taper spinePath bloom GLYPH glyphPaths textWidth drawText textPath drawGrain lwFor placeSprite FILM filmGradient eyeBall brow steam heat gearPath';
+    const f = new Function(code + '\nreturn {' + names.split(' ').join(',') + '};');
+    return f();
+  };
+
+  for (const k of [1, 2, 4]) {
+    const c = document.getElementById('c' + k);
+    c.width = SW * k; c.height = SH * k;
+    drawScene(NEON, c.getContext('2d'), k);
+  }
+})();
+</script>
+</body>
+</html>

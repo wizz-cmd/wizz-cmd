@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>GFX test page</title>
 <!--
-  GFX module test page (owned by the GFX agent). Loads src/00_shared.js + src/10_gfx.js as classic scripts
+  GFX module test page (owned by the GFX agent). Loads src/00_shared.js + 09_neon.js + 10_gfx.js + 11_gfx_cast.js (v2) as classic scripts
   and exposes review helpers on window.T. Driven by test/gfx_render.mjs / test/gfx_preview.mjs.
 -->
 <style>
@@ -16,7 +16,9 @@
 <body>
 <canvas id="screen" width="256" height="224"></canvas>
 <script src="../src/00_shared.js"></script>
+<script src="../src/09_neon.js"></script>
 <script src="../src/10_gfx.js"></script>
+<script src="../src/11_gfx_cast.js"></script>
 <script>
 (() => {
   const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };

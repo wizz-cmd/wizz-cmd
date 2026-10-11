@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GFX cast harness</title>
+<!--
+  Harness of the "gfxcast" role for src/11_gfx_cast.js (the sprite DEFINITIONS of v2 "Abyss Glow").
+  Loads src/00_shared.js, src/09_neon.js, a GFX (default: a tiny STUB whose define() only collects the entries; ?gfx=real loads the real
+  src/10_gfx.js) and the cast file (?cast=<relative path>, default ../src/11_gfx_cast.js).
+  Helpers on window.T (driven by test/v2_cast_test.mjs):
+    T.specs                       Map name -> {w,h,frames,pad,draw}   (every GFX.define the cast made, in order)
+    T.bake(name, f, k)            canvas of one frame baked EXACTLY like GFX does (box + pad, transform k, opts as in 10_gfx.js)
+    T.metrics(name, f, k)         {bbox: contour extents (alpha >= 0.45) in box units, edge: max alpha on the outer pixel ring, ...}
+    T.sheet(names, k, o)          contact sheet canvas: one row per sprite, one cell per frame, box + pad outlines, labels
+    T.bg(w, h)                    the dark water gradient used behind sheets
+-->
+<style>html, body { margin: 0; background: #05070f; color: #9fd; font: 12px monospace; } canvas { display: block; }</style>
+</head>
+<body>
+<script>
+  (() => {
+    const q = new URLSearchParams(location.search);
+    window.__q = q;
+    document.write('<script src="../src/00_shared.js"><\/script><script src="../src/09_neon.js"><\/script>');
+    if (q.get('gfx') === 'real') document.write('<script src="../src/30_levels.js"><\/script><script src="../src/10_gfx.js"><\/script>');
+    else document.write('<script>const GFX = { define(n, s) { return true; }, has() { return false; }, _stub: true };<\/script>');
+    document.write('<script>(function () { const d = GFX.define; window.__specs = new Map(); GFX.define = function (n, s) { window.__specs.set(n, s); return d.call(GFX, n, s); }; })();<\/script>');
+    document.write('<script src="' + (q.get('cast') || '../src/11_gfx_cast.js') + '" onerror="window.__noCast=1"><\/script>');
+  })();
+</script>
+<script>
+  const T = window.T = {};
+  T.specs = window.__specs;
+  T.canvas = (w, h) => { const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; };
+  T.err = [];
+  const specOf = (name) => { const s = T.specs.get(name); if (!s) throw new Error('no spec ' + name); return s; };
+  const padOf = (s) => {
+    const w = s.w || 16, h = s.h || 16, d = Math.max(2, Math.ceil(Math.max(w, h) * 0.25)), p = s.pad;
+    if (p === undefined || p === null) return { l: d, r: d, t: d, b: d };
+    if (typeof p === 'number') return { l: p, r: p, t: p, b: p };
+    const f = (v) => (v === undefined || v === null ? d : Math.max(0, +v || 0));
+    return { l: f(p.l), r: f(p.r), t: f(p.t), b: f(p.b) };
+  };
+  T.padOf = (name) => padOf(specOf(name));
+  T.list = () => Array.from(T.specs.entries()).map(([name, s]) => ({ name, w: s.w, h: s.h, frames: s.frames, pad: padOf(s) }));
+
+  /* bake exactly like 10_gfx.js bakeInto() */
+  T.bake = (name, f, k) => {
+    const s = specOf(name), p = padOf(s), w = s.w, h = s.h, n = s.frames;
+    const pl = Math.ceil(p.l * k), pr = Math.ceil(p.r * k), pt = Math.ceil(p.t * k), pb = Math.ceil(p.b * k);
+    const cv = T.canvas(Math.ceil(w * k) + pl + pr, Math.ceil(h * k) + pt + pb), g = cv.getContext('2d');
+    g.setTransform(k, 0, 0, k, pl, pt);
+    s.draw(g, f, { k, frame: f, frames: n, name, t: f / n, bake: true, ox: pl, oy: pt, w, h });
+    cv._pl = pl; cv._pt = pt; cv._k = k; cv._w = w; cv._h = h;
+    return cv;
+  };
+
+  /* contour extents (alpha >= thr) in box units + the alpha on the outer ring (clipping check) */
+  T.metrics = (name, f, k, thr) => {
+    thr = thr === undefined ? 0.45 : thr;
+    const cv = T.bake(name, f, k), W = cv.width, H = cv.height, d = cv.getContext('2d').getImageData(0, 0, W, H).data;
+    let x0 = W, y0 = H, x1 = -1, y1 = -1, edge = 0, any = 0, sumA = 0, ax0 = W, ay0 = H, ax1 = -1, ay1 = -1, lum = 0, nlum = 0;
+    const T8 = thr * 255;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const a = d[(y * W + x) * 4 + 3];
+      if (a > 0) { any++; sumA += a; if (x < ax0) ax0 = x; if (x > ax1) ax1 = x; if (y < ay0) ay0 = y; if (y > ay1) ay1 = y; }
+      if (a >= T8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      if (x === 0 || y === 0 || x === W - 1 || y === H - 1) { if (a > edge) edge = a; }
+      if (a > 30) { lum += Math.max(d[(y * W + x) * 4], d[(y * W + x) * 4 + 1], d[(y * W + x) * 4 + 2]); nlum++; }
+    }
+    const u = (px, off) => (px - off) / k;
+    return {
+      name, f, k, W, H,
+      bbox: x1 < 0 ? null : { x0: u(x0, cv._pl), y0: u(y0, cv._pt), x1: u(x1 + 1, cv._pl), y1: u(y1 + 1, cv._pt) },
+      any: any, edge, sumA: sumA / 255 / (k * k),
+      anyBox: ax1 < 0 ? null : { x0: u(ax0, cv._pl), y0: u(ay0, cv._pt), x1: u(ax1 + 1, cv._pl), y1: u(ay1 + 1, cv._pt) },
+      maxChan: nlum ? lum / nlum : 0,
+    };
+  };
+
+  T.bg = (w, h) => {
+    const c = T.canvas(w, h), g = c.getContext('2d');
+    const gr = g.createLinearGradient(0, 0, 0, h);
+    gr.addColorStop(0, '#060d22'); gr.addColorStop(0.5, '#03070f'); gr.addColorStop(1, '#02040a');
+    g.fillStyle = gr; g.fillRect(0, 0, w, h);
+    return c;
+  };
+
+  /* contact sheet. names: array; k: bake/draw scale; o: {cols (frames per row max), gap, labels, boxes, ground, bg} */
+  T.sheet = (names, k, o) => {
+    o = o || {};
+    const gap = o.gap === undefined ? 6 : o.gap, label = o.labels !== false, boxes = o.boxes !== false;
+    const cells = [];
+    for (const name of names) {
+      const s = specOf(name), p = padOf(s), n = s.frames;
+      for (let f = 0; f < n; f++) cells.push({ name, f, s, p, n });
+    }
+    const cols = o.cols || 8;
+    // layout by sprite rows: each sprite starts a new row if it would not fit
+    const lh = label ? 12 : 0;
+    const rows = []; let cur = null;
+    for (const c of cells) {
+      const cw = Math.ceil((c.s.w + c.p.l + c.p.r) * k) + gap, ch = Math.ceil((c.s.h + c.p.t + c.p.b) * k) + gap + lh;
+      c.cw = cw; c.ch = ch;
+      if (!cur || cur.name !== c.name && cur.items.length + 0 >= cols || (cur.items.length >= cols)) { cur = { name: c.name, items: [], h: 0 }; rows.push(cur); }
+      cur.items.push(c); cur.h = Math.max(cur.h, ch);
+    }
+    // pack consecutive sprites into rows up to the width limit
+    const maxW = o.maxW || 1800;
+    const lines = []; let line = { items: [], w: 0, h: 0 };
+    for (const c of cells) {
+      if (line.w + c.cw > maxW || (o.newRowPerSprite && line.items.length && line.items[line.items.length - 1].name !== c.name)) { lines.push(line); line = { items: [], w: 0, h: 0 }; }
+      line.items.push(c); line.w += c.cw; line.h = Math.max(line.h, c.ch);
+    }
+    if (line.items.length) lines.push(line);
+    const W = Math.max(...lines.map((l) => l.w)) + gap, H = lines.reduce((a, l) => a + l.h, 0) + gap;
+    const sheet = T.canvas(W, H), g = sheet.getContext('2d');
+    g.fillStyle = o.bg || '#03060f'; g.fillRect(0, 0, W, H);
+    let y = gap / 2;
+    for (const l of lines) {
+      let x = gap / 2;
+      for (const c of l.items) {
+        const cv = T.bake(c.name, c.f, k);
+        const cx = x, cy = y + lh;
+        // dark water gradient behind each cell so the additive light is judged on the real background
+        const gr = g.createLinearGradient(0, cy, 0, cy + cv.height); gr.addColorStop(0, o.light ? '#0c1d3d' : '#050c20'); gr.addColorStop(1, o.light ? '#05101f' : '#02050c');
+        g.fillStyle = gr; g.fillRect(cx, cy, cv.width, cv.height);
+        if (o.ground) {   // a crystal slab top at the box bottom, to judge the contact with the platform
+          const gy = cy + cv._pt + c.s.h * k;
+          g.fillStyle = 'rgba(40,120,200,0.25)'; g.fillRect(cx, gy, cv.width, cv.height - (gy - cy));
+          g.fillStyle = 'rgba(120,220,255,0.8)'; g.fillRect(cx, gy, cv.width, Math.max(1, k * 0.4));
+        }
+        g.drawImage(cv, cx, cy);
+        if (boxes) {
+          g.save(); g.strokeStyle = 'rgba(255,255,0,0.35)'; g.lineWidth = 1; g.setLineDash([3, 3]);
+          g.strokeRect(cx + cv._pl + 0.5, cy + cv._pt + 0.5, Math.ceil(c.s.w * k) - 1, Math.ceil(c.s.h * k) - 1);
+          g.strokeStyle = 'rgba(255,0,200,0.25)'; g.setLineDash([1, 3]); g.strokeRect(cx + 0.5, cy + 0.5, cv.width - 1, cv.height - 1);
+          g.restore();
+        }
+        if (label) NEON.drawText(g, c.name + (c.n > 1 ? ' ' + c.f : ''), cx + 2, y + 1, 7, { col: NEON.RGB.cyan, track: 0.2, lw: 0.6, halo: 0.2, hot: 0.2, a: 0.8 });
+        x += c.cw;
+      }
+      y += l.h;
+    }
+    return sheet;
+  };
+
+  /* quick scene: a handful of sprites on a mock platform at k, for in-context reading (name, frame, x, y(top-left of box), flip) */
+  T.scene = (items, k, W, H, o) => {
+    o = o || {};
+    const c = T.bg(Math.round(W * k), Math.round(H * k)), g = c.getContext('2d');
+    g.setTransform(k, 0, 0, k, 0, 0);
+    if (o.plat) for (const [px, py, pw] of o.plat) {
+      g.fillStyle = 'rgba(20,60,110,0.55)'; g.fillRect(px, py, pw, 14);
+      NEON.neon(g, NEON.poly([[px, py], [px + pw, py]], false), NEON.mixc(NEON.RGB.cobalt, NEON.RGB.cyan, 0.4), 0.5, { a: 0.9 });
+    }
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    for (const it of items) {
+      const cv = T.bake(it.name, it.f || 0, k), s = specOf(it.name);
+      g.save();
+      const x = Math.round(it.x * k), y = Math.round(it.y * k);
+      if (it.flip) { g.translate(2 * x + s.w * k, 0); g.scale(-1, 1); }
+      if (it.alpha !== undefined) g.globalAlpha = it.alpha;
+      g.drawImage(cv, x - cv._pl, y - cv._pt);
+      g.restore();
+    }
+    return c;
+  };
+
+  window.__castReady = true;
+</script>
+</body>
+</html>

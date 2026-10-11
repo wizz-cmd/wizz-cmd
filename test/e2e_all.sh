@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # FIZZ & POP — full integration run: build, static validators, every module suite, then the e2e smoke test.
-# Usage: test/e2e_all.sh            (any cwd). Exit code 1 if any step fails; each step's tail is printed.
+# v2.0: + the GFX suite (rebased gates + NEON / GFX core / cast suites), the game / main / audio suites, the SPEC_V2 section 5 budgets and section 1 photosensitivity gates.
+# Usage: test/e2e_all.sh [--quick]    (any cwd). Exit code 1 if any step fails; each step's tail is printed.
+#   --quick skips the slow audio renders (audio_analyze, cpu) and the full QA platform sweep; the default run is the release gate (~45 min on a 4-core container).
 set -u
+QUICK=0; [ "${1:-}" = "--quick" ] && QUICK=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 FAILS=()
@@ -17,20 +20,25 @@ step() {
   fi
 }
 mkdir -p out/e2e
-step "build"                 ./build.sh
+step "build"                 flock /tmp/fizzpop.build.lock ./build.sh
 step "validate_levels"       node tools/validate_levels.mjs -q
 step "check_gfx"             node tools/check_gfx.mjs
-step "gfx_selftest"          node test/gfx_selftest.mjs
-step "audio_lint"            node test/audio_lint.mjs
-step "audio_analyze"         node test/audio_analyze.mjs --nowav
-step "audio_runtime"         node test/audio_runtime.mjs --strict
-step "game_tests"            node test/game_tests.mjs
-step "main_tests_real"       node test/main_tests.mjs --real
+step "gfx_all"               bash test/gfx_all.sh
+if [ $QUICK -eq 1 ]; then
+  step "audio_lint"          node test/audio_lint.mjs
+  step "audio_notation"      node test/audio_notation_test.mjs
+  step "audio_composer"      node test/audio_composer.mjs --quick
+  step "audio_runtime"       node test/audio_runtime.mjs --strict
+else
+  step "audio_all"           bash test/audio_all.sh
+fi
+step "game_all"              bash test/game_all.sh
+step "main_all (quick)"      bash test/main_all.sh --quick
 step "e2e_smoke"             node test/e2e_smoke.mjs
+step "e2e_budgets"           node test/e2e_budgets.mjs
 # ---- wave 2 integration: gates and QA repro scripts that prove the fixes (QA scripts exit 0 even when a bug reproduces, so those
 #      steps grep their output for BUG_REPRODUCED = true)
 step "qa_visual_assert"      node test/qa_visual_assert.mjs
-step "game_visual"           node test/game_visual.mjs
 step "levels_wave2_check"    node test/levels_wave2_check.mjs
 step "levels_wave3_check"    node test/levels_wave3_check.mjs
 step "levels_wave3_real"     node test/levels_wave3_real.mjs --quick

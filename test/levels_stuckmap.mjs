@@ -23,7 +23,7 @@ function sim(level, seed, frames, minrun, target) {
   for (let i = 0; i < frames; i++) {
     S.hurryT = 0;
     if (target === 'none') { const P0 = S.players[0]; P0.state = 'dying'; P0.dieT = -1e9; P0.y = 400; }
-    fz.step(1);
+    fz.Game.update(target === 'none' ? [] : [{ left: false, right: false, jump: false, fire: false, jumpPressed: false, firePressed: false }]);     // v2: Game.update only (fz.step would also render a k x 256 px frame each time: 10+ min for this audit)
     for (const a of anchor) {
       const e = a.e;
       if (e.t === 'jellop' || e.t === 'glimmer' || e.dead) continue;

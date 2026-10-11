@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 // FIZZ & POP — tools/check_gfx.mjs
-// Conformance check of a GFX implementation against SPEC §3.1 (sprite registry, font, tiles, theme,
+// v2.0 (Abyss Glow) re-base, SPEC_V2 section 7. Same intent as the v1 pixel gate (conformance of a GFX implementation against SPEC 3.1 + SPEC_V2 2:
+// sprite registry, font, tiles, theme, logo, sheet) but resolution independent: every pixel-exact assumption now runs at an explicit bake scale
+// (GFX.setScale(1) for the 1:1 box checks, 2 for the level/bg size checks), world canvases are 256*b x 208*b (b = bake bucket), and the font
+// colour / non-blank gates measure alpha-weighted energy instead of fully opaque pixels (the stroke font is thin and glowing).
+// Conformance check of a GFX implementation against SPEC 3.1 + SPEC_V2 (sprite registry, font, tiles, theme,
 // logo, sheet). Works on the built game (GFX via window.__fizzpop) or on any test page that loads
 // 10_gfx.js as a classic script (global `GFX`).
 //
@@ -20,6 +24,10 @@ const report = await t.page.evaluate((registry) => {
   const G = (typeof GFX !== 'undefined') ? GFX : (window.__fizzpop && window.__fizzpop.GFX);
   if (!G) { fail('no GFX found (neither global GFX nor __fizzpop.GFX)'); return out; }
   try { G.init(); G.init(); } catch (e) { fail('init() threw: ' + e.message); return out; }
+  // v2: the bake scale is explicit. On the real game page Main owns it; pin 1 for the 1:1 box checks (Main re-sets its own k only when k changes).
+  try { if (window.__fizzpop && window.__fizzpop.freeze) window.__fizzpop.freeze(true); } catch (e) { /* test page without Main */ }
+  if (typeof G.setScale !== 'function') fail('GFX.setScale (SPEC_V2 1) missing');
+  else G.setScale(1);
   const mk = (w, h) => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; };
   const pix = (cv) => cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data;
   const opaqueCount = (d) => { let n = 0; for (let i = 3; i < d.length; i += 4) if (d[i] > 0) n++; return n; };
@@ -83,11 +91,11 @@ const report = await t.page.evaluate((registry) => {
     const un = mk(8, 8), q = mk(8, 8);
     G.text(un.getContext('2d'), 'é', 0, 0, '#fff', { shadow: false }); G.text(q.getContext('2d'), '?', 0, 0, '#fff', { shadow: false });
     if (Array.from(pix(un)).join() !== Array.from(pix(q)).join()) fail('font: unknown chars must map to "?"');
-    // colour tint
+    // colour tint (v2: thin glowing strokes -> alpha-weighted colour dominance of every painted pixel, not "opaque pixels")
     const red = mk(8, 8); G.text(red.getContext('2d'), 'H', 0, 0, '#ff0000', { shadow: false });
-    const rd = pix(red); let reddish = 0, other = 0;
-    for (let i = 0; i < rd.length; i += 4) if (rd[i + 3] > 200) { if (rd[i] > 200 && rd[i + 1] < 60 && rd[i + 2] < 60) reddish++; else other++; }
-    if (!reddish || other > reddish * 0.1) fail(`font: colour tint wrong (red ${reddish}, other ${other})`);
+    const rd = pix(red); let wr = 0, wo = 0;
+    for (let i = 0; i < rd.length; i += 4) if (rd[i + 3] > 0) { const a = rd[i + 3] / 255; wr += a * rd[i]; wo += a * (rd[i + 1] + rd[i + 2]); }
+    if (!(wr > 400) || wo > wr * 0.6) /* the white-hot core adds some green/blue by design */ fail(`font: colour tint wrong (red energy ${wr.toFixed(0)}, other ${wo.toFixed(0)})`);
     // alignment: centre / right shift the glyph block
     const probe = (align) => { const c = mk(64, 8); G.text(c.getContext('2d'), 'I', 32, 0, '#fff', { align, shadow: false }); const d = pix(c); let minX = 99; for (let y = 0; y < 8; y++) for (let x = 0; x < 64; x++) if (d[(y * 64 + x) * 4 + 3] > 0 && x < minX) minX = x; return minX; };
     const l = probe('left'), c0 = probe('center'), r = probe('right');
@@ -98,7 +106,7 @@ const report = await t.page.evaluate((registry) => {
     if (opaqueCount(pix(sh)) <= opaqueCount(pix(nsh))) fail('font: shadow:true adds no pixels');
     const sc = mk(32, 32); G.text(sc.getContext('2d'), 'I', 0, 0, '#fff', { scale: 2, shadow: false });
     const n1 = opaqueCount(pix(nsh)); const n2 = opaqueCount(pix(sc));
-    if (n2 < n1 * 2.5) fail(`font: scale:2 should ~quadruple the pixels (${n1} -> ${n2})`);
+    if (n2 < n1 * 1.6) fail(`font: scale:2 should paint clearly more pixels (stroke width is constant, length doubles: >= 1.6x; ${n1} -> ${n2})`);
   } catch (e) { fail('font exception: ' + e.message); }
 
   // ---- tiles / themes -----------------------------------------------------------------------
@@ -107,28 +115,55 @@ const report = await t.page.evaluate((registry) => {
     const names = new Set();
     for (let i = 0; i < 30; i++) {
       const th = G.theme(i);
-      for (const k of ['bg', 'accent', 'accent2']) if (!/^#[0-9a-fA-F]{6}$/.test(th[k] || '')) fail(`theme(${i}).${k} = ${th[k]} is not #rrggbb`);
+      for (const k of ['bg', 'accent', 'accent2', 'glow', 'edge']) if (!/^#[0-9a-fA-F]{6}$/.test(th[k] || '')) fail(`theme(${i}).${k} = ${th[k]} is not #rrggbb`);
       if (!th.name) fail(`theme(${i}) has no name`);
       names.add(th.name);
+      G.setScale(2);
       const cv = G.levelCanvas(i, map);
-      if (cv.width !== 256 || cv.height !== 208) { fail(`levelCanvas(${i}) is ${cv.width}x${cv.height}, expected 256x208`); continue; }
+      // v2: 256b x 208b where b is the bake bucket (levels are capped at 6)
+      const b = cv.width / 256;
+      if (!(b >= 1 && b <= 6) || cv.width !== 256 * b || cv.height !== 208 * b) { fail(`levelCanvas(${i}) is ${cv.width}x${cv.height}, expected 256b x 208b (b = ${b})`); continue; }
       if (G.levelCanvas(i, map) !== cv) fail(`levelCanvas(${i}) is not cached by index`);
       const d = pix(cv);
-      const A = (c, r) => d[((r * 8 + 4) * 256 + c * 8 + 4) * 4 + 3];
-      if (A(0, 5) !== 255) fail(`levelCanvas(${i}): wall tile not opaque`);
+      const A = (c, r) => d[(Math.round((r * 8 + 4) * b) * cv.width + Math.round((c * 8 + 4) * b)) * 4 + 3];
+      if (A(0, 5) < 170) fail(`levelCanvas(${i}): wall tile body too transparent (alpha ${A(0, 5)} < 170: v2 crystal bodies are translucent by design but must read as solid)`);
       if (A(16, 12) !== 0) fail(`levelCanvas(${i}): empty tile in the middle of the arena is not transparent (alpha ${A(16, 12)})`);
-      const pxA = (x, y) => d[(y * 256 + x) * 4 + 3];
+      const pxA = (x, y) => d[(Math.round(y * b) * cv.width + Math.round(x * b)) * 4 + 3];
       if (i === 0 && pxA(17, 100) === 0 && pxA(100, 9) === 0) out.notes.push('levelCanvas: no drop shadow visible next to the left wall / under the ceiling');
     }
     if (names.size !== 6) fail(`theme names: expected 6 distinct, got ${names.size} (${[...names]})`);
     const bgs = new Set(); for (let i = 0; i < 30; i += 5) bgs.add(G.theme(i).bg); if (bgs.size !== 6) fail('theme bg colours of the 6 themes must be distinct');
     const hash = (d) => { let h = 2166136261; for (let k = 0; k < d.length; k++) h = Math.imul(h ^ d[k], 16777619); return h >>> 0; };
+    G.setScale(2);
     const looks = new Set(); for (let i = 0; i < 5; i++) looks.add(hash(pix(G.levelCanvas(i, map))));
     if (looks.size < 2) fail('the 5 round variants inside a theme should look different');
   } catch (e) { fail('tiles/theme exception: ' + e.message); }
 
+  // ---- bgCanvas (v2: opaque, 256b x 208b, cached, out-of-range indices clamped)
+  try {
+    G.setScale(2);
+    for (let i = 0; i < 30; i += 7) {
+      const bc = G.bgCanvas(i); const b = bc.width / 256;
+      if (!(b >= 1 && b <= 4) || bc.width !== 256 * b || bc.height !== 208 * b) fail(`bgCanvas(${i}) is ${bc.width}x${bc.height}, expected 256b x 208b`);
+      if (G.bgCanvas(i) !== bc) fail(`bgCanvas(${i}) is not cached`);
+      const bd = pix(bc); let opq = true; for (let k = 3; k < bd.length; k += 4) if (bd[k] !== 255) { opq = false; break; }
+      if (!opq) fail(`bgCanvas(${i}) is not opaque`);
+    }
+    G.bgCanvas(-5); G.bgCanvas(99); G.bgCanvas(NaN);
+  } catch (e) { fail('bgCanvas exception: ' + e.message); }
+
+  // ---- v2 API additions (SPEC_V2 2): present and callable
+  for (const f of ['setScale', 'define', 'postFX', 'particle']) if (typeof G[f] !== 'function') fail('GFX.' + f + ' missing');
+  try {
+    const c = mk(64, 64), g = c.getContext('2d');
+    for (const kind of ['dot', 'ring', 'spark', 'streak']) { g.clearRect(0, 0, 64, 64); G.particle(g, kind, 32, 32, 4, '#4fc8ff', 1); if (!opaqueCount(pix(c))) fail(`particle('${kind}') draws nothing`); }
+    G.draw(mk(32, 32).getContext('2d'), 'nibbler_move', 0, 4, 4, { tint: '#4fc8ff', glow: 0.5 });
+    const gg = mk(32, 32).getContext('2d'); G.postFX(gg, 2); G.postFX(gg, 1); G.postFX(gg, 0);
+  } catch (e) { fail('v2 API exception: ' + e.message); }
+
   // ---- logo / sheet -------------------------------------------------------------------------
   try {
+    G.setScale(1);
     const c = mk(256, 224); G.drawLogo(c.getContext('2d'), 128, 20, 0);
     const n = opaqueCount(pix(c)); if (n < 1500) fail(`drawLogo draws too little (${n} px)`);
     const c2 = mk(256, 224); G.drawLogo(c2.getContext('2d'), 128, 20, 30);

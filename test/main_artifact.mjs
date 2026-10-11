@@ -31,7 +31,7 @@ if (!process.argv.includes('--no-build')) {
 }
 const frag = fs.readFileSync(FRAG, 'utf8');
 const bare = frag.replace(/<script>[\s\S]*?<\/script>/g, '<script/>');
-check('fragment exists and is smaller than 600 KB', frag.length > 100000 && frag.length < 600 * 1024, String(frag.length));
+check('fragment exists and fits the v2 bundle budget (SPEC_V2 sec. 5: <= 1.5 MB)', frag.length > 100000 && frag.length < 1.5 * 1024 * 1024, String(frag.length));
 check('fragment starts with the <title>', /^<title>Fizz &amp; Pop<\/title>/.test(frag));
 check('no doctype / html / head / body / meta tags outside the script', !/<(!doctype|html|head|body|meta)\b/i.test(bare), (bare.match(/<(!doctype|html|head|body|meta)\b/ig) || []).join(','));
 check('has <style> blocks, the canvas, the touch controls and exactly one script', /<style>/.test(bare) && /<canvas id="screen"/.test(bare) && /id="touch"/.test(bare) && (frag.match(/<script>/g) || []).length === 1);

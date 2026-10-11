@@ -12,7 +12,7 @@ const res = await ev((H, LV) => {
     const N = 3000;
     const anchor = S.enemies.map(e => ({ x: e.x, y: e.y, since: 0, worst: 0, worstAt: null }));
     for (let i = 0; i < N; i++) {
-      S.hurryT = 0; fz.step(1);
+      S.hurryT = 0; fz.Game.update([]);     // v2: update only (fz.step also renders every frame)
       S.enemies.forEach((e, k) => {
         const a = anchor[k];
         if (e.t === 'jellop' || e.t === 'glimmer') return;

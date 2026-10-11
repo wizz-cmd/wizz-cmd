@@ -1,13 +1,35 @@
-/* FIZZ & POP — 50_main.js  (Platform / UX layer, SPEC 2.5 + 3.5)
+/* FIZZ & POP v2.0 — 50_main.js  (Platform / UX layer, SPEC 2.5 + 3.5, SPEC_V2 sec. 1 + 3: "Abyss Glow")
  *
- * Boot, canvas scaling, input (keyboard / gamepad / touch / virtual), the fixed-step loop,
+ * Boot, canvas / DPR handling, post FX + auto quality, input (keyboard / gamepad / touch / virtual), the fixed-step loop,
  * every non-gameplay scene, hi-scores, pause, mute, focus overlay and the window.__fizzpop hooks.
+ *
+ * RENDER   (SPEC_V2 sec. 1) The visible canvas is resolution independent: its backing store is 256k x 224k, k = css width x devicePixelRatio / 256
+ *          quantised to 0.25 steps and clamped to 1..8 (see `pickScale`: when a whole step of device pixels costs <= 8 % / 6.5 % of the free space
+ *          the picture is fitted to it, 1 backing px per device px; otherwise it fills the space and the browser resamples smoothly). Every frame
+ *          sets ctx.setTransform(k,0,0,k,0,0) with imageSmoothingEnabled = true; scenes and Game keep drawing in LOGICAL units (256 x 224).
+ *          GFX.setScale(k) is called whenever k changes (resize, DPR change, zoom). After the scene's render Main calls GFX.postFX(ctx, quality).
+ *          Everything new is feature-detected (GFX.setScale / postFX / bgCanvas / levelCanvas / particle, Game.setOptions), so older modules and the
+ *          stub modules of the tests keep working.
+ *   Quality  0 / 1 / 2 (2 = full bloom + grain, 1 = bloom at 1/8 res, 0 = off). Starts at 2 (1 on coarse-pointer devices). Auto quality: when the
+ *          2-s average of update + render + post FX exceeds 12 ms one level is dropped; 10 s of 2-s windows under 6 ms raise one again (a raise that
+ *          is undone by a drop soon after doubles the next wait, up to 80 s). The level is pushed to Game.setOptions({ quality }) and readable as
+ *          __fizzpop.quality / _main.quality().
+ *          Integrator addition: below quality 0 auto quality also lowers the render scale k (a resolution lever, one GFX bucket step per window, css size
+ *          unchanged), and a severe overload (0.5 s average > 24 ms) steps down at once; both are raised again by the same calm rule. See Q_SEVERE_MS.
+ *   Reduced motion  prefers-reduced-motion: reduce -> Game.setOptions({ reducedMotion: true }), no full-screen flash anywhere in the scenes,
+ *          half the ambient bubbles / plankton. Photosensitivity: no scene flashes the whole screen brighter than 12 % alpha (the story's single
+ *          pearl-grab flash is capped at 12 % and absent with reduced motion); Main blinks nothing faster than 2 Hz.
+ *   Cost    The backdrop of a scene (water, tower shaft, crystal ledges) is painted once per scale into a static layer and copied 1:1; the glass-tube
+ *          logo is refreshed every 3rd frame; Fizz and Pop at 2.4x on the title / ending are baked by Main (bigHeroes) from the cast's own art.
+ *          LOADING: the very first paint (at the final resolution) is a LOADING frame, before GFX.init and the first scene's bakes.
  *
  * SCENES   title -> (story ->) play -> [ending] -> entry -> scores -> title
  *          title idles 10 s -> attract: story -> howto (6 pages: rules, controls, cast, treats, power-ups, bubbles) -> scores -> title.
  *          ending = victory tableau (Fizz & Pop 2x around a glowing Moon Pearl) -> credits (rolling inside a clipped band above the
- *          Fizz / Pearl / Pop tableau, key hint on its own plate) -> the cast waves.
+ *          Fizz / Pearl / Pop tableau, key hint on its own strip) -> the cast waves.
  *          'pause' is an overlay of the play scene (scene() keeps answering 'play'; see _main.paused()).
+ *          Look: near-black water, translucent glass panels with 1 px cyan hairlines and corner ticks, thin wide-tracked glow text, neon chevrons
+ *          around the selected row (concepts/c_abyss_glow/title.png).
  *
  * INPUT    One sampler runs once per fixed update and produces
  *            - two game pads {left,right,jump,fire,jumpPressed,firePressed} (rising edges computed HERE,
@@ -23,7 +45,7 @@
  *     alternative confirm (`alt`) and DELETE in the initials entry; P / Esc / Start = pause or back.
  *     H = how-to-play, T = hi-score table (also menu rows on the title screen, so touch players reach them).
  *   - Taps / clicks on the canvas: menu rows are tappable; on other scenes a tap counts as `ok`. On touch the
- *     title and pause menus use a pitch of ~44 css px per row (drawn as button plates) and QUIT asks YES / NO.
+ *     title and pause menus use a pitch of ~44 css px per row (drawn as glass pills) and QUIT asks YES / NO.
  *   - Touch-only devices (touch UI, no key press and no gamepad seen yet): no "2 PLAYERS" row, no "PUSH Q" blink
  *     (joinHint ''), "TAP" wording everywhere.
  *   - Join: only Q or pad 1 A/B join a P2 into a 1P game (Left Shift is just an extra P2 fire key once P2 plays).
@@ -47,18 +69,16 @@
  *     released by proof of life: a real key / pointer event, or the 500 ms poll once document.hasFocus() has been true for 1.5 s.
  *     A manual pause plays sfx 'pause' and calls AUDIO.pause({suspend:false}) so menu sounds stay audible.
  *   - Audio unlock: every gesture calls AUDIO.init() while the context is not running (iOS "interrupted", calls, Siri).
- *   - Layout (fit): the page box minus the root padding (Artifact skeleton / safe areas) minus 16 px gutters. The scale is
- *     the largest whole number of DEVICE pixels per game pixel when that uses >= 80 % of the achievable scale, else
- *     "sharp bilinear": game drawn 1:1 offscreen, nearest-neighbour blown up into an integer-multiple backing store,
- *     CSS-scaled smoothly. Touch: portrait stack (picture on top, pads right below, buttons grow with the free height)
- *     or landscape side pads, whichever gives the larger picture (landscape needs vw >= 560); frames too small for
- *     either (best scale < 1) overlay translucent pads on the picture margins. The desktop legend is hidden when it
- *     would cost a scale step. Portrait: the page is as tall as the padded viewport (--page-h), the controls rest at its bottom
- *     (thumb zone), the picture is centred in the space above them. The fixed side pads sit inside the measured root padding
+ *   - Layout (fit): the page box minus the root padding (Artifact skeleton / safe areas) minus 16 px gutters; the picture takes the largest
+ *     scale that fits (continuous: no pixel-grid steps), then `pickScale` snaps it as described under RENDER. Touch: portrait stack (picture on
+ *     top, pads right below, buttons grow with the free height) or landscape side pads, whichever gives the larger picture (landscape needs
+ *     vw >= 560); frames too small for either (best scale < 1) overlay translucent pads on the picture margins. The desktop legend is hidden
+ *     when it would cost the picture more than 14 % of its scale. Portrait: the page is as tall as the padded viewport (--page-h), the controls
+ *     rest at its bottom (thumb zone), the picture is centred in the space above them. The fixed side pads sit inside the measured root padding
  *     (--pad-l/r/t/b), whichever mechanism the host uses for safe areas.
  *   - Ambient bubbles (title, story, how-to, scores, entry) never cross text, sprites or panels: those scenes draw their content
- *     on a transparent layer while every text run / sprite / plate / panel is recorded, then the bubbles are drawn under the
- *     layer and fade out near every recorded rectangle (`layered`).
+ *     on a transparent layer (at the canvas resolution) while every text run / sprite / plate / panel is recorded, then the bubbles are drawn
+ *     under the layer and fade out near every recorded rectangle (`layered`).
  *   - The first touch on a device with a fine primary pointer flips the page to the touch layout; the tap is mapped through the
  *     canvas rectangle taken BEFORE the flip, so it hits the row the finger was on.
  *   - A scene that throws on 90 consecutive frames is abandoned for the title (soft-lock guard).
@@ -68,11 +88,15 @@
  * DEBUG   window.__fizzpop = the SPEC 3.5 contract (Game, GFX, AUDIO, LEVELS, C, U, scene, goto, input, freeze, step, start)
  *          plus non-contract extras under `_main` (layout, fit, paused, setPaused, holds, scores, resetScores, session, toast,
  *          touchMode, touchOnly, sceneTime, entry, padSlots, rows, confirmQuit, ambient, ambientReset, endingBand, howtoPage,
- *          persistent). Every hook finishes the boot on first use. goto('pause') pauses a running game; input.set() additionally accepts
+ *          persistent) and the v2 ones: k(), scaleLog(), quality(), setQuality(q, lock), autoQuality(), autoQualityFeed(costMs, dtMs),
+ *          autoQualityReset(), reducedMotion(), setReducedMotion(b | null), options(), perf(), renderNow(), bigHeroes(); __fizzpop.quality
+ *          (getter), __fizzpop.bootMs (getter, -1 until the first title paint), __fizzpop.loadingMs (the LOADING frame) and __fizzpop.bootProfile
+ *          (ms per boot phase). layout() additionally carries k, snapped, backW, backH.
+ *          Every hook finishes the boot on first use. goto('pause') pauses a running game; input.set() additionally accepts
  *          {up, down, pause}; goto('entry'|'ending') take {entries:[{pi,score,round}], res:{won,level,scores,players}}.
  *
  *  * The file ends with `Main.boot();` (SPEC build notes). Every DOM lookup is null-safe so the module also
- * runs on minimal test pages that only contain <canvas id="screen">.
+ *    runs on minimal test pages that only contain <canvas id="screen">.
  */
 const Main = (() => {
   // ===================================================================================================
@@ -83,8 +107,16 @@ const Main = (() => {
   const GUTTER = 16;                 // page side gutter in px (SPEC 2.5)
   const V_PAD = 8;                   // page top/bottom padding in px
   const LEGEND_GAP = 12;
-  const INT_FILL = 0.8;              // a whole-device-pixel scale is used when it reaches >= 80 % of the achievable scale
-  const MAX_BACKING = 4;             // sharp-bilinear backing store: at most 4x the logical size
+  const K_MIN = 1, K_MAX = 8, K_STEP = 0.25;   // render scale k = backing px per logical px (SPEC_V2 sec. 1): quantised to 0.25 steps, clamp 1..8
+  const SNAP_TOL = 0.065, BUCKET_TOL = 0.08;            // the picture is fitted to whole 0.25 steps of device pixels (1:1, crisp) when that costs <= 6.5 % of the free space
+  const LEGEND_KEEP = 0.86;          // the desktop legend stays while it costs the picture at most 14 % of its scale
+  const Q_DROP_MS = 12, Q_RAISE_MS = 6, Q_WINDOW_MS = 2000, Q_RAISE_AFTER_MS = 10000, Q_WAIT_MAX_MS = 80000;   // auto quality (SPEC_V2 sec. 1)
+  // Integrator (v2.0): a resolution lever BELOW quality 0 and a fast path for severe overload. SPEC_V2 5 asks p95 <= 16 ms after the first 3 s at 6x CPU throttle on a
+  // 390x844 DPR 3 phone; a software rasteriser pays per backing pixel (k 4 = 1024x896: ~30 ms at 6x even at quality 0, k 2: ~10 ms), so when quality 0 is not enough Main renders
+  // at a smaller k (the css size is unchanged, the browser upscales smoothly), one GFX bake bucket step (<= 80 % of k, never below 1.5) per window, and raises it again
+  // after the same calm period + anti-flap wait as the quality levels. Severe overload (a 0.4 s window of >= 5 frames whose MEDIAN cost is > 24 ms: one hitch is not overload)
+  // steps down immediately instead of waiting for a 2 s window, and the lever jumps straight to the k whose predicted cost (~ k^2) is back under 12 ms, so the ladder settles in ~2-3 s.
+  const Q_SEVERE_MS = 24, Q_FAST_WINDOW_MS = 400, Q_FAST_MIN_FRAMES = 5, K_CAP_MIN = 1.5, K_CAP_STEP = 0.8, Q_SKIP_FRAMES = 3;
   const STALL_MS = 700;              // no rAF for this long (iframe hidden / throttled) = the page is not live
   const TOUCH_ROW_CSS = 44;          // minimum tappable menu row height in css px
   const PILL_H = 44, ROW_GAP = 10, CTRL_PAD = 8, BTN_GAP = 8, PAD_SPREAD = 16, BTN_MAX_W = 92, BTN_MAX_H = 150;
@@ -106,9 +138,11 @@ const Main = (() => {
   const FAIL_LIMIT = 90;
   const PAD_SOUND_HINT = 45;          // frames of "audio not running" before TAP FOR SOUND shows
 
+  // Abyss palette (concepts/c_abyss_glow/palette.json): cyan = Pop / 2UP / text, magenta = Fizz / 1UP, amber = HI SCORE / highlights,
+  // ember = warnings, lime = OK, white-hot = the brightest few percent. Text greys are cool cyan tints (never neutral grey).
   const COL = {
-    fizz: '#ff6fae', pop: '#6fd8ff', gold: '#ffe36b', coral: '#ff6a5e', white: '#ffffff',
-    text: '#cfd3ff', dim: '#9aa1d8', dimmer: '#737ab8', green: '#7dff8a',
+    fizz: '#ff3ea5', pop: '#3cf2ff', gold: '#ffb23e', coral: '#ff6a3d', white: '#eaffff',
+    hi: '#d4fbff', text: '#8eeaff', dim: '#6cc4dc', dimmer: '#5aa2c0', green: '#b6ff3b', violet: '#8a5cff', crimson: '#ff2a2a', void: '#04060d',
   };
   const PLAYER_COL = [COL.fizz, COL.pop];
 
@@ -138,8 +172,14 @@ const Main = (() => {
   // ===================================================================================================
   // State
   // ===================================================================================================
-  // canvas = the visible #screen; lcanvas/ctx = the 256x224 logical canvas every scene draws into; vctx = the visible context
-  let canvas = null, ctx = null, vctx = null, lcanvas = null, rootEl = null, legendEl = null, touchEl = null, focusEl = null, soundBtn = null;
+  // canvas = the visible #screen (backing store 256k x 224k); ctx = vctx = its context: every frame sets ctx.setTransform(k,0,0,k,0,0) and the scenes
+  // keep drawing in LOGICAL units (256 x 224). (`ctx` is temporarily the layer context while a `layered` scene records its content.)
+  let canvas = null, ctx = null, vctx = null, rootEl = null, legendEl = null, touchEl = null, focusEl = null, soundBtn = null;
+  let K = 1;                                            // current render scale (output px per logical px), 0.25 steps, 1..8
+  let kCap = Infinity, kNat = 1;                         // resolution lever (auto quality below level 0): the cap on K, and the k the layout would use without it
+  let quality = 2, qualityLocked = false, maxQuality = 2;   // post FX / particle level 0..2 (auto quality moves it unless locked)
+  let reducedMotion = false, reducedOverride = null, motionMq = null, dprMq = null;
+  let renderCount = 0, bootMs = -1, loadingMs = -1, sceneReady = false;                // sceneReady: the first scene has been entered (before that a resize must not paint it)
   let booted = false, bootDone = false, frozen = false, paused = false, pauseSel = 0, confirmQuit = false, autoPaused = false;
   let scene = 'title', sceneT = 0, sceneArgs = null;
   let acc = 0, last = 0, lastRaf = 0, failStreak = 0;
@@ -147,8 +187,7 @@ const Main = (() => {
   let audioSynced = false, focusDismissed = false, deadAudioT = 0;
   let toastMsg = '', toastT = 0, toastColor = COL.gold;
   let pointerEvt = null;
-  let backing = 1;                                      // visible canvas backing-store multiplier (1 = 256x224)
-  let layout = { scale: 0, w: 0, h: 0, vw: 0, vh: 0, touch: false, land: false, mode: 'desk', sharp: false, m: 1 };
+  let layout = { scale: 0, w: 0, h: 0, vw: 0, vh: 0, touch: false, land: false, mode: 'desk', sharp: false, m: 1, k: 1, dpr: 1 };
   const holds = new Set();                              // reasons the page is not live: blur, hidden, offscreen, stall
   const session = { reached: 0, lastPlayers: 1 };      // survives game-over, lives as long as the page
   const reported = new Set();
@@ -186,6 +225,13 @@ const Main = (() => {
       const x0 = al === 'center' ? x - w / 2 : al === 'right' ? x - w : x;
       note(x0, y, x0 + w, y + 8 * sc);
     }
+    if (opts && opts.alpha !== undefined) {                          // (alpha is not a GFX.text option: Main applies it itself)
+      const o = Object.assign({}, opts), ga = ctx.globalAlpha;
+      delete o.alpha;
+      ctx.globalAlpha = ga * opts.alpha;
+      try { GFX.text(ctx, s, x, y, color, o); } finally { ctx.globalAlpha = ga; }
+      return;
+    }
     GFX.text(ctx, s, x, y, color, opts);
   };
   const ctext = (s, y, color, opts) => text(s, C.W / 2, y, color, Object.assign({ align: 'center' }, opts));
@@ -195,8 +241,40 @@ const Main = (() => {
     GFX.draw(ctx, name, frame, x, y, opts);
   };
   const sprC = (name, frame, cx, y, opts) => { if (GFX.has(name)) spr(name, frame, cx - GFX.size(name).w / 2, y, opts); };
-  /** A translucent panel behind text (recorded, so the ambient bubbles keep out of it). */
-  const panel = (x, y, w, h, fill) => { note(x, y, x + w, y + h); ctx.fillStyle = fill; ctx.fillRect(x, y, w, h); };
+  /** A translucent near-black panel (recorded, so the ambient bubbles keep out of it) with a 1 px cyan hairline and four brighter corner ticks.
+   *  o = { a: fill alpha (default 0.62), edge: hairline alpha (default 0.42; 0 = none), col: hairline colour [r,g,b] (default cyan), ticks: false }. */
+  const CYAN = [60, 242, 255];
+  function panel(x, y, w, h, o) {
+    o = o || {};
+    note(x, y, x + w, y + h);
+    const a = o.a === undefined ? 0.62 : o.a, edge = o.edge === undefined ? 0.42 : o.edge, col = o.col || CYAN, hw = 1.2 / K;
+    ctx.fillStyle = 'rgba(3,6,16,' + a.toFixed(3) + ')';
+    ctx.fillRect(x, y, w, h);
+    if (edge <= 0) return;
+    ctx.save();
+    ctx.lineWidth = hw;
+    ctx.strokeStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + edge.toFixed(3) + ')';
+    ctx.strokeRect(x + hw / 2, y + hw / 2, w - hw, h - hw);
+    if (o.ticks !== false && w > 12 && h > 12) {                      // corner ticks: the hairline is brighter where it turns
+      const L = Math.min(4, w / 3, h / 3);
+      ctx.strokeStyle = 'rgba(' + Math.min(255, col[0] + 120) + ',' + Math.min(255, col[1] + 10) + ',255,' + Math.min(1, edge * 1.9).toFixed(3) + ')';
+      ctx.lineWidth = hw * 1.4;
+      ctx.beginPath();
+      for (const [cx, cy, sx, sy] of [[x, y, 1, 1], [x + w, y, -1, 1], [x, y + h, 1, -1], [x + w, y + h, -1, -1]]) {
+        ctx.moveTo(cx + sx * L, cy + sy * hw * 0.7); ctx.lineTo(cx + sx * hw * 0.7, cy + sy * hw * 0.7); ctx.lineTo(cx + sx * hw * 0.7, cy + sy * L);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+  /** A horizontal hairline that fades out at both ends (section rules under headings). */
+  function rule(cx, y, halfW, col, a) {
+    note(cx - halfW, y - 1, cx + halfW, y + 1);
+    const g = ctx.createLinearGradient(cx - halfW, 0, cx + halfW, 0), c = col || CYAN, A = a === undefined ? 0.5 : a;
+    g.addColorStop(0, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0)'); g.addColorStop(0.5, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + A.toFixed(3) + ')'); g.addColorStop(1, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(cx - halfW, y, halfW * 2, 1.2 / K);
+  }
   // Cast sprite id: most creatures animate as '<id>_move'; the Bonefin ghost is simply 'bonefin' (SPEC 3.1).
   // (e2e fix: the how-to cast page and the credits asked for a non-existent 'bonefin_move' and drew nothing.)
   const castSprite = (id) => (id === 'bonefin' ? id : id + '_move');
@@ -205,19 +283,99 @@ const Main = (() => {
   const touchOnly = () => touchMode && !keyboardSeen && !padSeen;
   const rgba = (r, g, b, a) => 'rgba(' + r + ',' + g + ',' + b + ',' + a.toFixed(3) + ')';
 
-  /** Sprite drawn k times larger (nearest neighbour) through a small scratch canvas. */
-  let bigScratch = null;
-  function sprBig(name, frame, x, y, k, opts) {
-    if (!GFX.has(name)) return;
-    const sz = GFX.size(name);
-    if (!bigScratch) { bigScratch = document.createElement('canvas'); }
-    if (bigScratch.width < sz.w || bigScratch.height < sz.h) { bigScratch.width = Math.max(bigScratch.width, sz.w); bigScratch.height = Math.max(bigScratch.height, sz.h); }
-    const g = bigScratch.getContext('2d');
-    g.imageSmoothingEnabled = false;
-    g.clearRect(0, 0, bigScratch.width, bigScratch.height);
-    GFX.draw(g, name, frame, 0, 0, opts);
-    note(x, y, x + sz.w * k, y + sz.h * k);
-    ctx.drawImage(bigScratch, 0, 0, sz.w, sz.h, Math.round(x), Math.round(y), sz.w * k, sz.h * k);
+  // ---------------------------------------------------------------------------------------------------
+  // Big heroes (title, ending): Fizz and Pop at 2-3x the game size. The registry sprites are baked for 1x and would blur when scaled up, so
+  // Main bakes these few frames itself, from the cast's own art (GFX_CAST.art.hero), at the current render scale. Falls back to the registry
+  // sprite (normal size) when that art is not there (stub builds). The cache is bounded (pixels) and dropped whenever the scale changes.
+  // ---------------------------------------------------------------------------------------------------
+  const bigHeroes = (() => {
+    const cache = new Map();
+    const HS = { p1: 1.1, p2: 1.1 * 0.97 };                 // the art scale GFX_CAST gives each twin (about the bottom centre)
+    const PAD = { l: 7, r: 6, t: 7, b: 4 };                 // light margin around the 16 x 16 box, in box units
+    const MAX_PX = 5e6, BAKE_K = 5;
+    let px = 0;
+    const artFn = () => (typeof GFX_CAST !== 'undefined' && GFX_CAST && GFX_CAST.art && typeof GFX_CAST.art.hero === 'function' && typeof NEON !== 'undefined' ? GFX_CAST.art.hero : null);
+    function clear() { for (const e of cache.values()) { e.cv.width = 1; e.cv.height = 1; } cache.clear(); px = 0; }
+    function bake(who, pose, f, nf, S, kb) {
+      const art = artFn();
+      if (!art) return null;
+      const key = who + '|' + pose + '|' + f + '/' + nf + '|' + S + '|' + kb;
+      let e = cache.get(key);
+      if (e) { cache.delete(key); cache.set(key, e); return e; }
+      const w = Math.ceil((16 + PAD.l + PAD.r) * S * kb), h = Math.ceil((16 + PAD.t + PAD.b) * S * kb);
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const g = cv.getContext('2d');
+      const k = kb * S, hs = HS[who === 'pop' ? 'p2' : 'p1'];
+      g.setTransform(k, 0, 0, k, PAD.l * S * kb, PAD.t * S * kb);
+      g.translate(8, 16); g.scale(hs, hs); g.translate(-8, -16);
+      const o = { pose, ph: Math.PI * 2 * f / nf, f, w: NEON.lwFor(k * hs), big: k * hs > 7.5, name: who + '_' + pose, k, S: hs, box: { w: 16, h: 16 } };
+      try { art(g, who, o); } catch (err) { reportError('bigHero ' + who + ' ' + pose, err); }
+      e = { cv, w, h, l: PAD.l * S, t: PAD.t * S, kb };
+      cache.set(key, e); px += w * h;
+      while (px > MAX_PX && cache.size > 1) { const k0 = cache.keys().next().value; const o0 = cache.get(k0); px -= o0.cv.width * o0.cv.height; o0.cv.width = 1; o0.cv.height = 1; cache.delete(k0); }
+      return e;
+    }
+    /** who 'fizz' | 'pop'; (cx, by) = bottom centre of the 16 x 16 box in logical px; S = size factor; frame f of nf (loop phase). */
+    function draw(who, pose, f, nf, cx, by, S, flip, alpha) {
+      const kb = Math.min(K, BAKE_K), e = bake(who, pose, f, nf, S, kb);
+      if (!e) {
+        const name = (who === 'pop' ? 'p2_' : 'p1_') + (pose === 'puff' ? 'shoot' : pose === 'blink' ? 'idle' : pose);
+        if (GFX.has(name)) { note(cx - 8, by - 16, cx + 8, by); GFX.draw(ctx, name, pose === 'blink' || pose === 'puff' ? (pose === 'blink' ? 1 : 0) : f % Math.max(1, GFX.frames(name)), cx - 8, by - 16, { flip, alpha }); }
+        return;
+      }
+      note(cx - 8 * S, by - 16 * S, cx + 8 * S, by);
+      const x = cx - 8 * S - e.l, y = by - 16 * S - e.t, w = e.w / e.kb, h = e.h / e.kb;
+      ctx.save();
+      if (alpha !== undefined && alpha !== 1) ctx.globalAlpha *= alpha;
+      if (flip) { ctx.translate(cx, 0); ctx.scale(-1, 1); ctx.translate(-cx, 0); }
+      ctx.drawImage(e.cv, x, y, w, h);
+      ctx.restore();
+    }
+    return { draw, clear, px: () => px, count: () => cache.size };
+  })();
+
+  /** The Moon Pearl at any size: pastel sphere, pearl-white highlight, thin-film bands, a luminous rim, soft halo and a few orbiting sparks. */
+  function pearl(cx, cy, r, t, a) {
+    a = a === undefined ? 1 : a;
+    const pul = 0.92 + Math.sin(t / 22) * 0.08;
+    ctx.save();
+    ctx.globalAlpha *= a;
+    ctx.globalCompositeOperation = 'lighter';
+    let g = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, r * 3.4 * pul);
+    g.addColorStop(0, 'rgba(150,170,255,0.3)'); g.addColorStop(0.4, 'rgba(90,110,255,0.1)'); g.addColorStop(1, 'rgba(60,80,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - r * 3.6, cy - r * 3.6, r * 7.2, r * 7.2);
+    g = ctx.createRadialGradient(cx, cy, r * 0.8, cx, cy, r * 1.9);
+    g.addColorStop(0, 'rgba(60,242,255,0.24)'); g.addColorStop(1, 'rgba(60,242,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(cx - r * 2, cy - r * 2, r * 4, r * 4);
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(4,6,14,0.9)';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.save();
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.clip();
+    ctx.globalCompositeOperation = 'lighter';
+    g = ctx.createRadialGradient(cx - r * 0.32, cy - r * 0.38, 0, cx - r * 0.1, cy - r * 0.1, r * 1.25);
+    g.addColorStop(0, 'rgba(255,255,255,0.6)'); g.addColorStop(0.28, 'rgba(255,190,230,0.4)'); g.addColorStop(0.62, 'rgba(120,200,255,0.36)'); g.addColorStop(1, 'rgba(160,100,255,0.55)');
+    ctx.fillStyle = g; ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+    if (ctx.createConicGradient) {
+      const cg = ctx.createConicGradient(t / 90, cx, cy);
+      ['rgba(60,242,255,0.34)', 'rgba(138,92,255,0.34)', 'rgba(255,62,165,0.34)', 'rgba(255,178,62,0.3)', 'rgba(60,242,255,0.34)'].forEach((c, i) => cg.addColorStop(i / 4, c));
+      ctx.lineWidth = r * 0.5; ctx.strokeStyle = cg; ctx.beginPath(); ctx.arc(cx, cy, r * 0.74, 0, Math.PI * 2); ctx.stroke();
+    }
+    ctx.restore();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineWidth = Math.max(1.3 / K, r * 0.07);
+    ctx.strokeStyle = 'rgba(210,250,255,0.95)';
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.lineWidth = Math.max(1.6 / K, r * 0.09); ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath(); ctx.arc(cx, cy, r * 0.7, Math.PI * 1.1, Math.PI * 1.4); ctx.stroke();
+    ctx.restore();
+    if (typeof GFX.particle === 'function') {
+      for (let i = 0; i < 3; i++) {
+        const an = t / 28 + i * 2.1;
+        GFX.particle(ctx, 'spark', cx + Math.cos(an) * r * 1.55, cy + Math.sin(an) * r * 1.35, Math.max(1.4, r * 0.17), i === 1 ? '#ffd98a' : '#ffffff', 0.9 * a * (0.7 + 0.3 * Math.sin(t / 7 + i)));
+      }
+    }
   }
 
   /** Log an error once per distinct message; the loop keeps running. */
@@ -228,38 +386,100 @@ const Main = (() => {
     console.error('[Main] ' + msg + (e && e.stack ? '\n' + e.stack : ''));
   }
 
-  const gradCache = {};
-  function backdrop(top, bottom) {
-    const key = top + bottom;
-    let g = gradCache[key];
-    if (!g) { g = ctx.createLinearGradient(0, 0, 0, C.H); g.addColorStop(0, top); g.addColorStop(1, bottom); gradCache[key] = g; }
-    ctx.fillStyle = g;
-    ctx.fillRect(0, 0, C.W, C.H);
+  // Backdrop of every non-play scene: the round-1 water of GFX (near-black gradient, god-rays, giant distant jellyfish), stretched over the full frame.
+  const BG_TITLE = 0;
+  function drawBg(i) {
+    let cv = null;
+    try { if (typeof GFX.bgCanvas === 'function') cv = GFX.bgCanvas(i === undefined ? BG_TITLE : i); } catch (e) { reportError('bgCanvas', e); }
+    if (cv && cv.width > 8) ctx.drawImage(cv, 0, 0, cv.width, cv.height, 0, 0, C.W, C.H);
+    else { ctx.fillStyle = COL.void; ctx.fillRect(0, 0, C.W, C.H); }
+  }
+  /** A soft dark wash from the edges toward `y0` (keeps text legible over the busiest part of the water). */
+  function dim(a, y0 = 0, y1 = C.H) {
+    ctx.fillStyle = 'rgba(3,5,14,' + a.toFixed(3) + ')';
+    ctx.fillRect(0, y0, C.W, y1 - y0);
   }
 
-  /** Round-1 tower walls + floor drawn from the theme tiles (the "frame" of title / story / howto). */
+  /** Round-1 tower walls + floor of the crystal tower (the "frame" of story / how-to / scores), cropped from the real level canvas. */
   function towerFrame() {
     let lc = null;
-    try { lc = GFX.levelCanvas(0, LEVELS[0].map); } catch (e) { reportError('towerFrame', e); }
-    if (!lc) return;
-    ctx.drawImage(lc, 0, 0, 16, 208, 0, C.MAP_Y, 16, 208);
-    ctx.drawImage(lc, 240, 0, 16, 208, 240, C.MAP_Y, 16, 208);
-    ctx.drawImage(lc, 16, 200, 224, 8, 16, C.MAP_Y + 200, 224, 8);
+    try { if (typeof GFX.levelCanvas === 'function') lc = GFX.levelCanvas(0, LEVELS[0].map); } catch (e) { reportError('towerFrame', e); }
+    if (!lc || lc.width < 8) return;
+    const sx = lc.width / C.W, sy = lc.height / 208;
+    ctx.drawImage(lc, 0, 0, 16 * sx, 208 * sy, 0, C.MAP_Y, 16, 208);
+    ctx.drawImage(lc, 240 * sx, 0, 16 * sx, 208 * sy, 240, C.MAP_Y, 16, 208);
+    ctx.drawImage(lc, 16 * sx, 200 * sy, 224 * sx, 8 * sy, 16, C.MAP_Y + 200, 224, 8);
+  }
+
+  // ---------------------------------------------------------------------------------------------------
+  // Static back layers: the backdrop of a scene (water + shaft + ledges ...) never changes, so it is painted ONCE per render scale into a
+  // canvas of the visible size and copied 1:1 every frame (a 1:1 copy is ~10x cheaper than the scaled blits of the baked world canvases).
+  // At most two are kept (the current scene's and the previous one's).
+  // ---------------------------------------------------------------------------------------------------
+  const statics = new Map();
+  function staticBack(key, paintFn) {
+    const W = canvas.width, H = canvas.height;
+    let e = statics.get(key);
+    if (e) { statics.delete(key); statics.set(key, e); }
+    if (!e || e.w !== W || e.h !== H || e.k !== K) {
+      if (!e) {
+        while (statics.size >= 2) { const k0 = statics.keys().next().value; const o = statics.get(k0); o.cv.width = 1; o.cv.height = 1; statics.delete(k0); }
+        e = { cv: document.createElement('canvas'), w: 0, h: 0, k: 0 };
+        statics.set(key, e);
+      }
+      e.cv.width = W; e.cv.height = H; e.w = W; e.h = H; e.k = K;
+      const g = e.cv.getContext('2d'), main = ctx;
+      g.setTransform(K, 0, 0, K, 0, 0); g.imageSmoothingEnabled = true;
+      ctx = g;
+      try { paintFn(); } catch (err) { reportError('staticBack ' + key, err); } finally { ctx = main; }
+    }
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.drawImage(e.cv, 0, 0);
+    ctx.restore();
+  }
+  function dropStatics() { for (const e of statics.values()) { e.cv.width = 1; e.cv.height = 1; } statics.clear(); }
+
+  /** The glass-tube wordmark costs ~6 ms per frame in a software rasteriser, and only its bubbles move: it is drawn into a small layer that is
+   *  refreshed every 3rd frame (20 Hz is plenty for rising bubbles) and copied 1:1 in between. Returns { total, uy } like GFX.drawLogo. */
+  const logoLayer = { cv: null, k: 0, w: 0, at: -99, info: null };
+  const LOGO_BOX = { x: 0, y: 0, w: 256, h: 86 };
+  function drawLogoCached(cx, y, t, every, alpha) {
+    const W = Math.ceil(LOGO_BOX.w * K), H = Math.ceil(LOGO_BOX.h * K), L = logoLayer;
+    if (alpha !== undefined && alpha <= 0.001) return L.info || { total: 208, uy: y + 32 };       // not drawn (nor baked) yet
+    const stale = !L.cv || L.k !== K || L.y !== y || L.cx !== cx || t < L.t || t - L.t >= (every || 3) / 60 - 1e-9;
+    if (stale) {
+      if (!L.cv) L.cv = document.createElement('canvas');
+      if (L.cv.width !== W || L.cv.height !== H) { L.cv.width = W; L.cv.height = H; } else L.cv.getContext('2d').clearRect(0, 0, W, H);
+      const g = L.cv.getContext('2d'), main = ctx;
+      g.setTransform(K, 0, 0, K, -LOGO_BOX.x * K, -LOGO_BOX.y * K); g.imageSmoothingEnabled = true;
+      ctx = g;
+      try { L.info = GFX.drawLogo(g, cx, y, t); } catch (err) { reportError('drawLogo', err); } finally { ctx = main; }
+      L.k = K; L.y = y; L.cx = cx; L.t = t;
+    }
+    if (L.cv) {
+      ctx.save();
+      if (alpha !== undefined && alpha < 1) ctx.globalAlpha *= alpha;
+      ctx.drawImage(L.cv, 0, 0, L.cv.width, L.cv.height, LOGO_BOX.x, LOGO_BOX.y, L.cv.width / K, L.cv.height / K);
+      ctx.restore();
+    }
+    return L.info || { total: 208, uy: y + 32 };
   }
 
   // ===================================================================================================
-  // Ambient bubbles (title, story, how-to, scores, entry, ending)
+  // Ambient bubbles + plankton (title, story, how-to, scores, entry, ending)
   // ===================================================================================================
   const ambient = (() => {
-    const list = [];
+    const list = [], specks = [];
     let r = null;
     const KINDS = ['', '', '', '', 'nibbler', '', '', 'jellop', '', '', 'crabbit', '', '', 'springle'];
     function reset() {                                    // the seeded start state (also a test hook: runs become comparable frame by frame)
       r = U.rng(2024);
-      list.length = 0;
+      list.length = 0; specks.length = 0;
       for (let i = 0; i < KINDS.length; i++) {
         list.push({ x: r.int(4, 236), y: r.int(0, C.H), vy: r.float(0.22, 0.55), ph: r.float(0, 6.28), kind: KINDS[i] });
       }
+      for (let i = 0; i < 48; i++) specks.push({ x: r.float(0, C.W), y: r.float(0, C.H), vy: r.float(0.05, 0.2), vx: r.float(-0.04, 0.04), s: r.float(0.5, 1.1), a: r.float(0.1, 0.34), ph: r.float(0, 6.28), c: i % 5 === 0 ? '#ffb23e' : i % 3 === 0 ? '#ff3ea5' : '#3cf2ff' });
     }
     reset();
     const SIZE = 16, FADE = 10;
@@ -270,13 +490,28 @@ const Main = (() => {
           b.y -= b.vy;
           if (b.y < -20) { b.y = C.H + 6; b.x = r.int(4, 236); }
         }
+        for (const p of specks) {
+          p.y -= p.vy; p.x += p.vx;
+          if (p.y < -2) { p.y = C.H + 2; p.x = r.float(0, C.W); }
+          if (p.x < -2) p.x = C.W + 2; else if (p.x > C.W + 2) p.x = -2;
+        }
       },
       /** withEnemies=false: plain faint bubbles only (text-heavy scenes stay legible).
        *  avoid = [[x0,y0,x1,y1], ...]: a bubble fades out as its 16 px box nears one of these rectangles (menu column, every text run,
-       *  panel and sprite of the scene) and is invisible whenever its box touches one: bubbles never cross text or panels (K1). */
+       *  panel and sprite of the scene) and is invisible whenever its box touches one: bubbles never cross text or panels (K1).
+       *  Reduced motion halves the number of bubbles and specks (SPEC_V2 sec. 1). */
       draw(t, alpha = 0.7, withEnemies = true, avoid = null) {
         shown.length = 0;
-        for (const b of list) {
+        const nSpecks = quality < 1 ? 0 : (reducedMotion ? 12 : quality >= 2 ? 48 : 28);
+        if (nSpecks && typeof GFX.particle === 'function') {
+          for (let i = 0; i < nSpecks; i++) {
+            const p = specks[i], tw = 0.7 + 0.3 * Math.sin(t / 40 + p.ph);
+            GFX.particle(ctx, 'dot', p.x, p.y, p.s, p.c, p.a * tw * (alpha > 0.5 ? 1 : 0.7));
+          }
+        }
+        const n = reducedMotion ? list.length >> 1 : list.length;
+        for (let bi = 0; bi < n; bi++) {
+          const b = list[bi];
           const x = b.x + Math.sin(t / 38 + b.ph) * 5, y = b.y;
           let a = alpha;
           if (avoid) {
@@ -300,23 +535,26 @@ const Main = (() => {
   })();
 
   /** Scenes with ambient bubbles draw their content on a transparent layer while every text run, sprite and panel is recorded;
-   *  the bubbles are then drawn over the backdrop but UNDER that layer, avoiding every recorded rectangle (plus `extra`). */
+   *  the bubbles are then drawn over the backdrop but UNDER that layer, avoiding every recorded rectangle (plus `extra`).
+   *  The layer has the visible canvas' resolution (k x), so nothing is resampled. */
   let layerCv = null, layerCtx = null, lastAvoid = [];
   function layered(t, alpha, withEnemies, backFn, contentFn, extra) {
-    if (!layerCv) {
-      layerCv = document.createElement('canvas'); layerCv.width = C.W; layerCv.height = C.H;
-      layerCtx = layerCv.getContext('2d'); layerCtx.imageSmoothingEnabled = false;
-    }
+    const W = canvas.width, H = canvas.height;
+    if (!layerCv) { layerCv = document.createElement('canvas'); layerCtx = layerCv.getContext('2d'); }
+    if (layerCv.width !== W || layerCv.height !== H) { layerCv.width = W; layerCv.height = H; }
     const main = ctx, prevRec = rec;
     backFn();
-    layerCtx.clearRect(0, 0, C.W, C.H);
+    layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+    layerCtx.clearRect(0, 0, W, H);
+    layerCtx.setTransform(K, 0, 0, K, 0, 0);
+    layerCtx.globalAlpha = 1; layerCtx.globalCompositeOperation = 'source-over'; layerCtx.imageSmoothingEnabled = true;
     const mine = [];
     ctx = layerCtx; rec = mine;
     try { contentFn(); } finally { ctx = main; rec = prevRec; }        // a throwing scene never leaves the recorder or the layer switched on
     const avoid = extra ? mine.concat(extra) : mine;
     lastAvoid = avoid;
     ambient.draw(t, alpha, withEnemies, avoid);
-    main.drawImage(layerCv, 0, 0);
+    main.drawImage(layerCv, 0, 0, W, H, 0, 0, C.W, C.H);
   }
 
   // ===================================================================================================
@@ -634,37 +872,40 @@ const Main = (() => {
   }
   function toast(msg, color) { toastMsg = msg; toastT = TOAST_FRAMES; toastColor = color || COL.gold; }
 
-  /** Small crossed-out speaker, drawn by code at the top-right corner while muted. */
-  const MUTE_ICON = ['...w....', '..ww.r.r', 'www...r.', 'www..r.r', '..ww....', '...w....'];
+  /** Small crossed-out speaker (thin crimson strokes + halo), drawn at the top-right corner while muted. */
   function drawMuteIcon(x, y) {
-    for (let pass = 0; pass < 2; pass++) {
-      MUTE_ICON.forEach((row, ry) => {
-        for (let rx = 0; rx < row.length; rx++) {
-          const ch = row[rx];
-          if (ch === '.') continue;
-          ctx.fillStyle = pass === 0 ? 'rgba(0,0,0,0.8)' : (ch === 'r' ? '#ff5a5a' : '#ffffff');
-          ctx.fillRect(x + rx + (pass === 0 ? 1 : 0), y + ry + (pass === 0 ? 1 : 0), 1, 1);
-        }
-      });
+    const w = 1.1 / K * 1.6;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    const sp = new Path2D();
+    sp.moveTo(x, y + 2.4); sp.lineTo(x + 2, y + 2.4); sp.lineTo(x + 4.4, y + 0.4); sp.lineTo(x + 4.4, y + 7.6); sp.lineTo(x + 2, y + 5.6); sp.lineTo(x, y + 5.6); sp.closePath();
+    const cross = new Path2D();
+    cross.moveTo(x + 6, y + 2.2); cross.lineTo(x + 9.2, y + 5.8); cross.moveTo(x + 9.2, y + 2.2); cross.lineTo(x + 6, y + 5.8);
+    for (const [path, col, wd] of [[sp, '255,255,255', 1], [cross, '255,42,42', 1.2]]) {
+      ctx.strokeStyle = 'rgba(' + col + ',0.16)'; ctx.lineWidth = w * 4; ctx.stroke(path);
+      ctx.strokeStyle = 'rgba(' + col + ',0.9)'; ctx.lineWidth = w * wd; ctx.stroke(path);
     }
+    ctx.restore();
+  }
+
+  /** Toast / hint: glowing text on a soft dark band (no opaque plate). */
+  function bandText(msg, y, color) {
+    const w = GFX.textWidth(msg);
+    const g = ctx.createLinearGradient(C.W / 2 - w / 2 - 22, 0, C.W / 2 + w / 2 + 22, 0);
+    g.addColorStop(0, 'rgba(3,6,16,0)'); g.addColorStop(0.18, 'rgba(3,6,16,0.72)'); g.addColorStop(0.82, 'rgba(3,6,16,0.72)'); g.addColorStop(1, 'rgba(3,6,16,0)');
+    ctx.fillStyle = g;
+    ctx.fillRect(Math.round(C.W / 2 - w / 2) - 22, y - 2, w + 44, 12);
+    ctext(msg, y, color);
   }
 
   function drawOverlays() {
     let m = false;
     try { m = AUDIO.isMuted(); } catch (e) { /* ignore */ }
-    if (m) drawMuteIcon(246, 4);
+    if (m) drawMuteIcon(244, 4);
     const y = scene === 'play' ? 16 : 212;
-    if (toastT > 0) {
-      const w = GFX.textWidth(toastMsg);
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(Math.round(C.W / 2 - w / 2) - 5, y - 1, w + 10, 10);
-      ctext(toastMsg, y, toastColor);
-    } else if (deadAudioT > PAD_SOUND_HINT && blink(deadAudioT, 24)) {
-      const s = touchMode ? 'TAP FOR SOUND' : 'PRESS A KEY FOR SOUND', w = GFX.textWidth(s);
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(Math.round(C.W / 2 - w / 2) - 5, y - 1, w + 10, 10);
-      ctext(s, y, COL.gold);
-    }
+    if (toastT > 0) bandText(toastMsg, y, toastColor);
+    else if (deadAudioT > PAD_SOUND_HINT && blink(deadAudioT, 24)) bandText(touchMode ? 'TAP FOR SOUND' : 'PRESS A KEY FOR SOUND', y, COL.gold);
   }
 
   // ===================================================================================================
@@ -802,25 +1043,91 @@ const Main = (() => {
     return i >= 0 && i < n ? i : -1;
   }
 
-  /** Touch button plate: dark, 1 px frame, cut corners (pixel-art "rounded" rectangle). */
-  function plate(x, y, w, h, on) {
-    ctx.fillStyle = on ? 'rgba(60,48,14,0.88)' : 'rgba(8,14,40,0.78)';
-    ctx.fillRect(x, y, w, h);
-    ctx.fillStyle = on ? COL.gold : '#4a56a8';
-    ctx.fillRect(x + 1, y, w - 2, 1); ctx.fillRect(x + 1, y + h - 1, w - 2, 1);
-    ctx.fillRect(x, y + 1, 1, h - 2); ctx.fillRect(x + w - 1, y + 1, 1, h - 2);
-  }
+  const rgbOf = (hex) => [parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16)];
   /** Game-pixel pitch of a tappable row: >= TOUCH_ROW_CSS css px, but never more than `room` / n allows. */
   function touchPitch(n, room, cap = 40) {
     const k = layout.scale || 1;
     return Math.max(14, Math.min(Math.ceil(TOUCH_ROW_CSS / k), cap, Math.floor(room / n)));
   }
 
+  // ---- shared UI pieces of the Abyss look (logical units) ------------------------------------------------------------
+  /** A soft coloured light pool (additive radial gradient); sy < 1 flattens it. */
+  function glowAt(x, y, r, hex, a, sy) {
+    const c = rgbOf(hex);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    if (sy) { ctx.translate(x, y); ctx.scale(1, sy); x = 0; y = 0; }
+    const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a.toFixed(3) + ')'); g.addColorStop(1, 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',0)');
+    ctx.fillStyle = g; ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    ctx.restore();
+  }
+
+  /** Thin neon line: a soft wide halo, a coloured core and a hot centre, all additive. col = [r,g,b]. */
+  function glowStroke(path, col, w, a) {
+    a = a === undefined ? 1 : a;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+    ctx.strokeStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + (0.13 * a).toFixed(3) + ')'; ctx.lineWidth = w * 5; ctx.stroke(path);
+    ctx.strokeStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + (0.34 * a).toFixed(3) + ')'; ctx.lineWidth = w * 2.4; ctx.stroke(path);
+    ctx.strokeStyle = 'rgba(' + col[0] + ',' + col[1] + ',' + col[2] + ',' + (0.95 * a).toFixed(3) + ')'; ctx.lineWidth = w; ctx.stroke(path);
+    ctx.strokeStyle = 'rgba(255,255,255,' + (0.55 * a).toFixed(3) + ')'; ctx.lineWidth = w * 0.42; ctx.stroke(path);
+    ctx.restore();
+  }
+  /** Rounded-rectangle path (Path2D). */
+  function rrectPath(x, y, w, h, r) {
+    const p = new Path2D();
+    r = Math.min(r, w / 2, h / 2);
+    p.moveTo(x + r, y); p.lineTo(x + w - r, y); p.arcTo(x + w, y, x + w, y + r, r); p.lineTo(x + w, y + h - r); p.arcTo(x + w, y + h, x + w - r, y + h, r);
+    p.lineTo(x + r, y + h); p.arcTo(x, y + h, x, y + h - r, r); p.lineTo(x, y + r); p.arcTo(x, y, x + r, y, r); p.closePath();
+    return p;
+  }
+  /** Touch row / button plate: a dark translucent pill with a 1 px cyan hairline; lit (amber hairline + glow) when selected. */
+  function plate(x, y, w, h, on) {
+    note(x, y, x + w, y + h);
+    const p = rrectPath(x, y, w, h, Math.min(5, h / 2));
+    ctx.fillStyle = on ? 'rgba(60,242,255,0.15)' : 'rgba(4,10,24,0.62)';
+    ctx.fill(p);
+    ctx.save();
+    ctx.lineWidth = 1.3 / K;
+    ctx.strokeStyle = on ? 'rgba(212,251,255,0.95)' : 'rgba(60,242,255,0.38)';
+    ctx.stroke(p);
+    if (on) { ctx.globalCompositeOperation = 'lighter'; ctx.lineWidth = 4 / K; ctx.strokeStyle = 'rgba(60,242,255,0.18)'; ctx.stroke(p); }
+    ctx.restore();
+  }
+  /** A menu row (keyboard layout): thin wide-tracked label, the selected one lit (white-hot cyan) on a soft light band between two chevrons. */
+  function menuRow(label, cx, y, on, t) {
+    const w = GFX.textWidth(label);
+    if (on) {
+      const x0 = cx - w / 2 - 26, bw = w + 52;
+      const g = ctx.createLinearGradient(x0, 0, x0 + bw, 0);
+      g.addColorStop(0, 'rgba(60,242,255,0)'); g.addColorStop(0.5, 'rgba(60,242,255,0.14)'); g.addColorStop(1, 'rgba(60,242,255,0)');
+      ctx.fillStyle = g; ctx.fillRect(x0, y - 2, bw, 12);
+      note(x0, y - 2, x0 + bw, y + 10);
+      const k = 0.5 + 0.5 * Math.sin(t / 18);
+      for (const sx of [-1, 1]) {
+        const xx = cx + sx * (w / 2 + 8 + 1.2 * k), p = new Path2D();
+        p.moveTo(xx - sx * 2.2, y + 1.2); p.lineTo(xx, y + 4); p.lineTo(xx - sx * 2.2, y + 6.8);
+        glowStroke(p, CYAN, 0.8);
+      }
+      ctext(label, y, COL.hi);
+    } else ctext(label, y, COL.text, { alpha: 0.9 });
+  }
+  /** Section heading: big thin glow text with a hairline rule under it. */
+  function heading(s, y, col, sub, subY) {
+    ctext(s, y, col || COL.hi, { scale: 2 });
+    rule(128, y + 15, 70, CYAN, 0.55);
+    if (sub) ctext(sub, subY === undefined ? y + 20 : subY, COL.dim);
+  }
+
   // ---- TITLE ----------------------------------------------------------------------------------------------
   scenes.title = (() => {
     const MENU_X0 = 40, MENU_X1 = 216;
-    let sel = 0, idle = 0, items = [];
-    let geo = { top: 80, pitch: 12, y0: 82, big: false };
+    let sel = 0, idle = 0, items = [], stage = 0, warm = false;     // stage / warm: the progressive first paint (see render)
+    let geo = { top: 84, pitch: 14, y0: 86, big: false };
+    const LOGO_Y = 17, SHAFT = { x: 128, y: 80 };
+    const LEDGE_L = 7, LEDGE_Y = 184;                         // each crystal ledge: 7 tiles wide, its top face at y = 184
 
     function build() {
       const keep = items[sel] ? items[sel].id : null;
@@ -832,12 +1139,12 @@ const Main = (() => {
       const k = items.findIndex((it) => it.id === keep);
       sel = k >= 0 ? k : U.clamp(sel, 0, items.length - 1);
       const n = items.length;
-      if (touchMode) {                                       // big tappable rows drawn as plates, no hint panels
-        const y0 = 80, pitch = touchPitch(n, 200 - y0);
+      if (touchMode) {                                       // big tappable rows drawn as plates, no hint block
+        const y0 = 86, pitch = touchPitch(n, 188 - y0);          // integrator: rows end at 188 (was 202) so the HI SCORE / (c) lines (y 193 / 200) stay clear of the TAP FOR SOUND band (y 210+)
         geo = { top: y0, pitch, y0, big: true };
       } else {
-        const pitch = n <= 4 ? 14 : 12;
-        geo = { top: 80, pitch, y0: 82, big: false };
+        const pitch = n <= 5 ? 14 : 12;
+        geo = { top: 84, pitch, y0: 86, big: false };
       }
     }
     function move(d) {
@@ -857,28 +1164,81 @@ const Main = (() => {
       else if (it.id === 'sound') toggleMute();
     }
 
-    /** One of the two mascots: idle with blinks, a hop and a bubble shot every 4 s. `rise` lifts it (perched on the logo). */
-    function critter(who, x, y, flip, t, phase) {
-      const cyc = (t + phase) % 240, dir = flip ? -1 : 1;
-      let name = who + '_idle', frame = (t + phase) % 150 > 140 ? 1 : 0, yy = y;   // frame 1 = blink
-      if (cyc < 34) {
-        const u = cyc / 34;
-        name = who + (u < 0.5 ? '_jump' : '_fall'); frame = 0; yy = y - Math.sin(u * Math.PI) * 14;
-      } else if (cyc >= 120 && cyc < 138) { name = who + '_shoot'; frame = cyc < 128 ? 0 : 1; }
-      spr(name, frame, x, yy, { flip });
-      // the bubble: shot at cyc 126, decelerates, then floats up and fades
-      const u = cyc >= 126 ? cyc - 126 : cyc + 114;
-      if (u < 190) {
-        const run = 36 * (1 - Math.pow(1 - Math.min(u, 36) / 36, 2));
-        const bx = x + dir * (10 + run), by = y - 2 - Math.max(0, u - 36) * 0.45;
-        const a = u > 165 ? (190 - u) / 25 : 1;
-        spr(u < 12 ? 'bubble_shot' : 'bubble', u < 12 ? Math.floor(u / 4) : Math.floor(t / 14), bx, by, { alpha: 0.85 * a });
+    // The Sunken Tower seen from above: octagonal rings spiralling down to the Moon Pearl and god-rays from it (very faint, behind the menu).
+    // Painted once per render scale into the title's static back layer.
+    function paintShaft() {
+      const g = ctx, vx = SHAFT.x, vy = SHAFT.y, N = 20, TAU = Math.PI * 2;
+      g.save();
+      g.lineJoin = 'round';
+      let prev = null;
+      for (let i = 1; i <= N; i++) {
+        const u = i / N, sc = Math.pow(u, 2.3);
+        const rx = 1.8 + (261 - 1.8) * sc, ry = 1.8 + (213 - 1.8) * sc, rot = i * 0.05;
+        const pts = [];
+        for (let q = 0; q < 8; q++) { const an = rot + q * TAU / 8 + TAU / 16; pts.push([vx + Math.cos(an) * rx, vy + Math.sin(an) * ry]); }
+        const a = (0.035 + 0.13 * Math.sin(Math.PI * Math.pow(u, 0.72))) * 0.85;
+        const m = 0.4 + 0.3 * Math.sin(i);
+        g.strokeStyle = 'rgba(' + Math.round(61 - m) + ',' + Math.round(123 + 119 * m) + ',255,' + a.toFixed(3) + ')';
+        g.lineWidth = (1 + sc * 1.6) / 4 * 1.5;
+        g.beginPath(); pts.forEach((p, q) => (q ? g.lineTo(p[0], p[1]) : g.moveTo(p[0], p[1]))); g.closePath(); g.stroke();
+        if (prev) {
+          g.strokeStyle = 'rgba(138,92,255,' + (a * 0.35).toFixed(3) + ')'; g.lineWidth = 0.3;
+          g.beginPath(); for (let q = 0; q < 8; q++) { g.moveTo(prev[q][0], prev[q][1]); g.lineTo(pts[q][0], pts[q][1]); } g.stroke();
+        }
+        if (i > 3) for (let q = 0; q < 8; q++) {
+          const c = (i + q) % 3 === 0 ? '255,178,62' : (i + q) % 3 === 1 ? '60,242,255' : '255,62,165';
+          g.fillStyle = 'rgba(' + c + ',' + (a * 1.1).toFixed(3) + ')';
+          g.beginPath(); g.arc(pts[q][0], pts[q][1], (0.8 + sc * 2) / 4, 0, TAU); g.fill();
+        }
+        prev = pts;
+      }
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 14; i++) {
+        const an = i * TAU / 14 + 0.2, L = (260 + (i % 3) * 90) / 4 * 1.3;
+        const gr = g.createLinearGradient(vx, vy, vx + Math.cos(an) * L, vy + Math.sin(an) * L);
+        gr.addColorStop(0, 'rgba(60,242,255,0.15)'); gr.addColorStop(1, 'rgba(60,242,255,0)');
+        g.strokeStyle = gr; g.lineWidth = (2 + (i % 2) * 3) / 4; g.beginPath(); g.moveTo(vx, vy); g.lineTo(vx + Math.cos(an) * L, vy + Math.sin(an) * L); g.stroke();
+      }
+      g.restore();
+    }
+
+    // crystal ledges the twins stand on (the same crystal renderer as the rounds; azure Crystal Caves look)
+    let ledgeMap = null;
+    function ledges() {
+      if (!ledgeMap) {
+        const row = '#'.repeat(LEDGE_L) + '.'.repeat(32 - 2 * LEDGE_L) + '#'.repeat(LEDGE_L);
+        ledgeMap = [];
+        for (let r = 0; r < 26; r++) ledgeMap.push(r >= 21 ? row : '.'.repeat(32));
+      }
+      let lc = null;
+      try { if (typeof GFX.levelCanvas === 'function') lc = GFX.levelCanvas(15, ledgeMap); } catch (e) { reportError('ledges', e); }
+      if (lc && lc.width > 8) ctx.drawImage(lc, 0, 0, lc.width, lc.height, 0, C.MAP_Y, C.W, 208);
+    }
+
+    /** Fizz (left, facing right) and Pop (right, facing left): idle breathing, blinks, and every 6 s Fizz blows a bubble toward the middle. */
+    function twins(t, S, a) {
+      const cxF = LEDGE_L * 4 + 4, cxP = C.W - LEDGE_L * 4 - 4, by = LEDGE_Y + 1;
+      if (a <= 0.001) { note(cxF - 8 * S, by - 16 * S, cxF + 8 * S, by); note(cxP - 8 * S, by - 16 * S, cxP + 8 * S, by); return; }       // (not baked yet: the boot reveals the title in stages)
+      const cyc = t % 360;
+      const breath = (off) => Math.floor(((t + off) % 160) / 20);
+      const blinkF = (t + 40) % 210 < 7, blinkP = (t + 130) % 250 < 7;
+      glowAt(cxF, by - 6, 38, '#ff3ea5', 0.16 * a); glowAt(cxP, by - 6, 38, '#3cf2ff', 0.14 * a);
+      let pose = blinkF ? 'blink' : 'idle', f = breath(0);
+      if (cyc >= 300 && cyc < 314) { pose = 'puff'; f = 0; } else if (cyc >= 314 && cyc < 326) { pose = 'shoot'; f = 0; }
+      bigHeroes.draw('fizz', pose, f, 8, cxF, by, S, false, a);
+      bigHeroes.draw('pop', blinkP ? 'blink' : 'idle', breath(60), 8, cxP, by, S, true, a);
+      glowAt(cxF, by + 1, 26, '#ff3ea5', 0.5 * a, 0.2); glowAt(cxP, by + 1, 26, '#3cf2ff', 0.5 * a, 0.2);   // contact glow where the feet meet the crystal
+      // the shot bubble: leaves Fizz's mouth at cyc 314, decelerates, drifts up and fades
+      const u = cyc >= 314 ? cyc - 314 : cyc + 46;
+      if (u < 230 && GFX.has('bubble')) {
+        const run = 30 * (1 - Math.pow(1 - Math.min(u, 40) / 40, 2)), bx = cxF + 6.6 * S * 0.9 + 4 + run, byy = by - 8.8 * S + 1 - Math.max(0, u - 40) * 0.42;
+        const ba = (u > 200 ? (230 - u) / 30 : 1) * a, sc = 1.15;
+        note(bx - 9, byy - 9, bx + 9, byy + 9);
+        ctx.save(); ctx.translate(bx, byy); ctx.scale(sc, sc);
+        GFX.draw(ctx, u < 12 ? 'bubble_shot' : 'bubble', u < 12 ? Math.floor(u / 4) : Math.floor(t / 14), -8, -8, { alpha: ba });
+        ctx.restore();
       }
     }
-    // Fizz stands on the F of the logo, Pop on the O of POP; both ride the letters' wobble (same formula as GFX.drawLogo)
-    const LOGO_Y = 22, PERCH_Y = LOGO_Y + 5 + 1 - 13;
-    const wob = (i, t) => Math.round(Math.sin(t / 13 + i * 0.75) * 2);
-
     return {
       music: 'title',
       enter() { idle = 0; sel = 0; items = []; padSlot.clear(); build(); refreshScores(); AUDIO.music('title'); },   // new session: pads claim P1 / P2 afresh
@@ -899,45 +1259,59 @@ const Main = (() => {
       },
       rows: () => items.map((it, i) => ({ id: it.id, label: it.label, top: geo.top + i * geo.pitch, h: geo.pitch, x0: MENU_X0, x1: MENU_X1, sel: i === sel })),
       render() {
-        const t = sceneT, th = GFX.theme(0), n = items.length;
+        const t = sceneT, n = items.length, S = touchMode ? 2.0 : 2.8;
         const menuBottom = geo.top + n * geo.pitch + 4;
-        layered(t, 0.55, true, () => backdrop('#050a1e', '#0d2a4c'), () => {
-          towerFrame();
-          GFX.drawLogo(ctx, 128, LOGO_Y, t);
-          critter('p1', 30, PERCH_Y + wob(0, t), false, t, 0);
-          critter('p2', 195, PERCH_Y + wob(6, t), true, t, 90);
-          panel(88, 0, 80, 19, 'rgba(4,8,26,0.8)');                  // the high score sits on a plate: the logo's and the mascots' bubbles pass behind it
-          ctext('HI SCORE', 1, COL.coral);
-          ctext(fmtScore(topScore()), 10, COL.white);
-          ctext('THE SUNKEN TOWER', 64, th.accent2, { outline: '#050a1e' });
+        // Progressive first paint (SPEC_V2 sec. 5: boot to an interactive title <= 1.5 s at 4x CPU): the very first frames after the boot draw the
+        // water + menu first, then the wordmark, the twins and the ambient life fade in over the next frames, so no single frame has to bake them all.
+        if (!warm) { stage++; if (stage >= 24) warm = true; }
+        const ramp = (from) => (warm ? 1 : reducedMotion ? (stage >= from ? 1 : 0) : clamp01((stage - from + 1) / 10));
+        const aLogo = ramp(2), aTwins = ramp(3), aLife = ramp(5);
+        layered(t, 0.5 * aLife, aLife >= 1, () => {
+          staticBack('title', () => {
+            drawBg(BG_TITLE);
+            ctx.save(); ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.32; drawBg(BG_TITLE); ctx.restore();    // the distant jellyfish glow a little stronger than in the rounds
+            paintShaft();
+            ledges();
+          });
+          if (aTwins > 0) pearl(SHAFT.x, SHAFT.y, 3.6, t, 0.95 * aTwins);
+          twins(t, S, aTwins);
+        }, () => {
+          const lg = drawLogoCached(128, LOGO_Y, t / 60, 3, aLogo);
+          note(128 - lg.total / 2, LOGO_Y - 4, 128 + lg.total / 2, lg.uy + 2);
+          // the tagline between two fading hairlines
+          const tag = 'THE SUNKEN TOWER', ty = Math.round(lg.uy + 6), tw = GFX.textWidth(tag);
+          ctext(tag, ty, COL.hi);
+          for (const sx of [-1, 1]) {
+            const x0 = 128 + sx * (tw / 2 + 5), x1 = 128 + sx * (tw / 2 + 45);
+            const g = ctx.createLinearGradient(x0, 0, x1, 0);
+            g.addColorStop(0, 'rgba(60,242,255,0.6)'); g.addColorStop(1, 'rgba(60,242,255,0)');
+            ctx.fillStyle = g; ctx.fillRect(Math.min(x0, x1), ty + 4, 40, 1.2 / K);
+          }
           items.forEach((it, i) => {
             const y = geo.y0 + i * geo.pitch, on = i === sel;
             if (geo.big) {
-              plate(MENU_X0, geo.top + i * geo.pitch, MENU_X1 - MENU_X0, geo.pitch - 4, on);
-              ctext(it.label, geo.top + i * geo.pitch + Math.floor((geo.pitch - 4 - 8) / 2), on ? COL.gold : COL.white);
+              plate(52, geo.top + i * geo.pitch + 2, 152, geo.pitch - 4, on);
+              ctext(it.label, geo.top + i * geo.pitch + Math.floor((geo.pitch - 8) / 2), on ? COL.hi : COL.text);
               return;
             }
-            const w = GFX.textWidth(it.label);
-            ctext(it.label, y, on ? COL.gold : COL.text, { outline: '#050a1e' });
-            if (on) {
-              const bob = Math.round(Math.sin(t / 8) * 2);
-              text('>', 128 - w / 2 - 14 + bob, y, COL.gold);
-              text('<', 128 + w / 2 + 6 - bob, y, COL.gold);
-            }
+            menuRow(it.label, 128, y, on, t);
           });
+          // HI SCORE: amber label, near-white value
+          const hy = touchMode ? 193 : menuBottom - 1;
+          const hw = GFX.textWidth('HI SCORE ', 0.75) + GFX.textWidth('050000', 0.75);
+          text('HI SCORE', 128 - hw / 2, hy, COL.gold, { scale: 0.75 });
+          text(fmtScore(topScore()), 128 - hw / 2 + GFX.textWidth('HI SCORE ', 0.75), hy, COL.hi, { scale: 0.75 });
           if (touchMode) {
-            ctext('© 2026 FIZZ & POP', 206, COL.dim, { outline: '#050a1e' });
+            ctext('© 2026 FIZZ & POP', 200, COL.dimmer, { scale: 0.75 });
           } else {
-            panel(24, 157, 208, 56, 'rgba(4,8,26,0.74)');             // ONE calm panel for controls + copyright, 4 px padding
-            ctx.fillStyle = 'rgba(120,130,210,0.28)';
-            ctx.fillRect(40, 189, 176, 1);
-            ctext('UP/DOWN + ENTER', 161, COL.dim);
-            ctext('1P: ARROWS + Z BUBBLE', 170, COL.dimmer);          // says what Z / Q do (P3)
-            ctext('2P: WASD + Q BUBBLE', 179, COL.dimmer);
-            ctext('© 2026 FIZZ & POP', 192, COL.dim);
-            ctext('FREE SOFTWARE', 201, COL.dimmer);   // ends at y 208: the sound / toast strip (y 211..) never covers it
+            const y0 = hy + 11;
+            ctext('UP/DOWN + ENTER', y0, COL.dim, { scale: 0.75 });
+            ctext('1P: ARROWS + Z BUBBLE', y0 + 7, COL.dimmer, { scale: 0.75 });          // says what Z / Q do (P3)
+            ctext('2P: WASD + Q BUBBLE', y0 + 14, COL.dimmer, { scale: 0.75 });
+            ctext('© 2026 FIZZ & POP', y0 + 24, COL.dim, { scale: 0.75 });
+            ctext('FREE SOFTWARE', y0 + 31, COL.dimmer, { scale: 0.75 });                 // ends at y 208: the sound / toast strip (y 211..) never covers it
           }
-        }, [[MENU_X0 - 6, 62, MENU_X1 + 6, menuBottom], [16, 20, 240, 62]]);   // the menu column and the logo are kept free of bubbles too
+        }, [[MENU_X0 - 6, 62, MENU_X1 + 6, menuBottom], [16, 8, 240, 68]]);   // the menu column and the logo are kept free of bubbles too
       },
     };
   })();
@@ -946,10 +1320,10 @@ const Main = (() => {
   scenes.story = (() => {
     // Every line <= 26 characters (208 px): it never touches the tower walls, even in the fractional-scale layouts.
     const LINES = [
-      { s: 'THE KRAKEN KING HAS STOLEN', at: 6, y: 96 },
-      { s: 'THE REEF\'S MOON PEARL!', at: 38, y: 107 },
-      { s: 'FIZZ & POP DIVE DOWN THE', at: 112, y: 124 },
-      { s: 'SUNKEN TOWER TO GET IT', at: 144, y: 135 },
+      { s: 'THE KRAKEN KING HAS STOLEN', at: 6, y: 100 },
+      { s: 'THE REEF\'S MOON PEARL!', at: 38, y: 111 },
+      { s: 'FIZZ & POP DIVE DOWN THE', at: 112, y: 126 },
+      { s: 'SUNKEN TOWER TO GET IT', at: 144, y: 137 },
       { s: 'BACK. TRAP THEM. POP THEM!', at: 190, y: 152, c: COL.gold },
     ];
     const KRAKEN_IN = 40, GRAB = 100, LEAVE = 118, GONE = 200;
@@ -964,23 +1338,21 @@ const Main = (() => {
       // pearl rests at (120,44) until grabbed, then travels with the Kraken King's tentacle
       const grabbed = t >= GRAB;
       const px = grabbed ? kx - 30 : 120, py = grabbed ? ky + 22 : 44;
-      if (!(grabbed && kx > 270)) {
-        const glow = ctx.createRadialGradient(px + 16, py + 16, 4, px + 16, py + 16, 44);
-        const a = (0.55 + Math.sin(t / 9) * 0.1) * (1 - dark);
-        glow.addColorStop(0, 'rgba(255,248,200,' + a.toFixed(3) + ')');
-        glow.addColorStop(1, 'rgba(255,248,200,0)');
-        ctx.fillStyle = glow;
-        ctx.fillRect(px - 30, py - 30, 92, 92);
+      const away = grabbed && kx > 270;
+      if (!away) glowAt(px + 16, py + 16, 46, '#c8d4ff', (0.34 + Math.sin(t / 9) * 0.06) * (1 - dark));
+      if (kx < 280) {
+        glowAt(kx + 24, ky + 26, 40, '#8a5cff', 0.16);
+        spr(t > 150 ? 'kraken_angry' : 'kraken', Math.floor(t / 12), kx, ky);
       }
-      if (kx < 280) spr(t > 150 ? 'kraken_angry' : 'kraken', Math.floor(t / 12), kx, ky);
-      if (!(grabbed && kx > 270)) {
+      if (!away) {
         spr('moonpearl', Math.floor(t / 14), px, py);
         for (let i = 0; i < 3; i++) {
           const a = t / 20 + i * 2.1;
           spr('sparkle', Math.floor(t / 5) + i, px + 12 + Math.cos(a) * 26, py + 12 + Math.sin(a) * 22);
         }
       }
-      if (t >= GRAB && t < GRAB + 8) { ctx.fillStyle = 'rgba(255,255,255,' + (0.7 * (1 - (t - GRAB) / 8)).toFixed(2) + ')'; ctx.fillRect(0, 0, C.W, C.H); }
+      // the grab: ONE soft flash (<= 12 % alpha: SPEC_V2 photosensitivity cap), none at all with reduced motion
+      if (t >= GRAB && t < GRAB + 8 && !reducedMotion) { ctx.fillStyle = 'rgba(210,235,255,' + (0.12 * (1 - (t - GRAB) / 8)).toFixed(3) + ')'; ctx.fillRect(0, 0, C.W, C.H); }
       return dark;
     }
 
@@ -999,28 +1371,30 @@ const Main = (() => {
       },
       render() {
         const t = sceneT;
-        layered(t, 0.45, true, () => backdrop('#03081a', '#0a2748'), () => {
+        layered(t, 0.4, true, () => staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); }), () => {
           towerFrame();
           const dark = drawPearlAndKraken(t);
-          ctx.fillStyle = rgba(2, 3, 12, dark * 0.55);
-          ctx.fillRect(0, 0, C.W, C.H);
+          ctx.fillStyle = rgba(2, 3, 12, dark * 0.5);
+          ctx.fillRect(16, C.MAP_Y, C.W - 32, 200);
+          if (t >= 4) panel(20, 91, 216, 79, { a: 0.5 * clamp01((t - 4) / 24), edge: 0.34 * clamp01((t - 4) / 24) });
           // typewriter text
           LINES.forEach((l) => {
             const n = Math.floor(U.clamp((t - l.at) * 1.1, 0, l.s.length));
-            if (n > 0) ctext(l.s.slice(0, n), l.y, l.c || COL.text, { outline: '#03081a' });
+            if (n > 0) ctext(l.s.slice(0, n), l.y, l.c || COL.text);
           });
           // the controls, once the rules are told (round 1 has no hint of its own, P3)
           if (!args.attract && t >= 214) {
-            ctext(touchMode ? 'BUBBLE: TRAP FOES' : 'Z / SPACE: BUBBLE', 166, COL.dim, { outline: '#03081a' });
-            ctext(touchMode ? 'JUMP: HOP UP' : 'UP / X: JUMP', 175, COL.dim, { outline: '#03081a' });
+            ctext(touchMode ? 'BUBBLE: TRAP FOES' : 'Z / SPACE: BUBBLE', 168, COL.dim);
+            ctext(touchMode ? 'JUMP: HOP UP' : 'UP / X: JUMP', 177, COL.dim);
           }
           // Fizz & Pop watch, then jump with excitement once the plan is made
           const excited = t > 170;
           const hop = (ph) => (excited ? Math.abs(Math.sin((t + ph) / 7)) * 10 : 0);
+          glowAt(48, 214, 22, '#ff3ea5', 0.3, 0.3); glowAt(208, 214, 22, '#3cf2ff', 0.3, 0.3);
           spr(excited ? 'p1_jump' : 'p1_idle', Math.floor(t / 30), 40, 200 - hop(0));
           spr(excited ? 'p2_jump' : 'p2_idle', Math.floor(t / 30), 200, 200 - hop(11), { flip: true });
-          if (!args.attract && blink(t, 24)) ctext(touchLabel() + ' TO SKIP', 186, COL.dimmer);
-        }, [[24, 92, 232, 196]]);                                   // the whole text block stays free of bubbles
+          if (!args.attract && blink(t, 24)) ctext(touchLabel() + ' TO SKIP', 188, COL.dimmer);
+        }, [[24, 90, 232, 198]]);                                   // the whole text block stays free of bubbles
       },
     };
   })();
@@ -1049,16 +1423,13 @@ const Main = (() => {
     const PAGES = 6;
     let page = 0, pageT = 0, args = {};
 
-    const header = (s, sub) => {
-      ctext(s, 6, COL.gold, { scale: 2 });
-      if (sub) ctext(sub, 24, COL.dim);
-    };
+    const header = (s, sub) => heading(s, 6, COL.hi, sub, 24);
 
     function drawRules(t) {
       header('HOW TO PLAY');
       const lines = ['TRAP FOES IN BUBBLES,', 'THEN TOUCH THE BUBBLE TO POP', 'THEM INTO TASTY TREATS!',
         'CLEAR EVERY FOE TO DIVE', 'DEEPER. 30 ROUNDS TO GO.', 'HOLD JUMP TO BOUNCE ON THEM.'];
-      lines.forEach((s, i) => ctext(s, 34 + i * 11, i < 3 ? COL.text : COL.dim));
+      lines.forEach((s, i) => ctext(s, 37 + i * 11, i < 3 ? COL.text : COL.dim));
       // 1 bubble -> 2 trap -> 3 pop and eat
       const steps = [['1 BUBBLE', 20], ['2 TRAP', 100], ['3 EAT!', 172]];
       const u = (t % 150) / 150;
@@ -1187,11 +1558,14 @@ const Main = (() => {
         else if (ui.p.right || ui.p.down || ui.p.ok || ui.p.alt) { AUDIO.sfx('menu_move'); next(1); }
       },
       render() {
-        layered(sceneT, 0.3, false, () => backdrop('#050a1e', '#0b2342'), () => {
+        layered(sceneT, 0.28, false, () => staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); }), () => {
+          panel(12, 32, 232, 177, { a: 0.5, edge: 0.3 });
           drawPage(sceneT);
-          for (let i = 0; i < PAGES; i++) {            // page dots
-            ctx.fillStyle = i === page ? COL.gold : COL.dimmer;
-            ctx.fillRect(128 - PAGES * 6 + i * 12 + 2, 213, 6, 4);
+          for (let i = 0; i < PAGES; i++) {            // page dots: the current one lit
+            const cx = 128 - PAGES * 6 + i * 12 + 6, on = i === page;
+            if (on) glowAt(cx, 215, 7, '#3cf2ff', 0.5);
+            ctx.beginPath(); ctx.arc(cx, 215, on ? 1.7 : 1.4, 0, Math.PI * 2);
+            if (on) { ctx.fillStyle = COL.hi; ctx.fill(); } else { ctx.lineWidth = 1.1 / K; ctx.strokeStyle = 'rgba(90,162,192,0.8)'; ctx.stroke(); }
           }
           note(128 - PAGES * 6, 212, 128 + PAGES * 6, 218);
           if (!args.attract) {                         // every label says what a tap / key on it does (R7)
@@ -1206,7 +1580,7 @@ const Main = (() => {
   // ---- HI-SCORES -------------------------------------------------------------------------------------------
   scenes.scores = (() => {
     let args = {}, table = [], persistent = true;
-    const RANK_COL = [COL.gold, '#d6dcf2', '#e0a070'];
+    const RANK_COL = [COL.gold, COL.hi, '#ff9a6a'];
     return {
       music: 'title',
       enter(a) { args = a || {}; table = refreshScores(); persistent = storagePersistent(); AUDIO.music('title'); },
@@ -1222,21 +1596,20 @@ const Main = (() => {
       render() {
         const t = sceneT, th = GFX.theme(0);
         const missed = !args.attract && Array.isArray(args.missed) ? args.missed : [];
-        layered(t, 0.3, false, () => backdrop('#050a1e', '#0c2444'), () => {
-          towerFrame();                                       // same walls + floor as the title: Fizz and Pop stand on it
-          ctext('HI-SCORES', 16, COL.gold, { scale: 2 });
-          ctext('BEST DIVERS OF THE TOWER', 36, COL.dim);
-          ctx.fillStyle = 'rgba(255,227,107,0.35)'; ctx.fillRect(40, 47, 176, 1);
-          note(28, 47, 228, 175);                             // the table block
-          text('RANK', 40, 52, COL.dimmer); text('NAME', 88, 52, COL.dimmer);
-          text('SCORE', 184, 52, COL.dimmer, { align: 'right' }); text('RD', 192, 52, COL.dimmer);
+        layered(t, 0.28, false, () => staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); }), () => {
+          towerFrame();                                       // same walls + floor as the story: Fizz and Pop stand on it
+          heading('HI-SCORES', 11, COL.hi, 'BEST DIVERS OF THE TOWER', 33);
+          panel(28, 45, 200, 130, { a: 0.52, edge: 0.34 });   // the table block
+          text('RANK', 40, 50, COL.dimmer); text('NAME', 88, 50, COL.dimmer);
+          text('SCORE', 184, 50, COL.dimmer, { align: 'right' }); text('RD', 192, 50, COL.dimmer);
+          rule(128, 60, 92, CYAN, 0.4);
           const hl = Array.isArray(args.highlight) ? args.highlight : [];
           table.forEach((e, i) => {
-            const y = 66 + i * 14;
+            const y = 66 + i * 13.5;
             const mine = hl.indexOf(i) >= 0;
-            const c = mine ? (blink(t, 8) ? COL.white : COL.gold) : (RANK_COL[i] || COL.text);
-            if (mine) { ctx.fillStyle = 'rgba(255,227,107,0.14)'; ctx.fillRect(28, y - 3, 200, 13); }
-            else if (i % 2 === 0) { ctx.fillStyle = 'rgba(255,255,255,0.045)'; ctx.fillRect(28, y - 3, 200, 13); }
+            const c = mine ? (blink(t, 16) ? COL.white : COL.gold) : (RANK_COL[i] || COL.text);
+            if (mine) { ctx.fillStyle = 'rgba(255,178,62,0.16)'; ctx.fillRect(30, y - 3, 196, 12); }
+            else if (i % 2 === 0) { ctx.fillStyle = 'rgba(60,242,255,0.045)'; ctx.fillRect(30, y - 3, 196, 12); }
             text(ordinal(i), 40, y, c);
             text(e.name, 88, y, c);
             text(fmtScore(e.score, 7), 184, y, c, { align: 'right' });
@@ -1245,15 +1618,16 @@ const Main = (() => {
           // a game that missed the table still shows what it scored (arcade "YOUR SCORE")
           missed.forEach((m, i) => {
             const who = session.lastPlayers === 2 ? 'P' + (m.pi + 1) + ' SCORE ' : 'YOUR SCORE ';
-            ctext(who + fmtScore(m.score), 177 + i * 9, PLAYER_COL[m.pi] || COL.white, { outline: '#050a1e' });
+            ctext(who + fmtScore(m.score), 178 + i * 9, PLAYER_COL[m.pi] || COL.white);
           });
-          if (!persistent && !args.attract) ctext('SCORES KEPT THIS VISIT ONLY', 4, COL.dimmer);   // the host grants no storage: initials last until the page closes
+          if (!persistent && !args.attract) ctext('SCORES KEPT THIS VISIT ONLY', 3, COL.dimmer);   // the host grants no storage: initials last until the page closes
           // the heroes watch from the floor; footer prompt between them
+          glowAt(34, 214, 22, '#ff3ea5', 0.3, 0.3); glowAt(222, 214, 22, '#3cf2ff', 0.3, 0.3);
           spr('p1_idle', Math.floor(t / 50) % 3 === 2 ? 1 : 0, 26, 200);
           spr('p2_idle', Math.floor((t + 20) / 50) % 3 === 2 ? 1 : 0, 214, 200, { flip: true });
-          const fy = missed.length > 1 ? 195 : 188;
+          const fy = missed.length > 1 ? 195 : 189;
           if (blink(t, 30)) ctext(args.attract ? 'PUSH ANY BUTTON' : (touchLabel() + ': BACK TO TITLE'), fy, COL.dim);
-          if (!args.attract && !touchMode) ctext('ESC: BACK', fy + 12, COL.dimmer);
+          if (!args.attract && !touchMode) ctext('ESC: BACK', fy + 11, COL.dimmer);
         });
       },
     };
@@ -1288,9 +1662,11 @@ const Main = (() => {
       begin();
     }
 
+    /** A thin neon chevron above / below the active letter. */
     function drawArrow(cx, y, up) {
-      ctx.fillStyle = COL.gold;
-      for (let i = 0; i < 4; i++) ctx.fillRect(cx - i, up ? y + i : y - i, 1 + i * 2, 1);
+      const p = new Path2D();
+      p.moveTo(cx - 4, up ? y + 2.5 : y - 2.5); p.lineTo(cx, up ? y - 1.5 : y + 1.5); p.lineTo(cx + 4, up ? y + 2.5 : y - 2.5);
+      glowStroke(p, [255, 178, 62], 0.9);
     }
 
     return {
@@ -1345,35 +1721,39 @@ const Main = (() => {
       },
       render() {
         const t = sceneT, th = GFX.theme(0);
-        layered(t, 0.3, false, () => backdrop('#07081e', '#14143e'), () => {
+        layered(t, 0.28, false, () => staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); }), () => {
           if (!cur) return;
           const c = PLAYER_COL[cur.pi] || COL.white;
-          ctext('CONGRATULATIONS!', 12, th.accent2);
-          ctext('NEW HIGH SCORE', 26, COL.gold, { scale: 2 });
+          ctext('CONGRATULATIONS!', 10, th.accent2);
+          ctext('NEW HIGH SCORE', 24, COL.hi, { scale: 2 });
+          rule(128, 40, 84, CYAN, 0.5);
+          glowAt(72, 66, 26, cur.pi === 1 ? '#3cf2ff' : '#ff3ea5', 0.25); glowAt(200, 66, 26, cur.pi === 1 ? '#3cf2ff' : '#ff3ea5', 0.25);
           spr(cur.pi === 1 ? 'p2_idle' : 'p1_idle', Math.floor(t / 40), 56, 52);
           spr(cur.pi === 1 ? 'p2_walk' : 'p1_walk', Math.floor(t / 8), 184, 52, { flip: true });
           ctext('PLAYER ' + (cur.pi + 1), 52, c);
           ctext(fmtScore(cur.score), 62, COL.white);
           ctext('RANK ' + ordinal(rankOf(cur.score)), 74, COL.gold);
           ctext('ENTER YOUR INITIALS', 96, COL.text);
+          panel(50, 106, 156, 64, { a: 0.5, edge: 0.32 });
           for (let i = 0; i < NAME_LEN; i++) {
             const cx = 128 + (i - 1) * 40, y = 118;
             const active = i === pos && doneT === 0;
-            const col = active ? COL.gold : (i < pos ? COL.white : COL.dim);
+            const col = active ? COL.hi : (i < pos ? COL.white : COL.dim);
+            if (active) glowAt(cx, y + 9, 22, '#3cf2ff', 0.28);
             text(NAME_CHARS[letters[i]], cx - 12, y, col, { scale: 3 });
-            ctx.fillStyle = active && blink(t, 10) ? COL.gold : COL.dimmer;
-            ctx.fillRect(cx - 14, y + 28, 28, 3);
+            ctx.fillStyle = active && blink(t, 16) ? 'rgba(255,178,62,0.95)' : 'rgba(90,162,192,0.7)';
+            ctx.fillRect(cx - 13, y + 29, 26, 1.6 / K);
             note(cx - 14, y - 12, cx + 14, y + 44);
-            if (active) { drawArrow(cx, y - 8 + Math.round(Math.sin(t / 6)), true); drawArrow(cx, y + 40 - Math.round(Math.sin(t / 6)), false); }
+            if (active) { drawArrow(cx, y - 7 + Math.round(Math.sin(t / 6)), true); drawArrow(cx, y + 41 - Math.round(Math.sin(t / 6)), false); }
           }
           if (doneT > 0) ctext('OK!', 168, COL.green, { scale: 2 });
           else {
             // every hint names the key that really does it: on a keyboard the letters are typed, Z / Q / X are letters here (R5, R6)
             const kb = !touchMode && !(padSeen && !keyboardSeen);
-            ctext(touchMode ? '← → CHANGE   BUBBLE: OK' : kb ? 'TYPE OR ← → CHANGE LETTER' : '← → CHANGE LETTER', 166, COL.text);   // the triangle glyphs are not in the font (U14)
-            ctext(touchMode ? 'JUMP: BACK' : kb ? 'ENTER: OK  BACKSPACE: BACK' : 'B: OK  A: BACK', 177, COL.dim);
+            ctext(touchMode ? '← → CHANGE   BUBBLE: OK' : kb ? 'TYPE OR ← → CHANGE LETTER' : '← → CHANGE LETTER', 176, COL.text);   // the triangle glyphs are not in the font (U14)
+            ctext(touchMode ? 'JUMP: BACK' : kb ? 'ENTER: OK  BACKSPACE: BACK' : 'B: OK  A: BACK', 187, COL.dim);
           }
-          ctext('TIME ' + String(Math.ceil(timeLeft / C.FPS)).padStart(2, '0'), 196, timeLeft < 8 * C.FPS && blink(t, 8) ? COL.coral : COL.dim);
+          ctext('TIME ' + String(Math.ceil(timeLeft / C.FPS)).padStart(2, '0'), 202, timeLeft < 8 * C.FPS && blink(t, 16) ? COL.coral : COL.dim);
         });
       },
     };
@@ -1418,18 +1798,18 @@ const Main = (() => {
 
     function drawBlock(b, y, t) {
       switch (b.k) {
-        case 'text': ctext(b.s, y, b.c, { scale: b.sc, outline: '#06122e' }); break;
+        case 'text': ctext(b.s, y, b.c, { scale: b.sc }); break;
         case 'sprite': sprC(b.n, Math.floor(t / 12), 128, y); break;
         default: break;
       }
     }
 
-    /** Light rays: thin wedges rotating slowly around the pearl, additive. */
+    /** Light rays: thin wedges rotating slowly around the pearl, additive (soft, warm white: the light returns). */
     function rays(t, a, cy) {
       const R = 190, N = 14;
       const g = ctx.createRadialGradient(PEARL_CX, cy, 8, PEARL_CX, cy, R);
-      g.addColorStop(0, rgba(255, 246, 205, 0.34 * a));
-      g.addColorStop(1, rgba(255, 246, 205, 0));
+      g.addColorStop(0, rgba(200, 225, 255, 0.11 * a));
+      g.addColorStop(1, rgba(220, 240, 255, 0));
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       ctx.fillStyle = g;
@@ -1449,7 +1829,9 @@ const Main = (() => {
     }
 
     function riseBubbles(t) {
-      for (const b of celeb) {
+      const n = reducedMotion ? celeb.length >> 1 : celeb.length;
+      for (let i = 0; i < n; i++) {
+        const b = celeb[i];
         const y = C.H + 10 - ((t * b.sp + b.off) % (C.H + 30)), x = b.x + Math.sin(t / 40 + b.ph) * 6;
         if (y < -12) continue;
         spr('bubble', Math.floor(t / 14) + b.off, x, y, { alpha: b.big ? 0.8 : 0.5 });
@@ -1459,50 +1841,35 @@ const Main = (() => {
     /** Fizz and Pop at 2x, hopping one after the other. */
     function heroes(t, lift) {
       const hop = (ph) => Math.abs(Math.sin((t + ph) / 11)) * 14;
-      const h1 = hop(0), h2 = hop(17);
-      sprBig(h1 > 2 ? 'p1_jump' : 'p1_idle', Math.floor(t / 30), 38, 184 - h1 - lift, 2);
-      sprBig(h2 > 2 ? 'p2_jump' : 'p2_idle', Math.floor(t / 30), 186, 184 - h2 - lift, 2, { flip: true });
+      const h1 = hop(0), h2 = hop(17), by = 216 - lift;
+      glowAt(54, 216, 26, '#ff3ea5', 0.3, 0.3); glowAt(202, 216, 26, '#3cf2ff', 0.3, 0.3);
+      bigHeroes.draw('fizz', h1 > 2 ? 'jump' : 'idle', h1 > 2 ? 0 : Math.floor(t / 20) % 8, h1 > 2 ? 1 : 8, 54, by - h1, 2, false);
+      bigHeroes.draw('pop', h2 > 2 ? 'jump' : 'idle', h2 > 2 ? 0 : Math.floor((t + 60) / 20) % 8, h2 > 2 ? 1 : 8, 202, by - h2, 2, true);
     }
 
-    function drawScene(t, dim) {
+    function drawScene(t, dimA) {
       const mix = pearlMix(), pcy = U.lerp(PEARL_CY, SMALL_CY, mix);
-      backdrop('#050c26', '#0f4f8a');
+      staticBack('menu', () => { drawBg(BG_TITLE); dim(0.28); });
       const warm = ctx.createLinearGradient(0, C.H * 0.45, 0, C.H);       // reef light washing in from the bottom
       warm.addColorStop(0, 'rgba(255,170,120,0)');
-      warm.addColorStop(1, rgba(255, 170, 120, 0.24 * (1 - dim * 0.6)));
+      warm.addColorStop(1, rgba(255, 170, 120, 0.16 * (1 - dimA * 0.6)));
       ctx.fillStyle = warm; ctx.fillRect(0, 0, C.W, C.H);
-      rays(t, 1 - dim * 0.6, pcy);
+      rays(t, 1 - dimA * 0.6, pcy);
       riseBubbles(t);
       ambient.draw(t, 0.35, false);
       towerFrame();
-      // the big pearl, 2x, bobbing, with sparkles around it (fades out while it moves down between the heroes)
+      // the big pearl, bobbing, with sparkles around it (fades out while it moves down between the heroes)
       const bob = Math.round(Math.sin(t / 22) * 3);
-      if (mix < 1) {
-        ctx.save(); ctx.globalAlpha = 1 - mix;
-        sprBig('moonpearl', Math.floor(t / 14), PEARL_CX - 32, PEARL_CY - 32 + bob, 2);
-        for (let i = 0; i < 5; i++) {
-          const a = t / 26 + i * 1.26;
-          spr('sparkle', Math.floor(t / 5) + i, PEARL_CX - 4 + Math.cos(a) * 46, PEARL_CY - 4 + bob + Math.sin(a) * 40);
-        }
-        ctx.restore();
-      }
-      if (dim > 0) { ctx.fillStyle = rgba(3, 8, 24, dim); ctx.fillRect(16, C.MAP_Y, C.W - 32, 200); }
+      if (mix < 1) pearl(PEARL_CX, PEARL_CY + bob, 19, t, 1 - mix);
+      if (dimA > 0) { ctx.fillStyle = rgba(3, 8, 24, dimA); ctx.fillRect(16, C.MAP_Y, C.W - 32, 200); }
       heroes(t, 0);                                        // after the veil: Fizz and Pop stay bright
-      if (mix > 0) {                                       // the small pearl joins them, between Fizz and Pop
-        ctx.save(); ctx.globalAlpha = mix;
-        sprBig('moonpearl', Math.floor(t / 14), PEARL_CX - 16, SMALL_CY - 16 + Math.round(bob / 2), 1);
-        for (let i = 0; i < 4; i++) {
-          const a = t / 26 + i * 1.57;
-          spr('sparkle', Math.floor(t / 5) + i, PEARL_CX - 4 + Math.cos(a) * 26, SMALL_CY - 4 + Math.sin(a) * 18);
-        }
-        ctx.restore();
-      }
+      if (mix > 0) pearl(PEARL_CX, SMALL_CY + Math.round(bob / 2), 9, t, mix);   // the small pearl joins them, between Fizz and Pop
     }
 
     /** The scrolling credits, clipped to their band (so they can never reach the tableau below it) with soft top / bottom edges. */
     function drawCredits(t) {
       const h = BAND_BOT - BAND_TOP;
-      ctx.fillStyle = rgba(3, 8, 24, 0.4);
+      ctx.fillStyle = rgba(3, 6, 16, 0.42);
       ctx.fillRect(16, BAND_TOP, C.W - 32, h);
       ctx.save();
       ctx.beginPath(); ctx.rect(16, BAND_TOP, C.W - 32, h); ctx.clip();
@@ -1512,29 +1879,26 @@ const Main = (() => {
       });
       for (const [y0, y1, a0, a1] of [[BAND_TOP, BAND_TOP + X_FADE, 0.96, 0], [BAND_BOT - X_FADE, BAND_BOT, 0, 0.96]]) {
         const g = ctx.createLinearGradient(0, y0, 0, y1);
-        g.addColorStop(0, rgba(3, 8, 24, a0)); g.addColorStop(1, rgba(3, 8, 24, a1));
+        g.addColorStop(0, rgba(3, 6, 16, a0)); g.addColorStop(1, rgba(3, 6, 16, a1));
         ctx.fillStyle = g; ctx.fillRect(16, y0, C.W - 32, y1 - y0);
       }
       ctx.restore();
-      ctx.fillStyle = 'rgba(255,255,255,0.14)';           // hairlines mark the band's edges
-      ctx.fillRect(16, BAND_TOP - 1, C.W - 32, 1); ctx.fillRect(16, BAND_BOT, C.W - 32, 1);
+      ctx.fillStyle = 'rgba(60,242,255,0.3)';             // hairlines mark the band's edges
+      ctx.fillRect(16, BAND_TOP - 1, C.W - 32, 1.2 / K); ctx.fillRect(16, BAND_BOT, C.W - 32, 1.2 / K);
     }
 
-    /** Key hint on its own dark plate (outside the scroll band). */
+    /** Key hint on its own dark glass strip (outside the scroll band). */
     function hintPlate(s, y) {
       const w = GFX.textWidth(s) + 14, x = Math.round(C.W / 2 - w / 2);
-      ctx.fillStyle = 'rgba(3,8,24,0.88)';
-      ctx.fillRect(x, y - 3, w, 14);
-      ctx.fillStyle = 'rgba(255,255,255,0.18)';
-      ctx.fillRect(x, y - 3, w, 1); ctx.fillRect(x, y + 10, w, 1);
+      panel(x, y - 3, w, 14, { a: 0.78, edge: 0.3, ticks: false });
       ctext(s, y, COL.dim);
     }
 
     function drawFinale(t) {
-      GFX.drawLogo(ctx, 128, 12, t);
-      ctext('THE END', 56, COL.gold, { scale: 2, outline: '#06122e' });
-      ctext('THANK YOU FOR PLAYING!', 80, COL.white, { outline: '#06122e' });
-      ctext('- EVERYONE WAVES GOODBYE -', 100, COL.coral, { outline: '#06122e' });
+      drawLogoCached(128, 12, t / 60);
+      ctext('THE END', 56, COL.hi, { scale: 2 });
+      ctext('THANK YOU FOR PLAYING!', 80, COL.white);
+      ctext('- EVERYONE WAVES GOODBYE -', 100, COL.coral);
       CAST_ROW.forEach((id, i) => {
         const x = 128 - (CAST_ROW.length * 24 - 8) / 2 + i * 24, bob = Math.round(Math.sin(t / 9 - i * 0.9) * 4);
         spr(castSprite(id), Math.floor(t / 10) + i, x, 114 + bob, { flip: i > 2 });
@@ -1577,7 +1941,7 @@ const Main = (() => {
           const lines = [['MOON PEARL', 12, 2, COL.gold, 6], ['IS SAFE!', 30, 2, COL.gold, 34], ['THE REEF SHINES AGAIN', 52, 1, COL.text, 70]];
           lines.forEach(([s, y, sc, c, at]) => {
             const n = Math.floor(U.clamp((pt - at) * 0.9, 0, s.length));
-            if (n > 0) ctext(s.slice(0, n), y, c, { scale: sc, outline: '#06122e' });
+            if (n > 0) ctext(s.slice(0, n), y, c, { scale: sc });
           });
           if (pt > 150 && pt < 330 && blink(pt, 30)) hintPlate(touchLabel() + ': SKIP', 204);
         } else if (phase === 1) {
@@ -1617,6 +1981,7 @@ const Main = (() => {
         const players = args.players === 2 ? 2 : 1;
         paused = false; pauseSel = 0; confirmQuit = false; autoPaused = false;
         session.lastPlayers = players;
+        pushOptions();                                          // reduced motion / quality for this game (Game keeps them between games, this is the belt and braces)
         Game.start({ players, level: args.level || 1, seed: args.seed === undefined ? 1 : args.seed, hiScore: topScore(),
           joinHint: touchOnly() ? '' : 'PUSH Q' });
         if (isHeld()) setPaused(true, true);                    // never start a round unattended while blurred / hidden (U5)
@@ -1666,28 +2031,24 @@ const Main = (() => {
         Game.render(ctx);
         if (!paused) return;
         const g = geom(), list = items();
-        ctx.fillStyle = 'rgba(4,3,16,0.6)';
+        ctx.fillStyle = 'rgba(2,4,12,0.58)';
         ctx.fillRect(0, 0, C.W, C.H);
         if (focusEl && !focusEl.hidden) return;                 // the click-to-resume overlay speaks for the paused game: no second panel under it (P2)
-        ctx.fillStyle = 'rgba(8,6,30,0.94)';                  // solid panel: nothing from the paused round shows through the text
-        ctx.fillRect(g.px, g.py, g.pw, g.ph);
-        ctx.strokeStyle = COL.gold;
-        ctx.lineWidth = 1;
-        ctx.strokeRect(g.px + 0.5, g.py + 0.5, g.pw - 1, g.ph - 1);
+        panel(g.px, g.py, g.pw, g.ph, { a: 0.9, edge: 0.55 }); // near-opaque glass: nothing from the paused round shows through the text
         if (confirmQuit) {
           ctext('QUIT?', g.ty, COL.coral, { scale: 2 });
           ctext('THIS ENDS YOUR GAME', g.ty + 22, COL.dim);
-        } else ctext('PAUSED', g.ty, COL.gold, { scale: 2 });
+        } else ctext('PAUSED', g.ty, COL.hi, { scale: 2 });
+        rule(128, g.ty + 15, 52, CYAN, 0.5);
         list.forEach((s, i) => {
           const on = i === pauseSel;
           if (g.big) {
             plate(g.x0, g.y0 + i * g.pitch, g.x1 - g.x0, g.pitch - 4, on);
-            ctext(s, g.y0 + i * g.pitch + Math.floor((g.pitch - 4 - 8) / 2), on ? COL.gold : COL.white);
+            ctext(s, g.y0 + i * g.pitch + Math.floor((g.pitch - 4 - 8) / 2), on ? COL.hi : COL.text);
             return;
           }
-          const y = g.y0 + i * g.pitch, w = GFX.textWidth(s);
-          ctext(s, y, on ? COL.gold : COL.text);
-          if (on) { text('>', 128 - w / 2 - 14, y, COL.gold); text('<', 128 + w / 2 + 6, y, COL.gold); }
+          const y = g.y0 + i * g.pitch;
+          menuRow(s, 128, y, on, sceneT);
         });
         if (!g.big) {
           ctext(confirmQuit ? 'ESC: BACK' : 'P OR ESC: RESUME', 160, COL.dim);
@@ -1733,18 +2094,116 @@ const Main = (() => {
     if (useReal) { tapped.clear(); touchTap.clear(); }
   }
 
-  /** Copy the logical 256x224 frame to the visible canvas (1:1, or nearest-neighbour into the sharp-bilinear backing store). */
-  function present() {
-    if (!vctx || !lcanvas) return;
-    if (backing === 1) vctx.drawImage(lcanvas, 0, 0);
-    else vctx.drawImage(lcanvas, 0, 0, C.W, C.H, 0, 0, C.W * backing, C.H * backing);
+  // ===================================================================================================
+  // Quality (post FX level, SPEC_V2 sec. 1) and reduced motion
+  // ===================================================================================================
+  /** Tell Game (and remember for the scenes) the presentation options. Feature-detected: an older Game without setOptions just ignores them. */
+  function pushOptions() {
+    try { if (typeof Game.setOptions === 'function') Game.setOptions({ reducedMotion, quality }); } catch (e) { reportError('Game.setOptions', e); }
+  }
+  const qualityLog = [];
+  function setQuality(q, why) {
+    q = Math.round(+q);
+    if (!(q === q)) return quality;
+    q = U.clamp(q, 0, maxQuality);
+    if (q === quality) return quality;
+    quality = q;
+    qualityLog.push({ q, why: why || 'set', frame: renderCount });
+    if (qualityLog.length > 64) qualityLog.shift();
+    pushOptions();
+    return quality;
+  }
+
+  /** Auto quality: the average of update + render + post FX over a 2 s window above 12 ms drops one level; 10 s of windows below 6 ms raise
+   *  one again. Anti-flap: when a raise is undone by a drop soon after, the next raise waits twice as long (up to 80 s); a long calm resets it. */
+  /** Next GFX bucket below k for the resolution lever (<= 80 % of k, >= K_CAP_MIN); 0 = nothing lower. */
+  const lowerK = (k) => { let b = 0; for (const g of GFX_BUCKETS) if (g <= k * K_CAP_STEP + 1e-6 && g >= K_CAP_MIN) b = g; return b; };
+  const higherK = (k) => { for (const g of GFX_BUCKETS) if (g > k + 1e-6) return g; return Infinity; };
+  function setKCap(c, why) {
+    if (c === kCap) return;
+    kCap = c;
+    qualityLog.push({ kCap: c === Infinity ? null : c, why: why || 'set', frame: renderCount }); if (qualityLog.length > 64) qualityLog.shift();
+    fit();                                                  // re-sizes the backing store, tells GFX.setScale and repaints
+  }
+  const autoQ = {
+    sum: 0, n: 0, span: 0, calm: 0, wait: Q_RAISE_AFTER_MS, clock: 0, lastRaise: -1e9, last: 0, windows: 0, fBuf: [], fSpan: 0, skip: 0,
+    reset() { this.sum = 0; this.n = 0; this.span = 0; this.calm = 0; this.fBuf.length = 0; this.fSpan = 0; },
+    /** One step down the ladder: quality 2 -> 1 -> 0, then the resolution lever. `avg` (ms, optional) = the measured cost: the lever then jumps to the k whose predicted
+     *  cost (fill ~ k^2) is back under the drop threshold instead of one bucket. Returns whether anything changed. */
+    degrade(why, avg) {
+      let changed = false;
+      if (quality > 0) { setQuality(quality - 1, why); changed = true; this.reset(); }
+      else {
+        const cur = Math.min(K, kCap); let lk = lowerK(cur);
+        if (lk && avg > Q_DROP_MS) { const want = cur * Math.sqrt(Q_DROP_MS / avg) * 1.1; let b = 0; for (const g of GFX_BUCKETS) if (g <= want + 1e-6 && g >= K_CAP_MIN) b = g; lk = Math.min(lk, b || K_CAP_MIN); }
+        if (lk) { setKCap(lk, why + '-res'); changed = true; this.reset(); this.skip = Q_SKIP_FRAMES; }   // the re-bake after a k change is not what the next window is about
+      }
+      return changed;
+    },
+    /** cost = ms spent in update + render + post FX for one animation frame; dt = ms since the previous frame. */
+    feed(cost, dt) {
+      if (!(cost >= 0) || !(dt > 0) || qualityLocked) return;
+      if (this.skip > 0) { this.skip--; return; }
+      this.sum += cost; this.n++; this.span += dt; this.clock += dt;
+      this.fBuf.push(cost); this.fSpan += dt;
+      if (this.fSpan >= Q_FAST_WINDOW_MS) {                                // severe overload fast path (see Q_SEVERE_MS)
+        const a = this.fBuf.slice().sort((x, y) => x - y), med = a[a.length >> 1], enough = a.length >= Q_FAST_MIN_FRAMES, mean = a.reduce((x, y) => x + Math.min(y, 100), 0) / a.length;
+        this.fBuf.length = 0; this.fSpan = 0;
+        if (enough && med > Q_SEVERE_MS && this.degrade('auto-drop-fast', mean)) return;
+      }
+      if (this.span < Q_WINDOW_MS) return;
+      const avg = this.sum / this.n, span = this.span;
+      this.last = avg; this.windows++;
+      this.sum = 0; this.n = 0; this.span = 0;
+      if (avg > Q_DROP_MS) {
+        this.calm = 0;
+        const recent = this.clock - this.lastRaise < this.wait * 1.5;
+        if (this.degrade('auto-drop', avg) && recent) this.wait = Math.min(this.wait * 2, Q_WAIT_MAX_MS);
+      } else if (avg < Q_RAISE_MS) {
+        this.calm += span;
+        if (this.calm >= this.wait && quality < maxQuality) { setQuality(quality + 1, 'auto-raise'); this.lastRaise = this.clock; this.calm = 0; }
+        else if (this.calm >= this.wait && kCap < Infinity) { const hk = higherK(kCap); setKCap(hk >= kNat ? Infinity : hk, 'auto-raise-res'); this.lastRaise = this.clock; this.calm = 0; this.skip = Q_SKIP_FRAMES; }
+        else if (this.calm >= 6 * Q_RAISE_AFTER_MS) this.wait = Q_RAISE_AFTER_MS;
+      } else this.calm = 0;
+    },
+    state() { return { quality, locked: qualityLocked, windowAvgMs: this.last, windows: this.windows, calmMs: this.calm, raiseWaitMs: this.wait, pendingMs: this.span, kCap: kCap === Infinity ? null : kCap, kNat, k: K, log: qualityLog.slice() }; },
+  };
+
+  /** prefers-reduced-motion -> Game.setOptions({ reducedMotion }) and the scenes' own motion (ambient count, no flashes). `reducedOverride` (a test hook) wins. */
+  function syncMotion() {
+    const was = reducedMotion;
+    reducedMotion = reducedOverride !== null ? !!reducedOverride : !!(motionMq && motionMq.matches);
+    if (reducedMotion !== was) pushOptions();
+  }
+  function watchMotion() {
+    try {
+      motionMq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+      if (motionMq) { if (motionMq.addEventListener) motionMq.addEventListener('change', syncMotion); else if (motionMq.addListener) motionMq.addListener(syncMotion); }
+    } catch (e) { motionMq = null; }
+    syncMotion();
+    pushOptions();
+  }
+
+  // ===================================================================================================
+  // Render + loop
+  // ===================================================================================================
+  const costs = new Float32Array(240);                  // update + render + post FX of the last 240 frames (ms) -> _main.perf()
+  let costI = 0, costN = 0;
+
+  /** Post FX (bloom, vignette, grain) over the finished frame at the current quality level (0 = off). Feature-detected. */
+  function postFX() {
+    if (quality <= 0 || typeof GFX.postFX !== 'function') return;
+    try { GFX.postFX(ctx, quality); } catch (e) { reportError('postFX', e); }
   }
 
   function render() {
+    renderCount++;
+    ctx.setTransform(K, 0, 0, K, 0, 0);                  // every frame: scenes and Game draw in LOGICAL units (256 x 224)
+    ctx.globalAlpha = 1; ctx.globalCompositeOperation = 'source-over'; ctx.imageSmoothingEnabled = true;
     try {
       scenes[scene].render();
       drawOverlays();
-    } finally { present(); }
+    } finally { postFX(); }
   }
 
   /** Run fn; on a throw log once and report failure to the caller. */
@@ -1756,8 +2215,10 @@ const Main = (() => {
     requestAnimationFrame(frame);
     lastRaf = performance.now();
     if (holds.has('stall')) release('stall');
+    if ((window.devicePixelRatio || 1) !== layout.dpr) fit();           // zoom / monitor change without a resize event we heard
     const dt = Math.min(now - last, 250);
     last = now;
+    const c0 = performance.now();
     let ok = true;
     if (frozen) acc = 0;
     else {
@@ -1770,6 +2231,9 @@ const Main = (() => {
       if (steps === MAX_CATCHUP) acc = 0;                 // drop the backlog after a long stall
     }
     ok = guarded('render', render) && ok;
+    const cost = performance.now() - c0;
+    costs[costI] = cost; costI = (costI + 1) % costs.length; if (costN < costs.length) costN++;
+    if (!frozen && !isHeld()) autoQ.feed(cost, dt);                   // (a genuinely slow frame counts too: its cost is what the average is about)
     syncSoundButton();
     failStreak = ok ? 0 : failStreak + 1;
     if (failStreak >= FAIL_LIMIT && scene !== 'title') {   // soft-lock guard
@@ -1785,17 +2249,46 @@ const Main = (() => {
   // Controls (portrait): 10 px padding + PAUSE/SOUND row + gap + the four big buttons + bottom padding (template.html)
   const CTRL_OVERHEAD = 10 + PILL_H + ROW_GAP + CTRL_PAD;
 
-  /** Scale for an achievable scale kMax: a whole number of DEVICE pixels per game pixel when that keeps >= 80 % of kMax
-   *  (crisp), otherwise kMax itself with sharp-bilinear resampling. */
-  function pickScale(kMax, dpr) {
-    const k = Math.max(kMax, 0.05);
-    const sInt = Math.floor(k * dpr + 1e-6) / dpr;
-    if (sInt * dpr >= 1 && sInt >= INT_FILL * k) return { s: sInt, sharp: false };
-    return { s: k, sharp: true };
+  const quantK = (x) => U.clamp(Math.round(x / K_STEP) * K_STEP, K_MIN, K_MAX);
+  const floorK = (x) => U.clamp(Math.floor(x / K_STEP + 1e-6) * K_STEP, K_MIN, K_MAX);
+  // The bake scales of GFX (10_gfx.js BUCKETS; all are multiples of 0.25). At exactly such a k the baked world canvases (level, background)
+  // and sprites are blitted 1:1; any other k makes every one of those blits a resampling, which a software rasteriser pays for (~2 ms each).
+  const GFX_BUCKETS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8];
+  /** Scale for the free space: sAvail = css px per logical px that would exactly fill it. The backing store is 256k x 224k with k = css size x
+   *  devicePixelRatio / 256 quantised to 0.25 steps (clamp 1..8). Whenever a whole step of device pixels costs little of the free space the
+   *  picture is fitted to it: exactly 1 backing px per device px, perfectly crisp (first choice: a GFX bake scale, <= 8 % smaller; then any
+   *  0.25 step, <= 6.5 % smaller). Otherwise it fills the space and the browser resamples smoothly from the nearest step (never more than ~6 %
+   *  off, except at k 8 on very large screens). */
+  function pickScale(sAvail, dpr) {
+    const s = Math.max(sAvail, 0.05), kRaw = s * dpr;
+    if (kRaw >= K_MIN) {
+      let kb = 0;
+      for (const b of GFX_BUCKETS) if (b <= kRaw + 1e-6) kb = b;
+      if (kb >= kRaw * (1 - BUCKET_TOL)) return { s: kb / dpr, k: kb, snapped: true };
+      const kf = floorK(kRaw);
+      if (kf >= kRaw * (1 - SNAP_TOL)) return { s: kf / dpr, k: kf, snapped: true };
+    }
+    return { s, k: quantK(kRaw), snapped: false };
+  }
+
+  const scaleLog = [];                                  // every k handed to GFX.setScale (tests)
+  let scaleSent = false;
+  /** Size the backing store to 256k x 224k and tell GFX when k changed. Returns true when the canvas was resized (which clears it). */
+  function applyScale(k) {
+    const w = Math.round(C.W * k), h = Math.round(C.H * k);
+    let resized = false;
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; resized = true; }
+    if (k !== K || !scaleSent) {
+      K = k; scaleSent = true;
+      scaleLog.push(k); if (scaleLog.length > 200) scaleLog.shift();
+      bigHeroes.clear(); dropStatics();
+      try { if (typeof GFX.setScale === 'function') GFX.setScale(K); } catch (e) { reportError('GFX.setScale', e); }
+    }
+    return resized;
   }
 
   function fit() {
-    if (!canvas || !bootDone) return;
+    if (!canvas) return;
     const root = rootEl || document.documentElement;
     const cs = getComputedStyle(root);                      // the Artifact skeleton pads :root by the safe-area insets
     const padL = cssNum(cs.paddingLeft), padR = cssNum(cs.paddingRight), padT = cssNum(cs.paddingTop), padB = cssNum(cs.paddingBottom);
@@ -1809,48 +2302,47 @@ const Main = (() => {
     root.style.setProperty('--page-h', Math.max(0, vh - padY) + 'px');
     const dpr = window.devicePixelRatio || 1;
     const baseW = Math.max(64, vw - padX - 2 * GUTTER), baseH = Math.max(56, vh - padY - 2 * V_PAD);
-    let mode = 'desk', pick, showLegend = false, btnW = 0, btnH = 0;
+    const fill = (kMax) => ({ s: Math.max(kMax, 0.05) });      // the achievable css scale (continuous: no pixel-grid steps any more)
+    let mode = 'desk', pick, showLegend = false, btnW = 0, btnH = 0, minBtnH = 0;
     root.classList.toggle('touch', touchMode);                // first: the measurements below need the touch UI to be displayed
 
     if (!touchMode) {
       let hLeg = 0;
       if (legendEl) { legendEl.hidden = false; hLeg = legendEl.offsetHeight + LEGEND_GAP; }
-      const withLeg = pickScale(Math.min(baseW / C.W, (baseH - hLeg) / C.H), dpr);
-      const without = pickScale(Math.min(baseW / C.W, baseH / C.H), dpr);
-      showLegend = !!legendEl && withLeg.s >= without.s - 1e-6;      // the legend only stays when it costs no scale step (it repeats the H page)
+      const withLeg = fill(Math.min(baseW / C.W, (baseH - hLeg) / C.H)), without = fill(Math.min(baseW / C.W, baseH / C.H));
+      showLegend = !!legendEl && withLeg.s >= without.s * LEGEND_KEEP - 1e-6;   // the legend stays while it costs the picture at most 14 % (it repeats the H page)
       pick = showLegend ? withLeg : without;
       if (legendEl) legendEl.hidden = !showLegend;
     } else {
       if (legendEl) legendEl.hidden = true;
       // (a) portrait stack: picture on top, PAUSE/SOUND row and the four big buttons directly below
       btnW = U.clamp(Math.floor((baseW - 2 * BTN_GAP - PAD_SPREAD) / 4), 44, BTN_MAX_W);
-      const minBtnH = Math.min(btnW, 64);
-      const port = pickScale(Math.min(baseW / C.W, (baseH - CTRL_OVERHEAD - minBtnH) / C.H), dpr);
+      minBtnH = Math.min(btnW, 64);
+      const port = fill(Math.min(baseW / C.W, (baseH - CTRL_OVERHEAD - minBtnH) / C.H));
       // (b) landscape: pads at both sides of the picture
       const btnL = U.clamp(Math.floor(vh * 0.16), 44, 64);
       const reserve = 2 * btnL + BTN_GAP + 12 + 12;
-      const land = vw >= LAND_MIN_VW ? pickScale(Math.min((vw - padX - 2 * reserve) / C.W, baseH / C.H), dpr) : null;
+      const land = vw >= LAND_MIN_VW ? fill(Math.min((vw - padX - 2 * reserve) / C.W, baseH / C.H)) : null;
       mode = land && land.s >= port.s - 1e-6 ? 'land' : 'port';
       pick = mode === 'land' ? land : port;
       // (c) too small for either: translucent pads over the picture's margins
       if (pick.s < 1) {
-        const over = pickScale(Math.min((vw - padX - 16) / C.W, baseH / C.H), dpr);
+        const over = fill(Math.min((vw - padX - 16) / C.W, baseH / C.H));
         if (over.s > pick.s * 1.05) { mode = 'over'; pick = over; }
       }
       const sideMode = mode !== 'port';
       root.classList.toggle('land', sideMode);
       root.classList.toggle('over', mode === 'over');
       if (sideMode) { btnW = btnH = btnL; }
-      else btnH = U.clamp(Math.floor(baseH - C.H * pick.s - CTRL_OVERHEAD), minBtnH, BTN_MAX_H);
       root.style.setProperty('--btn-w', btnW + 'px');
-      root.style.setProperty('--btn-h', btnH + 'px');
+      if (sideMode) root.style.setProperty('--btn-h', btnH + 'px');
       if (mode === 'land' && touchEl) {                       // measure the real side reserves (safe-area insets) and refit once
         const L = touchEl.querySelector('.left'), R = touchEl.querySelector('.right');
         const lr = L ? L.getBoundingClientRect() : null, rr = R ? R.getBoundingClientRect() : null;
         if (lr && rr && lr.width > 0 && rr.width > 0) {
           const res = Math.max(lr.right - padL, (vw - padR) - rr.left) + 12;
           if (res < vw / 2 && Math.abs(res - reserve) > 0.5) {
-            const again = pickScale(Math.min((vw - padX - 2 * res) / C.W, baseH / C.H), dpr);
+            const again = fill(Math.min((vw - padX - 2 * res) / C.W, baseH / C.H));
             if (again.s <= pick.s) pick = again;
           }
         }
@@ -1858,27 +2350,44 @@ const Main = (() => {
     }
     if (!touchMode) { root.classList.remove('land'); root.classList.remove('over'); }
 
-    const cssW = +(C.W * pick.s).toFixed(3), cssH = +(C.H * pick.s).toFixed(3);
-    const m = pick.sharp ? U.clamp(Math.ceil((cssW * dpr) / C.W - 1e-6), 1, MAX_BACKING) : 1;
-    if (m !== backing) {
-      backing = m;
-      canvas.width = C.W * m; canvas.height = C.H * m;       // resizing clears the canvas and resets its state
-      if (vctx) vctx.imageSmoothingEnabled = false;
+    const snap0 = pickScale(pick.s, dpr);                     // crisp 1:1 fit when cheap, else fill + smooth resample
+    kNat = snap0.k;
+    const snap = snap0.k > kCap ? { s: snap0.s, k: kCap, snapped: false } : snap0;      // resolution lever: same css size, fewer backing pixels
+    if (touchMode && mode === 'port') {                       // the leftover height goes to the big buttons
+      btnH = U.clamp(Math.floor(baseH - C.H * snap.s - CTRL_OVERHEAD), minBtnH, BTN_MAX_H);
+      root.style.setProperty('--btn-h', btnH + 'px');
     }
+    const cssW = +(C.W * snap.s).toFixed(3), cssH = +(C.H * snap.s).toFixed(3);
+    const resized = applyScale(snap.k);
     canvas.style.width = cssW + 'px';
     canvas.style.height = cssH + 'px';
-    canvas.style.imageRendering = pick.sharp ? 'auto' : 'pixelated';
     layout = {
       scale: cssW / C.W, w: cssW, h: cssH, vw, vh, dpr, touch: touchMode, land: mode === 'land' || mode === 'over', mode,
-      sharp: pick.sharp, m, legend: showLegend, btnW, btnH, availW: baseW, availH: baseH,
+      sharp: false, m: snap.k, k: snap.k, kNat, snapped: snap.snapped, backW: canvas.width, backH: canvas.height, legend: showLegend, btnW, btnH, availW: baseW, availH: baseH,
     };
-    present();
+    watchDpr();
+    if (resized && sceneReady && scenes[scene]) guarded('render', render);    // a resize clears the canvas: repaint now (also while the loop is frozen)
   }
+
+  /** devicePixelRatio changes (browser zoom, moving the window to another monitor) do not always fire `resize`: watch the resolution media query. */
+  let dprWatched = 0;
+  function watchDpr() {
+    const d = window.devicePixelRatio || 1;
+    if (!window.matchMedia || dprWatched === d) return;
+    try {
+      if (dprMq && dprMq.removeEventListener) dprMq.removeEventListener('change', onDprChange);
+      dprMq = window.matchMedia('(resolution: ' + d + 'dppx)');
+      if (dprMq.addEventListener) dprMq.addEventListener('change', onDprChange); else if (dprMq.addListener) dprMq.addListener(onDprChange);
+      dprWatched = d;
+    } catch (e) { dprMq = null; }
+  }
+  function onDprChange() { dprWatched = 0; fit(); }
 
   // ===================================================================================================
   // Boot
   // ===================================================================================================
-  function bindDom() {
+  /** Look the page elements up (cheap; also needed for the very first sizing). */
+  function findDom() {
     const byId = (id) => document.getElementById(id);
     rootEl = document.documentElement;
     legendEl = byId('legend');
@@ -1887,7 +2396,9 @@ const Main = (() => {
     soundBtn = touchEl ? touchEl.querySelector('[data-k="sound"]') : null;
     try { coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches); } catch (e) { coarse = false; }
     touchMode = coarse;
+  }
 
+  function bindDom() {
     window.addEventListener('keydown', onKeyDown);
     window.addEventListener('keyup', onKeyUp);
     window.addEventListener('blur', onBlur);
@@ -1906,6 +2417,8 @@ const Main = (() => {
     canvas.addEventListener('pointerdown', onCanvasPointer);
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
     bindTouchControls();
+    watchDpr();
+    watchMotion();
     if (focusEl) {
       focusEl.addEventListener('pointerdown', (e) => { e.preventDefault(); });
       focusEl.addEventListener('click', dismissFocus);
@@ -1976,31 +2489,73 @@ const Main = (() => {
         howtoPage: () => scenes.howto.page(),
         ambientReset: () => ambient.reset(),
         persistent: () => storagePersistent(),
+        // ---- v2: render scale, quality, reduced motion -----------------------------------------------------
+        k: () => K,                                          // current render scale (output px per logical px)
+        scaleLog: () => scaleLog.slice(),                    // every k handed to GFX.setScale, in order
+        quality: () => quality,                              // current post FX / particle level 0..2
+        setQuality: (q, lock) => { qualityLocked = !!lock; return setQuality(q, 'hook'); },   // lock = true freezes auto quality (tests that compare pixels)
+        autoQuality: () => autoQ.state(),                    // { quality, windowAvgMs, calmMs, raiseWaitMs, log, ... }
+        autoQualityFeed: (cost, dt) => { autoQ.feed(cost, dt); return quality; },   // simulate frames: cost ms of work per frame, dt ms between frames
+        autoQualityReset: () => { qualityLocked = false; autoQ.reset(); autoQ.wait = Q_RAISE_AFTER_MS; autoQ.lastRaise = -1e9; autoQ.skip = 0; qualityLog.length = 0; setKCap(Infinity, 'reset'); },
+        setKCap: (c) => { setKCap(c === null || c === undefined ? Infinity : +c, 'hook'); return K; },   // resolution lever (tests): cap on k, null = off
+        reducedMotion: () => reducedMotion,
+        setReducedMotion: (b) => { reducedOverride = b === null || b === undefined ? null : !!b; syncMotion(); return reducedMotion; },   // null = follow the OS again
+        options: () => ({ reducedMotion, quality, k: K }),
+        perf: () => {                                        // update + render + post FX per frame (ms), last <= 240 frames
+          const a = Array.from(costs.subarray(0, costN)).sort((x, y) => x - y);
+          const n = a.length;
+          return { n, avg: n ? a.reduce((s, v) => s + v, 0) / n : 0, p95: n ? a[Math.min(n - 1, Math.floor(n * 0.95))] : 0, max: n ? a[n - 1] : 0 };
+        },
+        renderNow: () => { render(); },
+        bigHeroes: () => ({ px: bigHeroes.px(), count: bigHeroes.count() }),
       },
     };
     for (const k of ['scene', 'goto', 'freeze', 'step', 'start']) hooks[k] = ready(hooks[k]);
     for (const k of Object.keys(hooks._main)) if (typeof hooks._main[k] === 'function') hooks._main[k] = ready(hooks._main[k]);
+    Object.defineProperty(hooks, 'quality', { enumerable: true, get: () => quality });   // SPEC_V2 sec. 1: the current level is readable on __fizzpop
+    Object.defineProperty(hooks, 'bootMs', { enumerable: true, get: () => bootMs });      // ms since navigation start of the first title paint (-1 before it); loadingMs = the LOADING frame
+    Object.defineProperty(hooks, 'loadingMs', { enumerable: true, get: () => loadingMs });
+    Object.defineProperty(hooks, 'bootProfile', { enumerable: true, get: () => ({ ...bootProf }) });
     window.__fizzpop = hooks;
   }
 
-  /** First paint: a LOADING frame (GFX.init can block the main thread for 100-600 ms on a weak phone). */
+  /** First paint: a LOADING frame (GFX.init and the first scene's bakes can block the main thread for 100-600 ms on a weak phone). Drawn at the
+   *  final resolution with the stroke font; a plain fallback keeps it working without GFX. */
   function drawLoading() {
-    vctx.fillStyle = '#050a1e';
-    vctx.fillRect(0, 0, C.W, C.H);
-    vctx.fillStyle = '#9aa1d8';
-    vctx.font = 'bold 12px monospace';
-    vctx.textAlign = 'center'; vctx.textBaseline = 'middle';
-    vctx.fillText('LOADING', C.W / 2, C.H / 2);
+    ctx.setTransform(K, 0, 0, K, 0, 0);
+    ctx.fillStyle = COL.void;
+    ctx.fillRect(0, 0, C.W, C.H);
+    const g = ctx.createRadialGradient(128, 108, 2, 128, 108, 110);
+    g.addColorStop(0, 'rgba(60,242,255,0.18)'); g.addColorStop(1, 'rgba(60,242,255,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, C.W, C.H);
+    ctx.fillStyle = 'rgba(60,242,255,0.5)';
+    ctx.fillRect(88, 124, 80, 1.2 / K);
+    let ok = false;
+    try { GFX.text(ctx, 'LOADING', 128, 108, COL.text, { align: 'center' }); ok = true; } catch (e) { ok = false; }
+    if (!ok) {
+      ctx.fillStyle = '#8eeaff'; ctx.font = '8px monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('LOADING', 128, 112);
+    }
   }
 
+  const bootProf = {};                                          // ms per boot phase (diagnostics: __fizzpop.bootProfile)
   function finishBoot() {
     if (bootDone) return;
     bootDone = true;
+    let t0 = performance.now();
+    const lap = (name) => { const n = performance.now(); bootProf[name] = Math.round((n - t0) * 10) / 10; t0 = n; };
     try { GFX.init(); } catch (e) { reportError('GFX.init', e); }
+    lap('gfxInit');
     bindDom();
     fit();
+    pushOptions();
+    lap('bindAndFit');
     gotoScene('title');
+    sceneReady = true;
+    lap('enterTitle');
     render();
+    lap('firstRender');
+    bootMs = Math.round(performance.now());
     last = lastRaf = performance.now();
     requestAnimationFrame(frame);
     requestAnimationFrame(() => requestAnimationFrame(fit));   // re-measure once fonts / layout settled
@@ -2010,13 +2565,12 @@ const Main = (() => {
     if (booted) return;
     booted = true;
     canvas = document.getElementById('screen');
-    vctx = canvas.getContext('2d', { alpha: false });
-    vctx.imageSmoothingEnabled = false;
-    lcanvas = document.createElement('canvas');
-    lcanvas.width = C.W; lcanvas.height = C.H;
-    ctx = lcanvas.getContext('2d');
-    ctx.imageSmoothingEnabled = false;
+    ctx = vctx = canvas.getContext('2d', { alpha: false });
+    findDom();
+    quality = coarse ? 1 : 2;                                   // SPEC_V2 sec. 1: start at 1 on coarse-pointer devices, 2 elsewhere
+    fit();                                                       // size the backing store (k) and tell GFX before the first paint
     drawLoading();
+    loadingMs = Math.round(performance.now());
     installHooks();
     requestAnimationFrame(() => setTimeout(finishBoot, 0));    // let the LOADING frame reach the screen first ...
     setTimeout(finishBoot, 400);                                // ... but a hidden tab never runs rAF

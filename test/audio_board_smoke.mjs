@@ -1,16 +1,28 @@
-// FIZZ & POP — test/audio_board_smoke.mjs : loads the sound board, clicks buttons, screenshots, checks for console errors.
+// FIZZ & POP — test/audio_board_smoke.mjs : loads the v2 sound board, clicks a few buttons (track, jingle, demo, keyboard, kit, fx, sfx), screenshots, checks for console errors.
 import path from 'path';
 import { launch, pageShot, PROJECT } from '../tools/harness.mjs';
-const t = await launch({ html: path.join(PROJECT, 'test', 'audio_board.html'), viewport: { width: 900, height: 700 } });
+const t = await launch({ html: path.join(PROJECT, 'test', 'audio_v2_board.html'), viewport: { width: 1000, height: 1300 } });
 await t.page.click('#bInit');
 await t.page.click('button[data-name="stage1"]');
-await t.page.waitForTimeout(700);
+await t.page.waitForTimeout(900);
+await t.page.click('button[data-name="demo_build"]');
+await t.page.click('button[data-name="demo_twang"]');
+await t.page.selectOption('#kInst', 'twang');
+await t.page.click('#keys button:nth-child(5)');
+await t.page.click('#keys button:nth-child(8)');
+await t.page.selectOption('#kInst', 'super');
+await t.page.check('#kChord');
+await t.page.click('#keys button:nth-child(1)');
+await t.page.click('#kit button:nth-child(2)');
+await t.page.click('#fxrow button:nth-child(4)');
 await t.page.click('button[data-name="pop"]');
 await t.page.click('button[data-name="start"]');
-await t.page.waitForTimeout(500);
-await pageShot(t.page, path.join(PROJECT, 'out', 'audio', 'board.png'));
+await t.page.waitForTimeout(700);
+await pageShot(t.page, path.join(PROJECT, 'out', 'v2', 'audio', 'board.png'));
 const txt = await t.page.textContent('#stats');
 console.log(txt);
+const demos = await t.page.locator('#demos button').count(), sfx = await t.page.locator('#sfx button').count(), kit = await t.page.locator('#kit button').count();
+console.log('buttons: demos', demos, 'sfx', sfx, 'kit', kit);
 console.log('errors:', t.errors);
 await t.close();
-process.exit(t.errors.length ? 1 : 0);
+process.exit(t.errors.length || sfx !== 28 || demos < 15 ? 1 : 0);

@@ -2,15 +2,22 @@
 // Real-time AudioContext test in headless Chromium: exercises the public AUDIO API with scripted sequences and
 // checks behaviour + the internal leak counters (AUDIO._stats(): voices / tracks / groups).
 // An AnalyserNode on the final output (AUDIO._tap()) proves that sound is (not) produced.
-// Usage: node test/audio_runtime.mjs [--strict]       (exit code 1 on any failed check)
+// v2: bpm / bars / pass-lift expectations are derived from AUDIO._info() (the soundtrack is replaced by the composer: nothing here may depend on a
+// particular song), the tempo / loop-wrap checks use _seek(); jingle lengths are the SPEC_V2 §6 table (start <= 2.4 s, extend ~3 s, gameover ~4 s, clear_boss ~3 s).
+// Usage: node test/audio_runtime.mjs [--strict] [--src file.js]      (exit code 1 on any failed check)
 import fs from 'fs';
 import path from 'path';
 import { launch, PROJECT } from '../tools/harness.mjs';
 
 // --strict: run the same checks against the code wrapped the way build.sh wraps it (one strict-mode IIFE).
+const srcArg = process.argv.indexOf('--src') >= 0 ? path.resolve(process.argv[process.argv.indexOf('--src') + 1]) : path.join(PROJECT, 'src', '20_audio.js');
 let html = path.join(PROJECT, 'test', 'audio_page.html');
+if (srcArg !== path.join(PROJECT, 'src', '20_audio.js')) {
+  html = path.join(PROJECT, 'out', 'audio', 'runtime_page.html');
+  fs.writeFileSync(html, '<!DOCTYPE html><meta charset="utf-8"><title>rt</title><script src="' + path.join(PROJECT, 'src', '00_shared.js') + '"></script><script src="' + srcArg + '"></script>');
+}
 if (process.argv.includes('--strict')) {
-  const src = ['00_shared.js', '20_audio.js'].map((f) => fs.readFileSync(path.join(PROJECT, 'src', f), 'utf8')).join('\n');
+  const src = [path.join(PROJECT, 'src', '00_shared.js'), srcArg].map((f) => fs.readFileSync(f, 'utf8')).join('\n');
   html = path.join(PROJECT, 'out', 'audio', 'strict_page.html');
   fs.writeFileSync(html, '<!DOCTYPE html><meta charset="utf-8"><title>strict</title><script>(() => { "use strict";\n' + src + '\nwindow.AUDIO = AUDIO; window.U = U;\n})();<' + '/script>');
 }
@@ -87,7 +94,8 @@ const c1 = (await ev(() => AUDIO._stats())).curCount;
 // ~5 runs), so the same rate threshold (> 6 steps/s of 10) is measured over 1 s instead of 0.5 s; a stopped sequencer gives 0.
 await wait(1000);
 const c2 = (await ev(() => AUDIO._stats())).curCount;
-check('muted: sequencer keeps running', c2 - c1 > 6, [c1, c2]);
+const rateTitle = await ev(() => AUDIO._info('title').bpm * 4 / 60);
+check('muted: sequencer keeps running', c2 - c1 > 0.65 * rateTitle, [c1, c2, rateTitle]);
 check('isMuted() true + persisted', await ev(() => AUDIO.isMuted() && JSON.parse(localStorage.getItem('fizzpop.v1.muted')) === true));
 await ev(() => AUDIO.setMuted(false));
 await wait(300);
@@ -107,30 +115,34 @@ const r2 = await rate(1500);
 await ev(() => AUDIO.setTempo(1));
 await wait(400);
 const r3 = await rate(1500);
-check('tempo 1.0 = 10 steps/s at 150 bpm', Math.abs(r1 - 10) < 0.3, r1);
+const bpm1 = await ev(() => AUDIO._info('stage1').bpm), exp1 = bpm1 * 4 / 60;
+check(`tempo 1.0 = ${exp1.toFixed(2)} steps/s at ${bpm1} bpm`, Math.abs(r1 - exp1) < 0.3, r1);
 check('tempo 1.3 applied to the running loop', Math.abs(r2 / r1 - 1.3) < 0.05, [r1, r2]);
 check('tempo back to 1.0', Math.abs(r3 - r1) < 0.3, r3);
 
-// 5b. real-time loop wrap: fast tempo so the 16-bar title loop wraps within ~16 s; the step clock must stay steady
+// 5b. real-time loop wrap: seek to just before the loop end at tempo 2; the step clock must stay steady across the wrap (the loop is >= 8 bars,
+//     so the test jumps to its last 12 steps instead of waiting for a whole cycle)
 const wrap = await ev(async () => {
   AUDIO.setTempo(2); AUDIO.music('title', { restart: true });
+  await T.sleep(500);
+  const steps = AUDIO._info('title').steps, bpm = AUDIO._info('title').bpm;
   const r0 = AUDIO._stats().resyncs; const samples = [];
   let wraps = 0, lastPos = -1;
   const t0 = performance.now();
-  while (performance.now() - t0 < 17500) {
+  AUDIO._seek(steps - 14);
+  while (performance.now() - t0 < 4200) {
     await T.sleep(100);
     const s = AUDIO._stats(); samples.push([performance.now() - t0, s.curCount]);
-    if (lastPos > 100 && s.curPos < lastPos - 100) wraps++;
+    if (lastPos > 40 && s.curPos < lastPos - 40) wraps++;
     lastPos = s.curPos;
   }
   AUDIO.setTempo(1);
-  // steps/second between consecutive 1 s windows must stay ~ constant (144 bpm = 9.6 steps/s, x2 = 19.2 steps/s)
-  const rates = [];
+  const rates = [];                                    // steps/second between consecutive 1 s windows must stay constant
   for (let i = 10; i < samples.length; i += 10) rates.push((samples[i][1] - samples[i - 10][1]) / ((samples[i][0] - samples[i - 10][0]) / 1000));
-  return { wraps, rates, resyncs: AUDIO._stats().resyncs - r0 };
+  return { wraps, rates, resyncs: AUDIO._stats().resyncs - r0, expect: bpm * 4 / 60 * 2 };
 });
 check('title loop wrapped (intro played once, loop repeats)', wrap.wraps >= 1, wrap.wraps);
-check('step clock steady across the loop wrap (no stalls, no resyncs)', wrap.resyncs === 0 && Math.max(...wrap.rates) - Math.min(...wrap.rates) < 2.5, wrap);
+check('step clock steady across the loop wrap (no stalls, no resyncs)', wrap.resyncs === 0 && Math.max(...wrap.rates) - Math.min(...wrap.rates) < 2.5 && Math.abs(wrap.rates[wrap.rates.length - 1] - wrap.expect) < 1.5, wrap);
 
 // 6. jingle + resume: previous loop continues afterwards; onEnd called once
 const jr = await ev(async () => {
@@ -151,7 +163,7 @@ const jr = await ev(async () => {
 });
 check('jingle replaces the loop while playing', jr.during.jingle === 'extend' && jr.during.music === null, jr.during);
 check('jingle produces sound', jr.pk > 0.02, jr.pk);
-check('jingle onEnd fired exactly once at ~3.2 s', jr.ends === 1 && jr.tEnd > 2900 && jr.tEnd < 3900, [jr.ends, Math.round(jr.tEnd)]);
+check('jingle onEnd fired exactly once at ~3 s (extend)', jr.ends === 1 && jr.tEnd > 2800 && jr.tEnd < 3900, [jr.ends, Math.round(jr.tEnd)]);
 check('resume:true brings stage1 back', jr.after.music === 'stage1' && jr.after.jingle === null, jr.after);
 check('resumed loop restarted at the bar where it was interrupted', jr.afterStats.curPos - jr.afterStats.curCount === Math.floor(jr.before.curPos / 16) * 16, [jr.before.curPos, jr.afterStats.curPos, jr.afterStats.curCount]);
 check('no stacked tracks after jingle+resume (finished jingle freed after its tail)', jr.afterStats.active === 1 && jr.afterStats.tracks === 1, jr.afterStats);
@@ -408,7 +420,7 @@ const sc = await ev(async () => {
   const rms = (a, b) => { let q = 0; for (let i = a; i < b; i++) q += L[i] * L[i]; return Math.sqrt(q / (b - a)); };
   return { ls, ratio: mx / p999, at, n: L.length, before: 20 * Math.log10(rms(at - 4410, at) + 1e-9), after: 20 * Math.log10(rms(at + 4410, at + 8820) + 1e-9) };
 });
-check('loop switch is click-free (sample step at the line <= 2.5 x the 99.9th percentile) and level-continuous', sc !== null && sc.ratio < 2.5 && Math.abs(sc.after - sc.before) < 12, sc);
+check('loop switch is click-free (sample step at the line <= 2.5 x the 99.9th percentile; the level may change with the music)', sc !== null && sc.ratio < 2.5 && Math.abs(sc.after - sc.before) < 24, sc);
 
 const sj = await ev(async () => {
   AUDIO.music('title', { restart: true }); await T.sleep(1000);
@@ -444,24 +456,25 @@ const pc = await ev(async () => {
   const p2 = AUDIO._stats().curPass;
   return { p0, p1, p2, lift, titleLift: AUDIO._info('title').lift };
 });
-check('stage1 loop pass counter increments at the loop wrap (pass 1 is key-lifted)', pc.p0 === 0 && pc.p1 === 1 && pc.p2 === 2 && pc.lift === 2 && pc.titleLift === 0, pc);
+check('stage1 loop pass counter increments at the loop wrap (an optional per-song key lift applies on odd passes)', pc.p0 === 0 && pc.p1 === 1 && pc.p2 === 2 && pc.lift >= 0 && pc.titleLift === 0, pc);
 const bt = await ev(async () => {
+  const i = AUDIO._info('boss');
   AUDIO.setTempo(1.5); AUDIO.music('boss', { restart: true }); await T.sleep(700);
   const a = AUDIO._stats(); await T.sleep(1500); const b = AUDIO._stats();
   AUDIO.setTempo(1);
-  return { rate: (b.curCount - a.curCount) / (b.curNext - a.curNext), cap: AUDIO._info('boss').maxTempo };
+  return { rate: (b.curCount - a.curCount) / (b.curNext - a.curNext), cap: i.maxTempo, expect: i.maxTempo * i.bpm * 4 / 60 };
 });
-check('boss tempo is capped (1.5 requested -> 1.2 x 170 bpm = 13.6 steps/s)', Math.abs(bt.rate - 13.6) < 0.3 && bt.cap === 1.2, bt);
+check('boss tempo is capped (1.5 requested -> maxTempo x bpm)', bt.cap >= 1.15 && Math.abs(bt.rate - bt.expect) < 0.4, bt);
 
 // 13d. look-ahead (QA A11): a 200 ms main-thread stall must not cost the music clock anything
 const jk = await ev(async () => {
   AUDIO.music('stage1', { restart: true }); await T.sleep(1500);
-  const out = [];
+  const out = [], rate = AUDIO._info('stage1').bpm * 4 / 60;
   for (const stall of [120, 200]) {
     const s0 = AUDIO._stats(); const t0 = performance.now(); while (performance.now() - t0 < stall) { /* block */ }
     await T.sleep(1200);
     const s1 = AUDIO._stats();
-    out.push({ stall, resyncs: s1.resyncs - s0.resyncs, slip: +((s1.time - s0.time) * 10 - (s1.curCount - s0.curCount)).toFixed(1) });
+    out.push({ stall, resyncs: s1.resyncs - s0.resyncs, slip: +((s1.time - s0.time) * rate - (s1.curCount - s0.curCount)).toFixed(1) });
   }
   return out;
 });

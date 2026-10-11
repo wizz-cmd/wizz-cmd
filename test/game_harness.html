@@ -6,6 +6,9 @@
 <title>Fizz &amp; Pop game harness</title>
 <!--
   Game module test page: shared + the three STABLE STUBS (gfx/audio/levels) + the real src/40_game.js.
+  v2 (Abyss Glow): ?real=1 / ?real=gfx load 09_neon + 10_gfx + 11_gfx_cast too, and the canvas is sized k x 256 (k = ?k=, default 3 for real modules, 1 for stubs) under
+  setTransform(k...) exactly like Main will do; ?post=<0|1|2> runs GFX.postFX after each render (default 0 = off for speed/determinism); ?rm=1 = reduced motion;
+  ?q=<0|1|2> = Game.setOptions quality (default 2). window.__t.opts({reducedMotion, quality}) changes them at run time.
   A fixed-step loop and keyboard input for both players are provided here (no Main). Append ?real=1 (optionally &base=../out/fix/game_priv/src/ to take the other modules from a snapshot) to
   load the real GFX/AUDIO/LEVELS modules (or ?real=gfx for real GFX/AUDIO + stub LEVELS) instead of the stubs (used for screenshots/integration).
   Test API: window.__t = { Game, GFX, AUDIO, LEVELS, C, U, S(), state(), start(opts), arena(opts), mkMap(spec),
@@ -13,7 +16,8 @@
 -->
 <style>
   html, body { margin: 0; background: #0b0a14; color: #e8e6ff; font: 12px monospace; }
-  #screen { display: block; width: 768px; height: 672px; image-rendering: pixelated; background: #000; margin: 8px auto; }
+  #screen { display: block; width: 768px; height: 672px; background: #000; margin: 8px auto; }
+  #screen.px { image-rendering: pixelated; }
 </style>
 </head>
 <body>
@@ -25,9 +29,9 @@
     const q = (location.search.match(/[?&]real=([a-z0-9]+)/) || [])[1];     // 1 = all real, gfx = real GFX+AUDIO with stub LEVELS
     const base = ((location.search.match(/[?&]base=([^&]+)/) || [])[1] || '../src').replace(/\/?$/, '/');   // directory the real 10/20/30 modules come from
     const mods = q === '1'
-      ? [base + '10_gfx.js', base + '20_audio.js', base + '30_levels.js']
+      ? [base + '09_neon.js', base + '10_gfx.js', base + '11_gfx_cast.js', base + '20_audio.js', base + '30_levels.js']
       : q === 'gfx'
-        ? [base + '10_gfx.js', base + '20_audio.js', 'stubs/levels_stub.js']
+        ? [base + '09_neon.js', base + '10_gfx.js', base + '11_gfx_cast.js', base + '20_audio.js', 'stubs/levels_stub.js']
         : ['stubs/gfx_stub.js', 'stubs/audio_stub.js', 'stubs/levels_stub.js'];
     for (const m of mods) document.write('<script src="' + m + '"><\/script>');
     const game = (location.search.match(/[?&]game=([^&]+)/) || [])[1] || '../src/40_game.js';   // &game=../backup/wave2/40_game.js runs the tests against another Game build

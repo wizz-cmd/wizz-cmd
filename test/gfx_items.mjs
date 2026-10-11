@@ -1,63 +1,65 @@
 // GFX wave-3 art regressions (src based, no build needed): node test/gfx_items.mjs
-//  - Springle reads as a seahorse: thin tube snout (<= 8 fill px right of the head, no dark jaw pixels out there), a spiral tail with an enclosed dark hole,
-//    the body sinks with the squash (tall, half squashed, squashed) while the spiral tail flattens, angry/trapped/die variants exist.
-//  - pu_shoes (Flippers): each fin's fill width only ever widens from the pocket to the blade (no neck dent), blade >= 1.7x the pocket, dark foot opening.
-//  - bolt: one hard Z (>= 5 opaque px in every column), frame B is the vertical mirror of frame A, white-hot core present.
-//  - Nibbler flank cog: no near-white low-chroma pixel inside the cog area (a pale disc with a dark centre read as a second eye).
+// v2.0 RE-BASE (SPEC_V2 section 7). The v1 gates counted exact pixels of 16x16 pixel-art details (Springle snout rows, Flippers fin widths, bolt column runs,
+// Nibbler flank-cog pale pixels) which have no meaning on resolution-independent neon art. The same intents -- "each of these reads as what it is and stays
+// different from its neighbours" -- are measured on the contour mask (alpha > 0.5) of the baked sprite at k = 4:
+//  - Springle reads as a seahorse on a spring: taller than wide, a coil of >= 4 horizontal bands in its lower third, the squash pose is clearly shorter than
+//    the tall frames, and its angry / trapped / die / squash_angry variants exist.
+//  - pu_shoes (Flippers): a wide two-blade silhouette (wider than tall inside the ring) that differs from every other power-up icon (inner-disc silhouette difference).
+//  - bolt: a zigzag that spans the whole box height, has a white-hot core and two different frames.
+//  - Nibbler: the clockwork gear on the flank exists as a gold-hued ring (hue 35..60) that is NOT white (it must not read as a second eye) and the head carries exactly one eye
+//    (one bright low-chroma blob in the head half).
 import path from 'path';
-import { launch, PROJECT } from '../tools/harness.mjs';
+import { launch, canvasFnShot, PROJECT } from '../tools/harness.mjs';
 const t = await launch({ html: path.join(PROJECT, 'test', 'gfx_sheet.html') });
 let failed = 0;
 const check = (n, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${n}${ok ? '' : '  ' + extra}`); if (!ok) failed++; };
 const r = await t.page.evaluate(() => {
-  const OLc = [0x1b, 0x10, 0x33];
-  const px = (n, f) => { const sz = GFX.size(n); const c = document.createElement('canvas'); c.width = sz.w; c.height = sz.h; const x = c.getContext('2d', { willReadFrequently: true }); GFX.draw(x, n, f, 0, 0); const d = x.getImageData(0, 0, sz.w, sz.h).data; const g = (X, Y) => { if (X < 0 || Y < 0 || X >= sz.w || Y >= sz.h) return null; const i = (Y * sz.w + X) * 4; return d[i + 3] > 200 ? [d[i], d[i + 1], d[i + 2]] : null; }; return { w: sz.w, h: sz.h, g }; };
-  const isOL = (p) => p && p[0] === OLc[0] && p[1] === OLc[1] && p[2] === OLc[2];
-  const eq = (p, hex) => p && p[0] === parseInt(hex.slice(1, 3), 16) && p[1] === parseInt(hex.slice(3, 5), 16) && p[2] === parseInt(hex.slice(5, 7), 16);
-  const o = {};
-  // --- springle
-  const sp = px('springle_move', 0); let snout = 0, jaw = 0, hole = 0;
-  for (let y = 3; y <= 6; y++) for (let x = 10; x < 16; x++) { const p = sp.g(x, y); if (p && !isOL(p)) { snout++; if (eq(p, '#4a9a2a')) jaw++; } }
-  { // holes in the fill: connected cells that are transparent or outline-coloured, never reach the sprite border and lie in the tail rows
-    const seen = new Set(), solid = (x, y) => { const p = sp.g(x, y); return p && !isOL(p); };
-    for (let y0 = 9; y0 <= 14; y0++) for (let x0 = 0; x0 < 16; x0++) {
-      if (solid(x0, y0) || seen.has(y0 * 16 + x0)) continue;
-      const q = [[x0, y0]]; seen.add(y0 * 16 + x0); let border = false;
-      while (q.length) { const [x, y] = q.pop(); if (x === 0 || y === 0 || x === 15 || y === 15) border = true; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const X = x + dx, Y = y + dy; if (X < 0 || Y < 0 || X > 15 || Y > 15 || solid(X, Y) || seen.has(Y * 16 + X)) continue; seen.add(Y * 16 + X); q.push([X, Y]); } }
-      if (!border) hole++;
-    }
-  }
-  const topRow = (n, f) => { const q = px(n, f); for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) { const p = q.g(x, y); if (p && !isOL(p)) return y; } return 99; };
-  o.sp = { snout, jaw, hole, top: [topRow('springle_move', 0), topRow('springle_move', 2), topRow('springle_squash', 0)], variants: ['springle_angry', 'springle_trapped', 'springle_die', 'springle_squash_angry'].every((n) => GFX.has(n)) };
-  // --- flippers: fill widths per row of the left fin (x 0..7), outline excluded
-  const sh = px('pu_shoes', 0), widths = [];
-  for (let y = 0; y < 16; y++) { let a = 99, b = -1; for (let x = 0; x < 8; x++) { const p = sh.g(x, y); if (p && !isOL(p)) { a = Math.min(a, x); b = Math.max(b, x); } } widths.push(b < 0 ? 0 : b - a + 1); }
-  let dip = 0, first = widths.findIndex((v) => v > 0), last = widths.length - 1 - [...widths].reverse().findIndex((v) => v > 0);
-  for (let y = first + 1; y <= last; y++) if (widths[y] < widths[y - 1]) dip++;
-  let opening = 0; for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) if (eq(sh.g(x, y), '#0e2c38')) opening++;
-  o.fin = { widths, dip, ratio: +(Math.max(...widths) / widths[first]).toFixed(2), opening, rows: last - first + 1 };
-  // --- bolt
-  const A = px('bolt', 0), B = px('bolt', 1); let thin = 0, mirrorDiff = 0, white = 0, minRun = 99;
-  for (let x = 0; x < 16; x++) { let run = 0, best = 0; for (let y = 0; y < 8; y++) { if (A.g(x, y)) { run++; best = Math.max(best, run); } else run = 0; } minRun = Math.min(minRun, best); }
-  for (let y = 0; y < 8; y++) for (let x = 0; x < 16; x++) { if (!!A.g(x, y) !== !!B.g(x, 7 - y)) mirrorDiff++; if (eq(A.g(x, y), '#ffffff')) white++; }
-  o.bolt = { minRun, mirrorDiff, white };
-  // --- nibbler cog area (x 4..8, y 6..10), all 4 frames: no pale low-chroma pixel
-  const lab = (r, g, b) => { const f = (v) => { v /= 255; return v > 0.04045 ? Math.pow((v + 0.055) / 1.055, 2.4) : v / 12.92; }; const R = f(r), G = f(g), B2 = f(b); const X = (R * 0.4124 + G * 0.3576 + B2 * 0.1805) / 0.95047, Y = R * 0.2126 + G * 0.7152 + B2 * 0.0722, Z = (R * 0.0193 + G * 0.1192 + B2 * 0.9505) / 1.08883; const h = (v) => (v > 0.008856 ? Math.cbrt(v) : 7.787 * v + 16 / 116); return [116 * h(Y) - 16, 500 * (h(X) - h(Y)), 200 * (h(Y) - h(Z))]; };
-  let pale = 0, steel = 0;
-  for (let f = 0; f < 4; f++) { const q = px('nibbler_move', f); for (let y = 6; y <= 10; y++) for (let x = 4; x <= 8; x++) { const p = q.g(x, y); if (!p) continue; const L = lab(...p); if (L[0] > 80 && Math.hypot(L[1], L[2]) < 20) pale++; if (eq(p, '#5a6cb8') || eq(p, '#7d8cc8')) steel++; } }
-  o.cog = { pale, steel };
-  return o;
+  const K = 4; GFX.setScale(K); const M = 8;
+  const rgb2hsl = (r, g, b) => { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2; let h = 0, s = 0; if (mx !== mn) { const d = mx - mn; s = l > .5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; } return [h, s, l]; };
+  const grab = (name, f = 0) => { const sz = GFX.size(name); const c = document.createElement('canvas'); c.width = (sz.w + 2 * M) * K; c.height = (sz.h + 2 * M) * K; const g = c.getContext('2d', { willReadFrequently: true }); g.setTransform(K, 0, 0, K, 0, 0); GFX.draw(g, name, f, M, M); return { d: g.getImageData(0, 0, c.width, c.height).data, w: c.width, h: c.height, sz }; };
+  const mask = (s, th = 128) => { const m = new Uint8Array(s.w * s.h); for (let i = 0; i < m.length; i++) m[i] = s.d[i * 4 + 3] > th ? 1 : 0; return m; };
+  const bbox = (s, m) => { let x0 = 1e9, x1 = -1, y0 = 1e9, y1 = -1; for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) if (m[y * s.w + x]) { x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); } return { x0, x1, y0, y1, w: (x1 - x0 + 1) / K, h: (y1 - y0 + 1) / K }; };
+  const out = {};
+  // ---- Springle
+  { const tall = [0, 1, 2, 3].map((f) => { const s = grab('springle_move', f); const b = bbox(s, mask(s)); return b; });
+    const sq = grab('springle_squash', 0); const bsq = bbox(sq, mask(sq));
+    const s0 = grab('springle_move', 0), m0 = mask(s0), b0 = bbox(s0, m0);
+    // coil: in the lower third of the contour bbox, count alternations along a vertical scan through the centre column band
+    let best = 0; const y1 = b0.y1, y0 = Math.round(b0.y1 - (b0.y1 - b0.y0) * 0.35);
+    for (let x = b0.x0; x <= b0.x1; x += 2) { let tr = 0, prev = 0; for (let y = y0; y <= y1; y++) { const v = m0[y * s0.w + x]; if (v !== prev) tr++; prev = v; } best = Math.max(best, tr); }
+    out.spr = { aspect: Math.min(...tall.map((b) => b.h / b.w)), tallH: Math.max(...tall.map((b) => b.h)), squashH: bsq.h, tallTop: Math.min(...tall.map((b) => b.y0)) / K, squashTop: bsq.y0 / K, sinkFrames: tall.map((b) => b.y0 / K), coilTransitions: best, variants: ['springle_angry', 'springle_trapped', 'springle_die', 'springle_squash_angry'].map((n) => GFX.has(n)) }; }
+  // ---- Flippers vs the other power-ups: silhouette inside the orbit ring (central 62 % disc)
+  { const names = ['pu_shoes', 'pu_pink', 'pu_blue', 'pu_gold', 'pu_parasol', 'pu_clock', 'pu_bomb', 'pu_heart'];
+    const sh = {}; for (const n of names) { const s = grab(n); sh[n] = { s, m: new Float32Array(s.w * s.h) };
+      const cx = s.w / 2, cy = s.h / 2, R = s.sz.w * K * 0.31; for (let y = 0; y < s.h; y++) for (let x = 0; x < s.w; x++) { const i = (y * s.w + x) * 4; const [, sa, l] = rgb2hsl(s.d[i], s.d[i + 1], s.d[i + 2]); sh[n].m[y * s.w + x] = ((x - cx) ** 2 + (y - cy) ** 2 < R * R && s.d[i + 3] > 128 && l > 0.35) ? 1 : 0; } }
+    const diff = (a, b) => { let u = 0, d = 0; for (let i = 0; i < a.m.length; i++) { const p = a.m[i], q = b.m[i]; if (p || q) { u++; if (p !== q) d++; } } return u ? d / u : 0; };
+    const dd = {}; let minPair = 1, minPairNames = '';
+    for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++) { const v = diff(sh[names[i]], sh[names[j]]); if (names[i] === 'pu_shoes') dd[names[j]] = +v.toFixed(2); if (v < minPair) { minPair = v; minPairNames = names[i] + ' ~ ' + names[j]; } }
+    const sb = bbox(sh.pu_shoes.s, (() => { const m = new Uint8Array(sh.pu_shoes.m.length); for (let i = 0; i < m.length; i++) m[i] = sh.pu_shoes.m[i] ? 1 : 0; return m; })());
+    out.flip = { shoesVsOthers: dd, minShoes: Math.min(...Object.values(dd)), minPair: +minPair.toFixed(2), minPairNames, shoeW: sb.w, shoeH: sb.h }; }
+  // ---- bolt
+  { const a = grab('bolt', 0), b = grab('bolt', 1); const ba = bbox(a, mask(a)); let hot = 0; for (let i = 0; i < a.d.length; i += 4) if (a.d[i + 3] > 200 && a.d[i] > 225 && a.d[i + 1] > 225 && a.d[i + 2] > 225) hot++;
+    let df = 0; for (let i = 0; i < a.d.length; i += 4) if ((a.d[i + 3] > 128) !== (b.d[i + 3] > 128)) df++;
+    out.bolt = { hGrow: ba.h / a.sz.h, w: ba.w, hot: hot / (K * K), framesDiffer: df > 40 }; }
+  // ---- Nibbler: gear hue + single eye
+  { const s = grab('nibbler_move', 0); const m = mask(s); const b = bbox(s, m); let gold = 0, whiteBlobs = 0;
+    const visited = new Uint8Array(s.w * s.h); const isWhite = (x, y) => { const i = (y * s.w + x) * 4; if (s.d[i + 3] < 200) return false; const [, sa, l] = rgb2hsl(s.d[i], s.d[i + 1], s.d[i + 2]); return l > 0.8 && sa < 0.6 || (s.d[i] > 235 && s.d[i + 1] > 235 && s.d[i + 2] > 235); };
+    for (let i = 0; i < s.d.length; i += 4) { if (s.d[i + 3] < 128) continue; const [h, sa, l] = rgb2hsl(s.d[i], s.d[i + 1], s.d[i + 2]); if (h > 30 && h < 62 && sa > 0.6 && l > 0.4) gold++; }
+    // white blobs (>= 0.6 px^2 logical) in the head half (facing right: right half of the contour bbox)
+    const midX = Math.round((b.x0 + b.x1) / 2); const blobs = [];
+    for (let y = b.y0; y <= b.y1; y++) for (let x = midX; x <= b.x1; x++) { if (visited[y * s.w + x] || !isWhite(x, y)) continue; let n = 0; const st = [[x, y]]; visited[y * s.w + x] = 1; while (st.length) { const [cx, cy] = st.pop(); n++; for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) { const nx = cx + dx, ny = cy + dy; if (nx < 0 || ny < 0 || nx >= s.w || ny >= s.h || visited[ny * s.w + nx] || !isWhite(nx, ny)) continue; visited[ny * s.w + nx] = 1; st.push([nx, ny]); } } blobs.push(n / (K * K)); }
+    out.nib = { goldPx: gold / (K * K), whiteBlobs: blobs.filter((n) => n >= 3).length, blobSizes: blobs.filter((n) => n >= 0.3).map((n) => +n.toFixed(1)) }; }
+  return out;
 });
 console.log(JSON.stringify(r));
-check(`Springle: thin tube snout (${r.sp.snout} fill px right of the head <= 8) with no dark jaw pixels (${r.sp.jaw})`, r.sp.snout <= 8 && r.sp.jaw === 0);
-check(`Springle: spiral tail with an enclosed dark hole (${r.sp.hole} >= 1)`, r.sp.hole >= 1);
-check(`Springle: the body sinks one row on the bounce frames and in the squash pose (top fill rows ${r.sp.top.join(', ')})`, r.sp.top[0] === 0 && r.sp.top[1] === 1 && r.sp.top[2] === 1);
-check('Springle: angry / trapped / die / squash_angry variants registered', r.sp.variants);
-check(`Flippers: fill width never narrows from pocket to blade (${r.fin.dip} dips; widths ${r.fin.widths.join(',')})`, r.fin.dip === 0);
-check(`Flippers: blade >= 1.7x the pocket width (${r.fin.ratio}x), >= 9 rows of blade (${r.fin.rows} rows in all), dark foot opening (${r.fin.opening} px)`, r.fin.ratio >= 1.7 && r.fin.rows >= 12 && r.fin.opening >= 2);
-check(`Bolt: one hard Z, every column has a >= 5 px opaque run (min ${r.bolt.minRun})`, r.bolt.minRun >= 5);
-check(`Bolt: frame B is the vertical mirror of frame A (${r.bolt.mirrorDiff} differing px), white-hot core (${r.bolt.white} px)`, r.bolt.mirrorDiff === 0 && r.bolt.white >= 10);
-check(`Nibbler cog: no pale low-chroma pixel in the cog area (${r.cog.pale}), steel cog pixels present (${r.cog.steel})`, r.cog.pale === 0 && r.cog.steel >= 8);
-check('zero console errors / lint clean', t.errors.length === 0 && (await t.page.evaluate(() => T.lint())).length === 0, t.errors.join('|'));
+check(`Springle: taller than wide in every move frame (min aspect ${r.spr.aspect.toFixed(2)} >= 1.1)`, r.spr.aspect >= 1.1);
+check(`Springle: spring coil in the lower third (>= 6 contour transitions on a vertical scan, got ${r.spr.coilTransitions})`, r.spr.coilTransitions >= 6);
+check(`Springle: the body sinks in the squash pose (top edge ${r.spr.squashTop.toFixed(1)} vs ${r.spr.tallTop.toFixed(1)} logical px, >= 1.2 px lower; move frames' tops ${JSON.stringify(r.spr.sinkFrames)})`, r.spr.squashTop >= r.spr.tallTop + 1.2);
+check('Springle: angry / trapped / die / squash_angry variants registered', r.spr.variants.every(Boolean), JSON.stringify(r.spr.variants));
+check(`Flippers: silhouette differs from every other power-up (min ${r.flip.minShoes} >= 0.25)`, r.flip.minShoes >= 0.25, JSON.stringify(r.flip.shoesVsOthers));
+check(`Flippers: wide two-blade shape (inner width ${r.flip.shoeW.toFixed(1)} >= 0.95 x height ${r.flip.shoeH.toFixed(1)})`, r.flip.shoeW >= r.flip.shoeH * 0.95);
+check(`Bolt: a zigzag spanning the box (height ${(r.bolt.hGrow * 100).toFixed(0)} % of the box >= 60 %, width ${r.bolt.w.toFixed(1)} >= 10), white-hot core (${r.bolt.hot.toFixed(1)} px^2 >= 3), two different frames`, r.bolt.hGrow >= 0.6 && r.bolt.w >= 10 && r.bolt.hot >= 3 && r.bolt.framesDiffer);
+check(`Nibbler: the clockwork gear is a gold-hued ring (${r.nib.goldPx.toFixed(0)} gold px^2 >= 20) and the head has exactly one eye (eye-sized white blobs >= 3 px^2; all blobs: ${JSON.stringify(r.nib.blobSizes)})`, r.nib.goldPx >= 20 && r.nib.whiteBlobs === 1, JSON.stringify(r.nib));
+check('zero console errors', t.errors.length === 0, t.errors.join('|'));
 await t.close();
 process.exit(failed ? 1 : 0);

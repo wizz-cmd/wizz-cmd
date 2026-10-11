@@ -2,8 +2,25 @@
 (() => {
   const canvas = document.getElementById('screen');
   const ctx = canvas.getContext('2d');
-  ctx.imageSmoothingEnabled = false;
+  const qs = new URLSearchParams(location.search);
+  const real = qs.get('real') === '1' || qs.get('real') === 'gfx';
+  // v2: backing store = k x logical, every frame under setTransform(k, 0, 0, k, 0, 0) (what Main does); stubs stay at k = 1 (pixel look)
+  const K = Math.max(1, Math.min(8, +qs.get('k') || (real ? 3 : 1)));
+  canvas.width = 256 * K; canvas.height = 224 * K;
+  if (K === 1) canvas.className = 'px';
+  let post = +(qs.get('post') || 0);
+  const opts = { reducedMotion: qs.get('rm') === '1', quality: qs.has('q') ? +qs.get('q') : 2 };
   if (typeof GFX.init === 'function') GFX.init();
+  if (typeof GFX.setScale === 'function') GFX.setScale(K);
+  if (typeof Game.setOptions === 'function') Game.setOptions(opts);
+  /** One frame exactly like Main: transform, Game.render, optional post FX. */
+  function drawFrame() {
+    ctx.setTransform(K, 0, 0, K, 0, 0);
+    ctx.imageSmoothingEnabled = K !== 1;
+    Game.render(ctx);
+    if (post > 0 && typeof GFX.postFX === 'function') GFX.postFX(ctx, post);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+  }
 
   // record every audio call (works for the stub and the real module): [fn, ...args]
   const log = [];
@@ -85,26 +102,31 @@
 
   function loop(now) {
     requestAnimationFrame(loop);
-    if (frozen) { Game.render(ctx); return; }
+    if (frozen) { drawFrame(); return; }
     loop.acc = (loop.acc || 0) + Math.min(now - (loop.last || now), 100);
     loop.last = now;
     while (loop.acc >= 1000 / 60) { tick(true); loop.acc -= 1000 / 60; }
-    Game.render(ctx);
+    drawFrame();
   }
 
   window.__t = {
-    Game, GFX, AUDIO, LEVELS, C, U,
+    Game, GFX, AUDIO, LEVELS, C, U, K, canvas, ctx,
     mkMap, useMap, log,
+    /** Game.setOptions passthrough (reducedMotion, quality) + postFX level (0 = off) for the test page. */
+    opts(o) { Object.assign(opts, o || {}); if (o && o.post !== undefined) post = +o.post; if (typeof Game.setOptions === 'function') Game.setOptions({ reducedMotion: opts.reducedMotion, quality: opts.quality }); },
+    drawFrame,
     unknown: () => ({ sprites: [...unknown.sprites], sfx: [...unknown.sfx], music: [...unknown.music] }),
     S: () => Game.debug._S(),
     state: () => Game.debug.state(),
     freeze(b) { frozen = b !== false; },
     set(pi, o) { Object.assign(virt[pi], o); },
     clear() { virt[0] = BLANK(); virt[1] = BLANK(); },
-    render() { Game.render(ctx); },
-    start(opts) { Game.start(opts); Game.render(ctx); },
+    render() { drawFrame(); },
+    start(o) { Game.start(o); drawFrame(); },
     /** Run n fixed updates with virtual input only; `inputs` = [in1, in2] applied additionally for these steps. */
-    step(n, inputs) { for (let i = 0; i < n; i++) tick(false, inputs); Game.render(ctx); },
+    step(n, inputs) { for (let i = 0; i < n; i++) tick(false, inputs); drawFrame(); },
+    /** n fixed updates WITHOUT rendering (cost measurements, long soaks). */
+    tick(n, inputs) { for (let i = 0; i < n; i++) tick(false, inputs); },
     /** Start a game and skip the intro. opts: {players, level, seed, empty (remove enemies), noClear}. */
     arena(opts) {
       const o = Object.assign({ players: 1, level: 1, seed: 7, empty: true, noClear: true }, opts || {});
@@ -112,7 +134,7 @@
       Game.debug.skipIntro();
       if (o.empty) Game.debug.clearEnemies();
       if (o.noClear) Game.debug.noClear(true);
-      Game.render(ctx);
+      drawFrame();
       return Game.debug.state();
     },
   };

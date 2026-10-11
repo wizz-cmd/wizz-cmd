@@ -14,7 +14,7 @@ const res = await t.page.evaluate(({ seeds, frames, limit }) => {
     const S = D._S();
     const anc = S.enemies.map((e) => ({ x: e.x, y: e.y, since: 0, worst: 0, at: null }));
     for (let i = 0; i < frames; i++) {
-      S.hurryT = 0; fz.step(1);
+      S.hurryT = 0; fz.Game.update([]);                       // v2: no per-frame render (Main.step would draw k x 256 px every call)
       S.enemies.forEach((e, k) => {
         if (e.t === 'jellop' || e.t === 'glimmer' || e.state !== 'active') return;
         const a = anc[k];

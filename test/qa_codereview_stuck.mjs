@@ -9,7 +9,7 @@ const SRC = (L, seed, frames) => `(() => {
   const S = D._S();
   const track = S.enemies.map((e, i) => ({ i, e, ax: e.x, ay: e.y, since: 0, worst: 0, wx: 0, wy: 0 }));
   for (let f = 0; f < ${frames}; f++) {
-    D.setHurryTimer(-1e7); fz.step(1);
+    D.setHurryTimer(-1e7); fz.Game.update([]);     // v2: Game.update only (fz.step would also render k x 256 px every frame: ~1.5 ms, 10+ min per run)
     for (const t of track) {
       const e = t.e; if (e.dead || e.state !== 'active') { t.since = 0; t.ax = e.x; t.ay = e.y; continue; }
       if (Math.abs(e.x - t.ax) > 10 || Math.abs(e.y - t.ay) > 10) { t.ax = e.x; t.ay = e.y; t.since = 0; } else { t.since++; if (t.since > t.worst) { t.worst = t.since; t.wx = t.ax; t.wy = t.ay; } }

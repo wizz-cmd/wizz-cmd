@@ -62,8 +62,8 @@ await group('K1 ambient bubbles keep out of text and panels', async () => {
       }
       check(`${touch ? 'touch ' : ''}${label}: no drawn bubble touches any text / sprite / panel rectangle (${samples} frames, ${shownTotal} bubble draws, closest ${worst === 99 ? '-' : worst.toFixed(1)} px)`, bad === 0, `bad=${bad}`);
       if (name === 'title' || name === 'scores') check(`${touch ? 'touch ' : ''}${label}: bubbles are still visible somewhere (not just switched off)`, shownTotal > 0, `shown=${shownTotal}`);
-      if (name === 'title') await canvasShot(t.page, path.join(OUT, `k1_title${touch ? '_touch' : ''}.png`), { scale: 3 });
-      if (name === 'howto' && label.endsWith('2')) await canvasShot(t.page, path.join(OUT, `k1_howto2${touch ? '_touch' : ''}.png`), { scale: 3 });
+      if (name === 'title') await canvasShot(t.page, path.join(OUT, `k1_title${touch ? '_touch' : ''}.png`), { scale: 1 });
+      if (name === 'howto' && label.endsWith('2')) await canvasShot(t.page, path.join(OUT, `k1_howto2${touch ? '_touch' : ''}.png`), { scale: 1 });
     }
     // pixel proof on the title: the logo / HI SCORE plate region never contains a bubble of the ambient layer (a bubble sprite has a cyan ring)
     t.noErrors(touch ? 'K1 touch: zero errors' : 'K1 desktop: zero errors');
@@ -128,6 +128,7 @@ await group('K3 ending credits band', async () => {
     const t = await open();
     const g = t.g;
     await g.freeze(true);
+    await t.page.evaluate(() => window.__fizzpop._main.setQuality(0, true));       // v2: no post FX (its bloom glows beyond the band by design) and no ambient specks: these are pure pixel proofs
     await g.goto('ending', { res: { won: true, level: 30, scores: [412300, 128000], players: 2 }, entries: [] });
     await t.page.evaluate(() => window.__fizzpop._main.ambientReset());           // the title ticked a timing-dependent number of frames before the freeze
     await g.step(545);
@@ -136,10 +137,10 @@ await group('K3 ending credits band', async () => {
     const band = await t.page.evaluate(() => window.__fizzpop._main.endingBand());
     const px = await t.page.evaluate(() => {
       const cv = document.getElementById('screen'), d = cv.getContext('2d').getImageData(0, 0, cv.width, cv.height).data, m = cv.width / 256;
-      const region = (y0, y1) => { const out = []; for (let y = y0 * m; y < y1 * m; y++) for (let x = 16 * m; x < 240 * m; x++) { const i = (y * cv.width + x) * 4; out.push(d[i], d[i + 1], d[i + 2]); } return out; };
+      const region = (y0, y1) => { const out = []; for (let y = Math.round(y0 * m); y < Math.round(y1 * m); y++) for (let x = Math.round(16 * m); x < Math.round(240 * m); x++) { const i = (y * cv.width + x) * 4; out.push(d[i], d[i + 1], d[i + 2]); } return out; };   // (k is a 0.25 step: round the region edges)
       return { top: region(0, 17), tableau: region(161, 224), band: region(30, 150) };
     });
-    if (!hold) await canvasShot(t.page, path.join(OUT, 'k3_credits.png'), { scale: 3 });
+    if (!hold) await canvasShot(t.page, path.join(OUT, 'k3_credits.png'), { scale: 1 });
     await t.close();
     return { band, px };
   };
@@ -282,7 +283,7 @@ await group('R5 / R6 name entry on a keyboard', async () => {
   await start();
   await g.set(0, { right: true }); await g.step(1); await g.set(0, { right: false }); await g.step(1);
   check('virtual input (gamepad route) still cycles letters', (await entry()).name[0] === 'B', JSON.stringify(await entry()));
-  await canvasShot(t.page, path.join(OUT, 'r6_entry.png'), { scale: 3 });
+  await canvasShot(t.page, path.join(OUT, 'r6_entry.png'), { scale: 1 });
   t.noErrors();
   await t.close();
   // touch: label unchanged ("JUMP: BACK"), the SOUND pill still mutes during the entry
@@ -338,7 +339,7 @@ await group('R8 the sound hint before the first gesture', async () => {
   const tx = await texts(t.page);
   const focused = await t.page.evaluate(() => document.getElementById('focus').hidden);
   check(`audio locked (ready=${ready0}), focus overlay hidden (${focused}): "PRESS A KEY FOR SOUND" blinks`, !ready0 && focused && tx.includes('PRESS A KEY FOR SOUND'), JSON.stringify([...new Set(tx)].slice(0, 12)));
-  await canvasShot(t.page, path.join(OUT, 'r8_hint.png'), { scale: 2 });
+  await canvasShot(t.page, path.join(OUT, 'r8_hint.png'), { scale: 1 });
   await t.page.keyboard.press('ArrowDown'); await wait(600);
   await clearTexts(t.page); await wait(1800);
   const after = await texts(t.page);
@@ -423,7 +424,7 @@ await group('P5 a score below the table is still shown', async () => {
   await clearTexts(t.page); await g.step(10);
   const tx = await texts(t.page);
   check('"YOUR SCORE 001200" is drawn on it', tx.includes('YOUR SCORE 001200'), JSON.stringify([...new Set(tx)]));
-  await canvasShot(t.page, path.join(OUT, 'p5_yourscore.png'), { scale: 3 });
+  await canvasShot(t.page, path.join(OUT, 'p5_yourscore.png'), { scale: 1 });
   // 2P: P1 qualifies, P2 does not
   await g.evaluate(() => fz._main.resetScores());
   await g.start(2, 1, 3); await g.step(20);
@@ -435,7 +436,7 @@ await group('P5 a score below the table is still shown', async () => {
   await clearTexts(t.page); await g.step(10);
   const t2 = await texts(t.page);
   check('2P: the missed player is listed ("P2 SCORE 000900")', t2.includes('P2 SCORE 000900'), JSON.stringify([...new Set(t2)]));
-  await canvasShot(t.page, path.join(OUT, 'p5_p2score.png'), { scale: 3 });
+  await canvasShot(t.page, path.join(OUT, 'p5_p2score.png'), { scale: 1 });
   t.noErrors();
   await t.close();
 });
@@ -453,7 +454,7 @@ await group('P6 scores kept for this visit only (no storage)', async () => {
   await u.g.freeze(true); await spyText(u.page);
   await u.g.goto('scores', {}); await u.g.step(30);
   check('storage that throws -> "SCORES KEPT THIS VISIT ONLY" on the scores screen', (await texts(u.page)).includes('SCORES KEPT THIS VISIT ONLY') && !(await u.page.evaluate(() => window.__fizzpop._main.persistent())));
-  await canvasShot(u.page, path.join(OUT, 'p6_visit_only.png'), { scale: 3 });
+  await canvasShot(u.page, path.join(OUT, 'p6_visit_only.png'), { scale: 1 });
   check('the page still works (zero errors)', u.errors.length === 0, JSON.stringify(u.errors));
   await u.close();
 });

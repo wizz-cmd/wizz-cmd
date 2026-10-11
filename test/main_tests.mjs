@@ -1,5 +1,8 @@
 // FIZZ & POP — Main module tests (Playwright, real headless Chromium).
 // Tests src/50_main.js + src/template.html against the STUB modules (test/stubs/*) via test/main_build.mjs.
+// v2 ("Abyss Glow"): the canvas is resolution independent (backing store 256k x 224k, k quantised to 0.25 steps), so the old pixel-grid /
+// sharp-bilinear checks are re-based on the same intents: the picture fills the free space, is crisp (1:1 device pixels) whenever that is cheap,
+// stays inside the 16 px gutters, never scrolls, and the layout / touch rules are unchanged. New v2 checks live in test/main_v2.mjs.
 //   node test/main_tests.mjs            full suite, stubs      -> out/main/tests/*.png
 //   ONLY_GROUPS=menus,scaling node test/main_tests.mjs     only the named groups
 //   node test/main_tests.mjs --real     boot + scene screenshots only, with the real src/10..40 modules
@@ -53,7 +56,10 @@ await group('boot', async () => {
     getComputedStyle(document.getElementById('legend')).display !== 'none' && getComputedStyle(document.getElementById('touch')).display === 'none'));
   check('legend mentions both players and the keys', await g.evaluate(() => /P1/.test(document.getElementById('legend').textContent) && /P2/.test(document.getElementById('legend').textContent) && /Space/.test(document.getElementById('legend').textContent)));
   check('focus overlay hidden when the document has focus', await g.evaluate(() => document.getElementById('focus').hidden === true));
-  check('image-rendering is pixelated, canvas 256x224', await g.evaluate(() => { const c = document.getElementById('screen'); return getComputedStyle(c).imageRendering === 'pixelated' && c.width === 256 && c.height === 224; }));
+  check('canvas is resolution independent: image-rendering auto, backing store 256k x 224k (k = 3 here, a 0.25 step in 1..8)', await g.evaluate(() => {
+    const c = document.getElementById('screen'), k = c.width / 256;
+    return getComputedStyle(c).imageRendering === 'auto' && c.height === Math.round(224 * k) && k >= 1 && k <= 8 && Math.abs(k * 4 - Math.round(k * 4)) < 1e-9 && fz._main.k() === k && k === 3;
+  }));
   check('no horizontal scroll', await g.evaluate(() => document.documentElement.scrollWidth <= innerWidth && document.body.scrollWidth <= innerWidth));
   await pageShot(t.page, path.join(OUT, 'desktop_page_title.png'));
   noErrors(t);
@@ -64,7 +70,7 @@ await group('boot', async () => {
 await group('screens', async () => {
   const t = await open();
   const g = t.g;
-  const shot = (n) => canvasShot(t.page, path.join(OUT, 'desktop', n + '.png'), { scale: 3 });
+  const shot = (n) => canvasShot(t.page, path.join(OUT, 'desktop', n + '.png'), { scale: 1 });
   await g.freeze(true);
   await g.goto('title'); await g.step(40); await shot('01_title');
   for (const [i, f] of [[0, 40], [1, 100], [2, 150], [3, 220]].map(([a, b]) => [a, b])) {
@@ -130,37 +136,50 @@ await group('real-integration', async () => {
 // ---------------------------------------------------------------------------------------------------
 await group('scaling', async () => {
   const t = await open();
-  // The rule (FIXPLAN U8/U18): whole DEVICE pixels per game pixel when that keeps >= 80 % of the achievable scale, else the
-  // achievable (fractional) scale, drawn "sharp bilinear". The desktop legend only stays when it costs no scale step.
-  const pick = (k, dpr) => { const si = Math.floor(k * dpr + 1e-6) / dpr; return si * dpr >= 1 && si >= 0.8 * k ? { s: si, sharp: false } : { s: k, sharp: true }; };
+  // The v2 rule (SPEC_V2 sec. 1; src/50_main.js pickScale): the picture fills the free space (continuous scale: no pixel-grid steps any more);
+  // k = css width x devicePixelRatio / 256 is quantised to 0.25 steps (1..8). When a whole device-pixel step costs little the picture is fitted to
+  // it (first a GFX bake scale <= 8 % smaller, then any 0.25 step <= 6.5 % smaller): 1 backing px per device px, crisp. The desktop legend stays
+  // while it costs the picture at most 14 % of its scale.
+  const BUCKETS = [1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8];
+  const q4 = (x) => Math.min(8, Math.max(1, Math.round(x * 4) / 4)), f4 = (x) => Math.min(8, Math.max(1, Math.floor(x * 4 + 1e-6) / 4));
+  const pick = (s, dpr) => {
+    const kRaw = s * dpr;
+    if (kRaw >= 1) {
+      let kb = 0; for (const b of BUCKETS) if (b <= kRaw + 1e-6) kb = b;
+      if (kb >= kRaw * 0.92) return { s: kb / dpr, k: kb, snapped: true };
+      const kf = f4(kRaw);
+      if (kf >= kRaw * 0.935) return { s: kf / dpr, k: kf, snapped: true };
+    }
+    return { s, k: q4(kRaw), snapped: false };
+  };
   const VPS = [[1920, 1080], [1280, 800], [1280, 720], [1024, 768], [800, 600], [700, 520], [900, 700], [640, 480], [500, 700], [360, 640], [320, 480], [600, 300]];
-  for (const dpr of [1, 2]) {
+  for (const dpr of [1, 2, 3]) {
     for (const [w, h] of VPS) {
       const c = await open({ viewport: { width: w, height: h }, deviceScaleFactor: dpr });
       const m = await c.page.evaluate(() => {
         const r = document.getElementById('screen').getBoundingClientRect(), L = document.getElementById('legend');
         L.hidden = false; const lh = L.offsetHeight; const lay = window.__fizzpop._main.layout(); L.hidden = !lay.legend;
         return { x: r.x, y: r.y, w: r.width, h: r.height, r: r.right, b: r.bottom, legendH: lh, sw: document.documentElement.scrollWidth, lay,
-          ir: getComputedStyle(document.getElementById('screen')).imageRendering, cw: document.getElementById('screen').width };
+          ir: getComputedStyle(document.getElementById('screen')).imageRendering, cw: document.getElementById('screen').width, ch: document.getElementById('screen').height };
       });
       const bw = w - 32, bh = h - 16;
-      const withLeg = pick(Math.min(bw / 256, (bh - m.legendH - 12) / 224), dpr), without = pick(Math.min(bw / 256, bh / 224), dpr);
-      const wantLegend = withLeg.s >= without.s - 1e-6, want = wantLegend ? withLeg : without;
+      const withLeg = Math.min(bw / 256, (bh - m.legendH - 12) / 224), without = Math.min(bw / 256, bh / 224);
+      const wantLegend = withLeg >= without * 0.86 - 1e-6, free = wantLegend ? withLeg : without, want = pick(free, dpr);
       const label = `${w}x${h}@${dpr}`;
-      check(`${label}: scale ${want.s.toFixed(3)} (${want.sharp ? 'sharp-bilinear' : 'whole device pixels'}), legend ${wantLegend ? 'kept' : 'hidden'}`,
-        Math.abs(m.w - 256 * want.s) < 0.6 && m.lay.legend === wantLegend && m.lay.sharp === want.sharp, `${m.w}x${m.h} ${JSON.stringify(m.lay)}`);
-      check(`${label}: rendering matches (pixelated for whole device pixels; auto + integer-multiple backing store otherwise)`,
-        want.sharp ? (m.ir === 'auto' && m.cw % 256 === 0 && m.cw >= 256 && m.cw * 1 >= Math.min(1024, Math.ceil(m.w * dpr / 256 - 1e-6) * 256)) : (m.ir === 'pixelated' && m.cw === 256), JSON.stringify({ ir: m.ir, cw: m.cw }));
+      check(`${label}: k ${want.k} (${want.snapped ? '1:1 device pixels' : 'smooth resample'}), css ${(256 * want.s).toFixed(1)} px, legend ${wantLegend ? 'kept' : 'hidden'}`,
+        Math.abs(m.w - 256 * want.s) < 0.6 && m.lay.legend === wantLegend && m.lay.k === want.k && m.lay.snapped === want.snapped, `${m.w}x${m.h} ${JSON.stringify(m.lay)}`);
+      check(`${label}: backing store 256k x 224k = ${m.cw}x${m.ch}, image-rendering auto (never pixelated)`, m.ir === 'auto' && m.cw === 256 * m.lay.k && m.ch === Math.round(224 * m.lay.k) && m.lay.k >= 1 && m.lay.k <= 8 && Math.abs(m.lay.k * 4 - Math.round(m.lay.k * 4)) < 1e-9, JSON.stringify({ ir: m.ir, cw: m.cw, ch: m.ch, k: m.lay.k }));
+      check(`${label}: the picture fills the free space (>= 92 % of it; the k-8 cap lets very large screens stretch instead)`, m.w >= 256 * free * 0.92 - 0.6 && m.w <= 256 * free + 0.6, `${m.w} vs ${256 * free}`);
+      if (m.lay.snapped) check(`${label}: crisp: css width x DPR = backing width (${(m.w * dpr).toFixed(2)})`, Math.abs(m.w * dpr - m.cw) < 0.06, `${m.w * dpr} vs ${m.cw}`   /* layout snaps css px to 1/64 */);
       check(`${label}: aspect ratio 8:7, inside the viewport with 16px gutters, no h-scroll`, Math.abs(m.w / m.h - 256 / 224) < 0.01 && m.x >= 15.5 && m.r <= w - 15.5 && m.b <= h && m.y >= 0 && m.sw <= w, JSON.stringify(m));
-      if (dpr === 1 && !want.sharp) check(`${label}: integer scale at DPR 1 means a whole CSS multiple`, Math.abs(m.w / 256 - Math.round(m.w / 256)) < 0.01, String(m.w));
       noErrors(c, `${label}: zero errors`);
       await c.close();
     }
   }
-  // "uses >= 80 %": a window that fits x2.9 gets x2.9 (sharp), not x2
-  const c = await open({ viewport: { width: 1000, height: 700 } });
+  // a window that fits x3.24 gets a whole x3 (1:1, 7 % smaller than the free space), a legend that costs 10 % of the scale stays
+  const c = await open({ viewport: { width: 1280, height: 800 } });
   const lay = await c.g.evaluate(() => fz._main.layout());
-  check('1000x700@1: legend gives way to a whole x3 instead of a sharp x2.79 (legend only stays when it is free)', lay.scale === 3 && !lay.legend && !lay.sharp, JSON.stringify(lay));
+  check('1280x800@1: x3 exactly (768x672), legend kept (it costs 10 % of the scale, below the 14 % limit)', lay.scale === 3 && lay.legend && lay.k === 3 && lay.w === 768, JSON.stringify(lay));
   await c.close();
   noErrors(t);
   await t.close();
@@ -291,7 +310,7 @@ await group('menus', async () => {
   check('quit (with the YES/NO question) -> title', (await t.scene()) === 'title');
   check('session remembers the reached round and player count', await g.evaluate(() => { const s = fz._main.session(); return s.reached === 7 && s.lastPlayers === 2; }));
   check('CONTINUE ROUND 6 row appears after the 2P row', JSON.stringify(await ids()) === JSON.stringify(['p1', 'p2', 'cont', 'help', 'table', 'sound']), JSON.stringify(await ids()));
-  await canvasShot(t.page, path.join(OUT, 'title_with_continue.png'), { scale: 3 });
+  await canvasShot(t.page, path.join(OUT, 'title_with_continue.png'), { scale: 1 });
   await pick('cont');
   await t.press('Enter'); await wait(450); await t.press('Enter', 300);
   const st = await g.state();
@@ -483,7 +502,8 @@ await group('mute-persists', async () => {
   const t = await open();
   const g = t.g;
   const redPixel = () => g.evaluate(() => {
-    const d = document.getElementById('screen').getContext('2d').getImageData(244, 2, 12, 12).data;
+    const cv = document.getElementById('screen'), m = cv.width / 256;
+    const d = cv.getContext('2d').getImageData(Math.round(243 * m), Math.round(2 * m), Math.round(13 * m), Math.round(12 * m)).data;
     for (let i = 0; i < d.length; i += 4) if (d[i] > 235 && d[i + 1] < 120 && d[i + 2] < 120) return true;
     return false;
   });
@@ -728,7 +748,7 @@ await group('touch-phone', async () => {
   const t = await open({ viewport: { width: 390, height: 844 }, touch: true });
   const g = t.g;
   const lay = await g.evaluate(() => fz._main.layout());
-  check('phone: touch mode on, portrait, canvas fits the width exactly (358 px, sharp-bilinear x1.4 at DPR 1)', lay.touch && !lay.land && lay.mode === 'port' && lay.w === 358 && lay.sharp, JSON.stringify(lay));
+  check('phone: touch mode on, portrait, canvas fits the width exactly (358 px, x1.4 at DPR 1: k 1.5, smooth resample)', lay.touch && !lay.land && lay.mode === 'port' && lay.w === 358 && !lay.sharp && lay.k === 1.5 && !lay.snapped, JSON.stringify(lay));
   const disp = await g.evaluate(() => getComputedStyle(document.getElementById('touch')).display);
   check('touch controls visible on (pointer: coarse)', disp === 'flex', disp);
   check('legend hidden on touch', await g.evaluate(() => getComputedStyle(document.getElementById('legend')).display === 'none'));
@@ -881,7 +901,7 @@ await group('touch-layouts', async () => {
 // ---------------------------------------------------------------------------------------------------
 await group('theme', async () => {
   const bg = (t) => t.page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-  const DARK = 'rgb(11, 10, 20)', LIGHT = 'rgb(233, 238, 246)';
+  const DARK = 'rgb(5, 7, 15)', LIGHT = 'rgb(233, 238, 246)';   // the abyss void (#05070f) / a pale page around the dark canvas
   const l = await open({ colorScheme: 'light' });
   check('light scheme: light page background', (await bg(l)) === LIGHT, await bg(l));
   await l.page.evaluate(() => document.documentElement.setAttribute('data-theme', 'dark'));
@@ -1021,7 +1041,7 @@ await group('u3-audio-recovery', async () => {
   await t.press('ArrowDown');
   check('...and stops once it runs', (await g.evaluate(() => fz.AUDIO._log.filter((e) => e[0] === 'init').length)) === inits2);
   // dead audio for a while -> blinking hint at the bottom of the title
-  const hintPix = () => g.evaluate(() => { const d = document.getElementById('screen').getContext('2d').getImageData(50, 211, 156, 10).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 170 && d[i + 2] < 140) n++; return n; });
+  const hintPix = () => g.evaluate(() => { const cv = document.getElementById('screen'), m = cv.width / 256; const d = cv.getContext('2d').getImageData(Math.round(50 * m), Math.round(211 * m), Math.round(156 * m), Math.round(10 * m)).data; let n = 0; for (let i = 0; i < d.length; i += 4) if (d[i] > 200 && d[i + 1] > 170 && d[i + 2] < 140) n++; return n; });
   const before = await hintPix();
   await g.evaluate(() => { fz.AUDIO.ready = () => false; });
   await wait(1200);
@@ -1184,13 +1204,13 @@ await group('u2-u8-u16-touch-layouts', async () => {
   // U8: crisp at DPR 3 (390 wide -> x1.333 = 4 whole device pixels), big canvas at the top, controls directly below
   const d = await lay(390, 844, { deviceScaleFactor: 3 });
   const dm = await d.t.page.evaluate(() => { const rc = (s) => { const b = document.querySelector(s).getBoundingClientRect(); return { y: b.y, b: b.bottom }; }; return { c: rc('#screen'), pills: rc('[data-k="pause"]') }; });
-  check('390x844@3: whole device pixels (x1.333, pixelated), no fractional smear', d.L.sharp === false && Math.abs(d.L.scale - 4 / 3) < 0.001 && d.L.dpr === 3, JSON.stringify(d.L));
+  check('390x844@3: crisp (x1.333 = k 4: 1 backing px per device px), no fractional smear', d.L.sharp === false && d.L.k === 4 && d.L.snapped && Math.abs(d.L.scale - 4 / 3) < 0.001 && d.L.dpr === 3, JSON.stringify(d.L));
   // K2: the controls rest at the bottom of the padded viewport (8 px page padding), the picture is centred in the space above them
   const dk = await d.t.page.evaluate(() => { const b = document.getElementById('screen').getBoundingClientRect(), t = document.getElementById('touch').getBoundingClientRect(); return { cy: b.y, cb: b.bottom, ty: t.y, tb: t.bottom, vh: innerHeight }; });
   check('portrait (K2): controls anchored to the bottom (no empty band below them), picture centred in the space above', Math.abs(dk.tb - (dk.vh - 8)) < 1.5 && Math.abs((dk.cy - 8) - (dk.ty - dk.cb)) < 1.5 && dk.cy > 8, JSON.stringify(dk));
   await d.t.close();
   const e = await lay(412, 915, { deviceScaleFactor: 2.625 });
-  check('412x915@2.625: sharp-bilinear with an integer-multiple backing store', e.L.sharp && e.L.m >= 2 && (await e.t.page.evaluate(() => document.getElementById('screen').width % 256 === 0 && getComputedStyle(document.getElementById('screen')).imageRendering === 'auto')), JSON.stringify(e.L));
+  check('412x915@2.625: k on a 0.25 step, backing store 256k x 224k, css width within 8 % of the free width, image-rendering auto', e.L.k >= 2 && Math.abs(e.L.k * 4 - Math.round(e.L.k * 4)) < 1e-9 && e.L.w >= 0.92 * 380 && e.L.w <= 380.01 && (await e.t.page.evaluate(() => { const c = document.getElementById('screen'); return c.width === 256 * fz._main.k() && getComputedStyle(c).imageRendering === 'auto'; })), JSON.stringify(e.L));
   await e.t.close();
   // U16: root padding (Artifact skeleton / safe areas) is respected, the bottom inset counted once
   const f = await open({ viewport: { width: 844, height: 390 }, touch: true });
